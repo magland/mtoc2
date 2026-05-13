@@ -1,6 +1,6 @@
 /**
  * Single entry point for translating numbl source into C. Used by both
- * the CLI (`src/cli/index.ts`) and the web IDE
+ * the CLI (`src/cli.ts`) and the web IDE
  * (`src/components/IDEWorkspace.tsx`).
  *
  * MVP scope is single-file: the named active file is parsed, lowered,

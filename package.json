@@ -9,8 +9,8 @@
     "node": ">=18"
   },
   "scripts": {
-    "translate": "tsx src/cli/index.ts translate",
-    "run": "tsx src/cli/index.ts run",
+    "translate": "tsx src/cli.ts translate",
+    "run": "tsx src/cli.ts run",
     "test": "vitest run",
     "test:scripts": "tsx scripts/run_test_scripts.ts",
     "typecheck": "tsc",

@@ -21,7 +21,7 @@ const execFileAsync = promisify(execFile);
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(here, "..");
-const cliPath = join(repoRoot, "src", "cli", "index.ts");
+const cliPath = join(repoRoot, "src", "cli.ts");
 const numblCliPath = resolve(repoRoot, "..", "numbl", "src", "cli.ts");
 const scriptsDir = join(repoRoot, "test_scripts");
 

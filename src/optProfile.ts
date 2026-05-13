@@ -5,7 +5,7 @@
  *   - `fastMath` (`-ffast-math` on the cc line)
  *   - `threads` (OpenMP parallel-for emission + `-fopenmp` link)
  *
- * Shared by the CLI ([cli/index.ts](./cli/index.ts)) and the web IDE
+ * Shared by the CLI ([cli.ts](./cli.ts)) and the web IDE
  * ([components/IDEWorkspace.tsx](./components/IDEWorkspace.tsx)) so a
  * profile name resolves to the same trio everywhere.
  *

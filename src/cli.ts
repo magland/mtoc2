@@ -10,14 +10,14 @@ import { tmpdir } from "node:os";
 import { join, basename } from "node:path";
 import { spawnSync } from "node:child_process";
 
-import { parseMFile } from "../parser/index.js";
-import { Lowerer } from "../lowering/lower.js";
-import { emitProgram } from "../codegen/emit.js";
+import { parseMFile } from "./parser/index.js";
+import { Lowerer } from "./lowering/lower.js";
+import { emitProgram } from "./codegen/emit.js";
 import {
   UnsupportedConstruct,
   TypeError,
   formatError,
-} from "../lowering/errors.js";
+} from "./lowering/errors.js";
 
 function usage(): never {
   console.error("usage: mtoc2 run <script.m>");

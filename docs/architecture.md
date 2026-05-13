@@ -18,7 +18,7 @@ numbl source (.m)
        │              walks the IR, activates runtime snippets, produces
        │              a single C source string
        ▼
-   compile + run ─── src/cli/index.ts shells out to `cc` and execs
+   compile + run ─── src/cli.ts shells out to `cc` and execs
                      (or: WASM-in-browser via emcc + Web Worker)
 ```
 
@@ -145,7 +145,7 @@ access at runtime.
 
 ## Stage 4: compile + run
 
-The CLI (`src/cli/index.ts`) writes the emitted C to a temp file,
+The CLI (`src/cli.ts`) writes the emitted C to a temp file,
 invokes `cc -lm`, and execs the resulting binary, forwarding stdout.
 The cross-runner uses this path.
 
