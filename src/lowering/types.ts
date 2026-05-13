@@ -74,13 +74,16 @@ export const DIM_ONE: DimInfo = { kind: "one" };
 // ── Exact value (for scalars; arrays later, capped) ─────────────────────
 
 /** Cap for how big an "exact array" we'll propagate through the type
- *  system. Anything larger drops to non-exact. Unused at MVP.
- */
+ *  system. Anything larger drops to non-exact. */
 export const EXACT_ARRAY_MAX_ELEMENTS = 256;
 
-/** Exact-value variants. MVP uses only `number`.
- *  Future: `{re,im}` for scalar complex, then array-shaped variants. */
-export type NumericExact = number | { re: number; im: number };
+/** Exact-value variants.
+ *  - `number`: scalar real.
+ *  - `{re,im}`: scalar complex (reserved, not yet wired through).
+ *  - `Float64Array`: dense real array, column-major (matches numbl's
+ *    `RuntimeTensor.data`). Shape is carried by `dims` on `NumericType`.
+ *  Complex-array variant comes later. */
+export type NumericExact = number | { re: number; im: number } | Float64Array;
 
 // ── Numeric scalar/tensor type ──────────────────────────────────────────
 
@@ -90,8 +93,14 @@ export interface NumericType {
   kind: "Numeric";
   elem: NumericElem;
   isComplex: boolean;
-  /** One DimInfo per axis. Length 2 for MVP (everything is [1×1] scalar). */
+  /** Abstract per-axis lattice: one / notOne / unknown. Always present.
+   *  Length 2 for scalars (`[{one},{one}]`); same length as `shape`
+   *  when `shape` is set. */
   dims: DimInfo[];
+  /** Statically-known integer shape, when available (always set for
+   *  exact tensors; usually set when `exact` is set on a scalar too).
+   *  `shape[i] === 1` ↔ `dims[i].kind === "one"`. */
+  shape?: number[];
   sign: Sign;
   exact?: NumericExact;
 }
@@ -118,6 +127,7 @@ export function scalarDouble(
     elem: "double",
     isComplex: false,
     dims: [DIM_ONE, DIM_ONE],
+    shape: [1, 1],
     sign,
   };
   if (exact !== undefined) t.exact = exact;
@@ -130,9 +140,42 @@ export function scalarLogical(exact?: boolean): NumericType {
     elem: "logical",
     isComplex: false,
     dims: [DIM_ONE, DIM_ONE],
+    shape: [1, 1],
     sign: exact === undefined ? "nonneg" : exact ? "positive" : "zero",
   };
   if (exact !== undefined) t.exact = exact ? 1 : 0;
+  return t;
+}
+
+/** Real-double tensor with statically-known shape. `dims` is derived
+ *  from `shape` (axis of length 1 → `{kind:"one"}`, else
+ *  `{kind:"notOne"}`). When `exact` is provided, its length must equal
+ *  the shape's product; the layout is column-major (matching numbl's
+ *  `RuntimeTensor.data`). */
+export function tensorDouble(
+  shape: number[],
+  exact?: Float64Array
+): NumericType {
+  const dims: DimInfo[] = shape.map(s =>
+    s === 1 ? DIM_ONE : { kind: "notOne" }
+  );
+  const t: NumericType = {
+    kind: "Numeric",
+    elem: "double",
+    isComplex: false,
+    dims,
+    shape: shape.slice(),
+    sign: "unknown",
+  };
+  if (exact !== undefined) {
+    const total = shape.reduce((a, b) => a * b, 1);
+    if (exact.length !== total) {
+      throw new Error(
+        `tensorDouble: shape [${shape.join(",")}] requires ${total} elements, got ${exact.length}`
+      );
+    }
+    t.exact = exact;
+  }
   return t;
 }
 
@@ -182,6 +225,17 @@ export function numericExactsEqual(
   if (typeof a === "number" && typeof b === "number") {
     return Object.is(a, b);
   }
+  const aIsArr = a instanceof Float64Array;
+  const bIsArr = b instanceof Float64Array;
+  if (aIsArr && bIsArr) {
+    if (a.length !== b.length) return false;
+    for (let i = 0; i < a.length; i++) {
+      if (!Object.is(a[i], b[i])) return false;
+    }
+    return true;
+  }
+  if (aIsArr || bIsArr) return false;
+  // Both must be {re, im}.
   if (typeof a === "object" && typeof b === "object") {
     return Object.is(a.re, b.re) && Object.is(a.im, b.im);
   }
@@ -233,6 +287,16 @@ export function unify(a: Type, b: Type): Type {
     if (a.dims.length !== b.dims.length) return UNKNOWN;
     const dims = a.dims.map((d, i) => unifyDim(d, b.dims[i]));
     const sign = unifySign(a.sign, b.sign);
+    // Shape survives only when both sides agree exactly; otherwise drop.
+    let shape: number[] | undefined;
+    if (
+      a.shape !== undefined &&
+      b.shape !== undefined &&
+      a.shape.length === b.shape.length &&
+      a.shape.every((s, i) => s === b.shape![i])
+    ) {
+      shape = a.shape.slice();
+    }
     const out: NumericType = {
       kind: "Numeric",
       elem: a.elem,
@@ -240,7 +304,10 @@ export function unify(a: Type, b: Type): Type {
       dims,
       sign,
     };
-    if (numericExactsEqual(a.exact, b.exact) && isAllOne(dims)) {
+    if (shape !== undefined) out.shape = shape;
+    // Exact survives when bit-identical AND shape matched (so tensor
+    // shapes can't unify if the data layout differs).
+    if (numericExactsEqual(a.exact, b.exact) && shape !== undefined) {
       out.exact = a.exact;
     }
     return out;
@@ -259,10 +326,6 @@ function unifyDim(a: DimInfo, b: DimInfo): DimInfo {
   return { kind: "unknown" };
 }
 
-function isAllOne(dims: DimInfo[]): boolean {
-  return dims.every(d => d.kind === "one");
-}
-
 // ── Pretty-print (for diagnostics) ──────────────────────────────────────
 
 export function typeToString(t: Type): string {
@@ -274,15 +337,31 @@ export function typeToString(t: Type): string {
     case "Numeric": {
       let s: string = t.elem;
       if (t.isComplex) s = `complex(${s})`;
-      const dimsStr = t.dims
-        .map(d => (d.kind === "one" ? "1" : d.kind === "notOne" ? ">1" : "?"))
-        .join("×");
+      const dimsStr =
+        t.shape !== undefined
+          ? t.shape.join("×")
+          : t.dims
+              .map(d =>
+                d.kind === "one" ? "1" : d.kind === "notOne" ? ">1" : "?"
+              )
+              .join("×");
       s += `[${dimsStr}]`;
       if (t.sign !== "unknown") s += `:${t.sign}`;
-      if (t.exact !== undefined) s += `=${JSON.stringify(t.exact)}`;
+      if (t.exact !== undefined) s += `=${formatExactForType(t.exact)}`;
       return s;
     }
   }
+}
+
+function formatExactForType(e: NumericExact): string {
+  if (typeof e === "number") return JSON.stringify(e);
+  if (e instanceof Float64Array) {
+    const cap = 8;
+    const preview = Array.from(e.slice(0, cap)).map(v => v.toString());
+    if (e.length > cap) preview.push("…");
+    return `[${preview.join(", ")}]`;
+  }
+  return `(${e.re}+${e.im}i)`;
 }
 
 // ── Canonicalize + hash (for function specialization keys) ──────────────
@@ -307,7 +386,14 @@ function canon(t: Type): unknown {
         d: t.dims.map(d => d.kind),
         s: t.sign,
       };
-      if (t.exact !== undefined) out.x = t.exact;
+      if (t.shape !== undefined) out.sh = t.shape;
+      if (t.exact !== undefined) {
+        if (t.exact instanceof Float64Array) {
+          out.x = Array.from(t.exact);
+        } else {
+          out.x = t.exact;
+        }
+      }
       return out;
     }
   }

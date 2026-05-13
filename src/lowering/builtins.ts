@@ -26,8 +26,11 @@ import {
   signFromNumber,
   flipSign,
   isScalarRealDouble,
+  isScalarRealNumeric,
   isNumeric,
+  isScalar,
 } from "./types.js";
+import { formatNumber, formatTensor2D } from "./formatNumber.js";
 
 export interface Builtin {
   /** Source-level name. */
@@ -216,16 +219,173 @@ registerBuiltin({
   name: "disp",
   arity: 1,
   transfer(argTypes, span) {
-    requireScalarRealDouble(argTypes[0], `'disp' arg`, span);
-    // disp returns void in MATLAB; we model this as Unknown which the
-    // ExprStmt path discards.
-    return { kind: "Unknown" };
+    const t = argTypes[0];
+    if (isScalarRealNumeric(t)) {
+      // Scalar real (double or logical) — runtime call path.
+      return { kind: "Unknown" };
+    }
+    if (
+      isNumeric(t) &&
+      !t.isComplex &&
+      (t.elem === "double" || t.elem === "logical") &&
+      t.exact instanceof Float64Array &&
+      t.shape !== undefined
+    ) {
+      // Exact tensor — slope-1 path, compile-time format.
+      return { kind: "Unknown" };
+    }
+    throw new TypeError(
+      `'disp' arg must be a scalar real or an exact real tensor (slope-1 scope; got ${t.kind})`,
+      span
+    );
   },
-  codegenC(argsC) {
+  codegenC(argsC, argTypes) {
+    const t = argTypes[0];
+    if (
+      isNumeric(t) &&
+      t.exact instanceof Float64Array &&
+      t.shape !== undefined
+    ) {
+      // Compile-time-format the tensor; emit fputs of the literal.
+      // Numbl's specialBuiltins.disp suppresses empty tensors entirely.
+      const total = t.shape.reduce((a, b) => a * b, 1);
+      if (total === 0) {
+        return `((void)0)`;
+      }
+      // 1×1 tensor displays as a scalar.
+      if (total === 1) {
+        const s = formatNumber(t.exact[0]) + "\n";
+        return `fputs(${cStringLiteral(s)}, stdout)`;
+      }
+      if (t.shape.length !== 2) {
+        throw new TypeError(
+          `'disp' on a ${t.shape.length}-D tensor not yet supported (slope-1: 2-D only)`,
+          { file: "<unknown>", start: 0, end: 0 }
+        );
+      }
+      const [rows, cols] = t.shape;
+      const body = formatTensor2D(t.exact, rows, cols);
+      return `fputs(${cStringLiteral(body + "\n")}, stdout)`;
+    }
+    // Scalar runtime path.
     return `mtoc2_disp_double(${argsC[0]})`;
   },
   runtimeDeps: ["mtoc2_disp_double"],
 });
+
+// ── length / numel / sum (compile-time fold for exact args) ─────────────
+
+registerBuiltin({
+  name: "length",
+  arity: 1,
+  transfer(argTypes, span) {
+    const t = argTypes[0];
+    if (!isNumeric(t)) {
+      throw new TypeError(`'length' arg must be numeric (got ${t.kind})`, span);
+    }
+    if (t.shape === undefined) {
+      throw new UnsupportedConstruct(
+        `'length' on a tensor of unknown shape not yet supported`,
+        span
+      );
+    }
+    // MATLAB's `length`: max of the dim sizes, or 0 if any axis is 0.
+    let v = 0;
+    if (t.shape.some(s => s === 0)) v = 0;
+    else v = t.shape.reduce((a, b) => Math.max(a, b), 0);
+    return scalarDouble(signFromNumber(v), v);
+  },
+  codegenC() {
+    // Always compile-time folded (transfer returns exact for any input
+    // type with a known shape). codegenC should not be reached.
+    throw new Error("internal: length should have folded at lowering");
+  },
+});
+
+registerBuiltin({
+  name: "numel",
+  arity: 1,
+  transfer(argTypes, span) {
+    const t = argTypes[0];
+    if (!isNumeric(t)) {
+      throw new TypeError(`'numel' arg must be numeric (got ${t.kind})`, span);
+    }
+    if (t.shape === undefined) {
+      throw new UnsupportedConstruct(
+        `'numel' on a tensor of unknown shape not yet supported`,
+        span
+      );
+    }
+    const v = t.shape.reduce((a, b) => a * b, 1);
+    return scalarDouble(signFromNumber(v), v);
+  },
+  codegenC() {
+    throw new Error("internal: numel should have folded at lowering");
+  },
+});
+
+registerBuiltin({
+  name: "sum",
+  arity: 1,
+  transfer(argTypes, span) {
+    const t = argTypes[0];
+    if (!isNumeric(t) || t.isComplex) {
+      throw new TypeError(
+        `'sum' arg must be a real numeric (slope-1; got ${t.kind})`,
+        span
+      );
+    }
+    // Scalar input: sum is the identity.
+    if (isScalar(t)) {
+      if (typeof t.exact === "number") {
+        return scalarDouble(signFromNumber(t.exact), t.exact);
+      }
+      return scalarDouble(t.sign);
+    }
+    // Tensor input: fold over the exact array when present. (MATLAB's
+    // `sum` of a column vector or 1-D row is the total; of a matrix it
+    // sums each column, returning a row. Slope 1 only folds the vector
+    // case — for matrices we leave it unsupported for now.)
+    if (!(t.exact instanceof Float64Array) || t.shape === undefined) {
+      throw new UnsupportedConstruct(
+        `'sum' on a tensor of unknown values not yet supported`,
+        span
+      );
+    }
+    const isVector =
+      t.shape.length === 2 && (t.shape[0] === 1 || t.shape[1] === 1);
+    if (!isVector) {
+      throw new UnsupportedConstruct(
+        `'sum' on a non-vector tensor not yet supported (slope-1 limitation)`,
+        span
+      );
+    }
+    let acc = 0;
+    for (let i = 0; i < t.exact.length; i++) acc += t.exact[i];
+    return scalarDouble(signFromNumber(acc), acc);
+  },
+  codegenC() {
+    throw new Error("internal: sum should have folded at lowering");
+  },
+});
+
+/** Escape a JS string into a C string literal (double-quoted). */
+function cStringLiteral(s: string): string {
+  let out = '"';
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    if (c === 0x22 /* " */) out += '\\"';
+    else if (c === 0x5c /* \ */) out += "\\\\";
+    else if (c === 0x0a /* \n */) out += "\\n";
+    else if (c === 0x0d /* \r */) out += "\\r";
+    else if (c === 0x09 /* \t */) out += "\\t";
+    else if (c < 0x20 || c === 0x7f)
+      out += `\\x${c.toString(16).padStart(2, "0")}`;
+    else out += s[i];
+  }
+  out += '"';
+  return out;
+}
 
 // ── Operator-to-builtin map ─────────────────────────────────────────────
 

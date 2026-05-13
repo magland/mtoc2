@@ -44,8 +44,11 @@ that takes the AST and produces typed IR.
 The Type lattice is written from scratch for mtoc2 — see
 [type_system.md](type_system.md) for the full story. The short version:
 
-- `NumericType { elem, isComplex, dims, sign, exact? }` covers scalars
-  (and eventually arrays, capped by `EXACT_ARRAY_MAX_ELEMENTS`).
+- `NumericType { elem, isComplex, dims, shape?, sign, exact? }` covers
+  scalars and exact tensors. `shape` is set when the integer shape is
+  known statically (always for exact tensors); `exact` is `number` for
+  scalar real, or `Float64Array` for tensors (column-major, capped by
+  `EXACT_ARRAY_MAX_ELEMENTS`).
 - `StringType { exact? }`.
 - `UnknownType` for joins that can't be reconciled and for `void` returns.
 - `canonicalizeType` + FNV-1a hash drive function specialization keys.
@@ -54,11 +57,20 @@ The Type lattice is written from scratch for mtoc2 — see
 
 ### IR (`ir.ts`)
 
-A small typed tree: `NumLit`, `Var`, `Binary`, `Unary`, `Call` for
-expressions; `ExprStmt`, `Assign`, `If`, `While`, `For`,
+A small typed tree: `NumLit`, `TensorLit`, `Var`, `Binary`, `Unary`,
+`Call` for expressions; `ExprStmt`, `Assign`, `If`, `While`, `For`,
 `ReturnFromFunction`, `Break`, `Continue` for statements. `IRFunc`
 captures a single specialization (params + types + body + output
 type). `IRProgram` is top-level statements + a map of specializations.
+
+`TensorLit` is a compile-time-only construct: it carries the exact
+flat data + shape but never materializes as a runtime C value. The
+emit-time placeholder is a `0.0` with a comment; the only IR sites
+that pass a `TensorLit` to codegen are tensor-aware builtins (e.g.
+`disp`), which read from `argTypes[i].exact` and ignore `argsC[i]`.
+When a builtin's `transfer` folds a tensor argument to a scalar
+result (e.g. `sum`, `length`, `numel`), the `TensorLit` is discarded
+at lowering time and a `NumLit` takes its place.
 
 ### Builtins (`builtins.ts`)
 
@@ -74,9 +86,19 @@ Each builtin is a fused (transfer + codegenC) pair:
 - **runtimeDeps**: optional list of snippet names this builtin's C
   output calls into. The emitter activates them on each codegen site.
 
-Today's MVP builtins: `plus`, `minus`, `times`, `rdivide`, `uminus`,
-`eq`, `ne`, `lt`, `le`, `gt`, `ge`, `disp`. Operator-to-builtin maps
-live alongside the registry.
+Today's builtins:
+
+- Scalar arithmetic + unary: `plus`, `minus`, `times`, `rdivide`,
+  `uminus`.
+- Comparisons (return scalar logical): `eq`, `ne`, `lt`, `le`, `gt`,
+  `ge`.
+- I/O: `disp` (scalar real via `mtoc2_disp_double`; exact-tensor path
+  compile-time-formats the body and emits `fputs(...)`).
+- Tensor introspection / reduction: `length`, `numel`, `sum` — all
+  pure compile-time folds; their `codegenC` throws "internal: should
+  have folded at lowering" because no runtime call is emitted.
+
+Operator-to-builtin maps live alongside the registry.
 
 ### Lowerer (`lower.ts`)
 

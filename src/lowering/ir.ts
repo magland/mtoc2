@@ -20,6 +20,23 @@ export interface NumLit {
   span: Span;
 }
 
+/** Compile-time-known tensor literal. Carries the column-major flat
+ *  data + shape. Slope-1 model: these never materialize as runtime C
+ *  values; tensor-aware builtins (disp, sum, length, ...) read the
+ *  data from `ty.exact` at codegen time and emit the result directly.
+ *  When emitExpr walks past a TensorLit (e.g. as a Call arg whose
+ *  builtin handles the tensor case via argTypes), it emits a harmless
+ *  placeholder. */
+export interface TensorLit {
+  kind: "TensorLit";
+  /** Column-major flat data, same layout as numbl's RuntimeTensor.data. */
+  data: Float64Array;
+  /** Statically-known integer shape (length matches ty.dims). */
+  shape: number[];
+  ty: Type;
+  span: Span;
+}
+
 export interface Var {
   kind: "Var";
   /** Source name (for diagnostics). */
@@ -61,7 +78,7 @@ export interface Call {
   span: Span;
 }
 
-export type IRExpr = NumLit | Var | Binary | Unary | Call;
+export type IRExpr = NumLit | TensorLit | Var | Binary | Unary | Call;
 
 // ── Statements ──────────────────────────────────────────────────────────
 

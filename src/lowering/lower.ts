@@ -20,6 +20,7 @@ import {
   type Type,
   type NumericType,
   scalarDouble,
+  tensorDouble,
   signFromNumber,
   isScalarRealDouble,
   isScalarRealNumeric,
@@ -27,6 +28,7 @@ import {
   unify,
   stripExactFromEnv,
   specializationKey,
+  EXACT_ARRAY_MAX_ELEMENTS,
 } from "./types.js";
 import { type IRExpr, type IRStmt, type IRFunc, type IRProgram } from "./ir.js";
 import { getBuiltin, binaryOpBuiltin, unaryOpBuiltin } from "./builtins.js";
@@ -350,6 +352,8 @@ export class Lowerer {
         return this.lowerUnary(e);
       case "FuncCall":
         return this.lowerFuncCall(e);
+      case "Tensor":
+        return this.lowerTensorLit(e);
       default:
         throw new UnsupportedConstruct(
           `expression type '${e.type}' not supported`,
@@ -366,24 +370,91 @@ export class Lowerer {
         e.span
       );
     }
-    // Substitute Var → literal when exact is set and scalar-real.
-    if (
-      isNumeric(entry.ty) &&
-      typeof entry.ty.exact === "number" &&
-      isScalarRealDouble(entry.ty)
-    ) {
-      return {
-        kind: "NumLit",
-        value: entry.ty.exact,
-        ty: entry.ty,
-        span: e.span,
-      };
+    // Substitute Var → literal when exact is set.
+    if (isNumeric(entry.ty) && entry.ty.exact !== undefined) {
+      if (typeof entry.ty.exact === "number" && isScalarRealNumeric(entry.ty)) {
+        return {
+          kind: "NumLit",
+          value: entry.ty.exact,
+          ty: entry.ty,
+          span: e.span,
+        };
+      }
+      if (entry.ty.exact instanceof Float64Array && entry.ty.shape) {
+        return {
+          kind: "TensorLit",
+          data: entry.ty.exact,
+          shape: entry.ty.shape.slice(),
+          ty: entry.ty,
+          span: e.span,
+        };
+      }
     }
     return {
       kind: "Var",
       name: e.name,
       cName: entry.cName,
       ty: entry.ty,
+      span: e.span,
+    };
+  }
+
+  /** Lower an AST `Tensor` node ([1 2; 3 4]) into a TensorLit IR node.
+   *  Slope 1: every element must lower to an exact scalar real; the
+   *  total number of elements must fit under EXACT_ARRAY_MAX_ELEMENTS.
+   *  Layout is column-major to match numbl's RuntimeTensor.data. */
+  private lowerTensorLit(e: Extract<Expr, { type: "Tensor" }>): IRExpr {
+    if (e.rows.length === 0) {
+      // Empty `[]`. Numbl uses an empty 0×0 tensor — we mirror.
+      return {
+        kind: "TensorLit",
+        data: new Float64Array(0),
+        shape: [0, 0],
+        ty: tensorDouble([0, 0], new Float64Array(0)),
+        span: e.span,
+      };
+    }
+    const rows = e.rows.length;
+    const cols0 = e.rows[0].length;
+    for (const row of e.rows) {
+      if (row.length !== cols0) {
+        throw new UnsupportedConstruct(
+          `tensor rows must have the same number of columns`,
+          e.span
+        );
+      }
+    }
+    const cols = cols0;
+    const total = rows * cols;
+    if (total > EXACT_ARRAY_MAX_ELEMENTS) {
+      throw new UnsupportedConstruct(
+        `tensor literal of ${total} elements exceeds the exact-array cap (${EXACT_ARRAY_MAX_ELEMENTS})`,
+        e.span
+      );
+    }
+
+    // Lower each element first; require all to be exact scalar real
+    // doubles (slope-1 restriction).
+    const data = new Float64Array(total);
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < cols; c++) {
+        const lowered = this.lowerExpr(e.rows[r][c]);
+        if (lowered.kind !== "NumLit" || !isScalarRealNumeric(lowered.ty)) {
+          throw new UnsupportedConstruct(
+            `tensor literal element must lower to an exact scalar real (slope-1 restriction)`,
+            e.rows[r][c].span
+          );
+        }
+        // Column-major flat index.
+        data[c * rows + r] = lowered.value;
+      }
+    }
+    const ty = tensorDouble([rows, cols], data);
+    return {
+      kind: "TensorLit",
+      data,
+      shape: [rows, cols],
+      ty,
       span: e.span,
     };
   }

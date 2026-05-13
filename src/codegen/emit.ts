@@ -185,6 +185,15 @@ function emitExpr(e: IRExpr, state: RuntimeState): string {
   switch (e.kind) {
     case "NumLit":
       return formatDouble(e.value);
+    case "TensorLit":
+      // Slope-1: tensor literals never materialize as a runtime C
+      // value. The only IR sites that pass them through to codegen
+      // are tensor-aware builtins (disp), which read the data from
+      // `argTypes[i].exact` and ignore the rendered argsC[i]. We
+      // emit a harmless placeholder so the surrounding C parses;
+      // if some future builtin tries to USE the value as a double,
+      // it gets 0.0 and a comment pointing at the issue.
+      return `0.0 /* tensor [${e.shape.join("x")}] not materialized */`;
     case "Var":
       return e.cName;
     case "Binary": {

@@ -38,18 +38,22 @@ type Type = NumericType | StringType | UnknownType;
   kind: "Numeric";
   elem: "double" | "logical" | "char";
   isComplex: boolean;
-  dims: DimInfo[];     // one DimInfo per axis
+  dims: DimInfo[];     // abstract lattice, one per axis
+  shape?: number[];    // statically-known integer shape (when known)
   sign: Sign;
   exact?: NumericExact;
 }
 ```
 
-- `elem` is the underlying element type. Today's MVP path uses only
-  `double` (and `logical` for comparison results).
+- `elem` is the underlying element type. Today's path uses `double`
+  (and `logical` for comparison results).
 - `isComplex` is a separate axis from `elem` so the lattice stays flat.
 - `dims` is a per-axis lattice — `{kind: "one"}` (scalar along that
   axis), `{kind: "notOne"}` (length ≥ 2, statically known), or
-  `{kind: "unknown"}`. MVP scalars carry `[{one}, {one}]`.
+  `{kind: "unknown"}`. Scalars carry `[{one}, {one}]`.
+- `shape` is the statically-known integer shape when available
+  (always set for exact tensors, and for scalars via the factories).
+  Consistent with `dims`: `shape[i] === 1` ↔ `dims[i].kind === "one"`.
 - `sign` is one of `positive | nonneg | negative | nonpositive | zero
 | nonzero | unknown`. Coarser than exact but useful when exact isn't
   available (e.g. `unifySign("positive", "positive") === "positive"`).
@@ -72,20 +76,21 @@ discards).
 
 ## The exact field
 
-`NumericExact = number | { re: number; im: number }` today. The
-intent is that this grows alongside the dim axes:
-
-```
+```ts
 type NumericExact =
-  | number                            // scalar real
-  | { re: number; im: number }        // scalar complex (future)
-  | Float64Array                      // dense real array (future)
-  | { re: Float64Array; im: Float64Array }   // dense complex array (future)
+  | number // scalar real
+  | { re: number; im: number } // scalar complex (reserved, not yet wired)
+  | Float64Array; // dense real array, column-major
 ```
 
-Arrays will be capped by `EXACT_ARRAY_MAX_ELEMENTS` (256 today) — past
-that, the lowerer drops to `exact: undefined` to keep type keys
-bounded.
+Arrays are capped by `EXACT_ARRAY_MAX_ELEMENTS` (256 today). A tensor
+literal larger than the cap throws `UnsupportedConstruct` at lowering
+time. The cap exists so canonical-type strings (used for function
+specialization keys) stay bounded.
+
+Tensor `exact` storage is **column-major** — same layout as numbl's
+`RuntimeTensor.data`. For shape `[rows, cols]`, the flat index is
+`c * rows + r`.
 
 ### Strict equality
 
@@ -167,8 +172,11 @@ to lean on in those bodies.
 
 ## What's not in the lattice yet
 
-- **Array exactness** is reserved in the design but unimplemented.
-  Will come back online with array support.
+- **Runtime (non-exact) tensors**. Today only exact tensors live in
+  the type system; a tensor whose values aren't known at compile time
+  is rejected. The next big design step is the memory model for
+  runtime tensors — at which point `exact` becomes an optimization
+  fold on top of a general tensor representation.
 - **Logical as a distinct kind** — comparisons return `elem: "logical"`
   today, but in C they're still emitted as `double` (0.0 or 1.0). Once
   the codegen layer cares (e.g. for bit ops), this might split off.

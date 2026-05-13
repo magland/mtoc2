@@ -39,11 +39,17 @@ eventually serve that role.
 ## Scope
 
 mtoc2 is a _static_ translator. Anything outside the supported subset raises
-`UnsupportedConstruct` with a source span. Today's MVP scope is **scalar
-real `double` only** — plus arithmetic, comparisons, `disp`, `if`/`while`/
-`for`, and user functions with type-tuple specialization. Strings, chars,
-complex, arrays, structs, classes, and most builtins are **not** yet
-supported. Expanding that scope is gated by the cross-runner.
+`UnsupportedConstruct` with a source span. Today's scope is **scalar real
+`double` + exact-only real tensors** — plus arithmetic, comparisons,
+`disp`/`length`/`numel`/`sum`, `if`/`while`/`for`, and user functions with
+type-tuple specialization. "Exact-only tensors" means every tensor's value
+is statically known at compile time (≤ 256 elements via
+`EXACT_ARRAY_MAX_ELEMENTS`); the lowerer folds tensor builtins to scalar
+literals and the `disp(tensor)` path emits a pre-formatted `fputs(...)`
+call. **Tensors of unknown values are not yet supported** — that's the next
+big design step (memory model + runtime tensor codegen). Complex, strings,
+chars, structs, classes, and most builtins are also not yet supported.
+Expanding scope is gated by the cross-runner.
 
 ## Docs are part of the change
 
