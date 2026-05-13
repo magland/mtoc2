@@ -55,6 +55,33 @@ wrong C. A script that triggers that error will fail the cross-runner
 on numbl's exit code (since mtoc2 exits non-zero), which is the
 correct signal.
 
+## Forcing the runtime path: `%!numbl:opaque`
+
+Mtoc2's exact-value folding is aggressive — a value mentioned as a
+literal almost always carries `exact` through the lowerer, and the
+runtime codegen never fires. That's a feature in production but a
+problem for tests that need to exercise the runtime path.
+
+The directive `%!numbl:opaque <var> [<var>...]` strips `exact` from
+each named variable. Numbl's parser recognizes the directive but
+treats unknown directives as no-ops, so the cross-runner's numbl-side
+output is unchanged. Mtoc2 then has to emit the runtime code path
+for `var`.
+
+```matlab
+a = [1 2 3];
+%!numbl:opaque a
+disp(a);    % mtoc2 emits mtoc2_disp_tensor(a) instead of compile-time fputs
+```
+
+For exact tensors, the directive synthesizes a TensorBuild Assign so
+the C-side declaration actually materializes. (Without the directive,
+exact-tensor assignments are skipped at emit since the value is
+purely a type-system fact.)
+
+Use sparingly — production code should NOT rely on this. It's purely
+a testing aid.
+
 ## Vitest (unit-level)
 
 Reserved for assertions that aren't ergonomic to express as `.m`

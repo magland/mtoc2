@@ -37,6 +37,22 @@ export interface TensorLit {
   span: Span;
 }
 
+/** Runtime tensor construction. Used when a tensor literal has at
+ *  least one non-exact element — the lowerer can't fold the value
+ *  but the shape is still statically known. Codegen emits
+ *  `mtoc2_tensor_from_row` (1×N) or `mtoc2_tensor_from_matrix`
+ *  (rows×cols) with a C99 compound literal of the per-element
+ *  expressions.
+ *
+ *  `elements` is column-major and length-matches `shape`. */
+export interface TensorBuild {
+  kind: "TensorBuild";
+  elements: IRExpr[];
+  shape: number[];
+  ty: Type;
+  span: Span;
+}
+
 export interface Var {
   kind: "Var";
   /** Source name (for diagnostics). */
@@ -78,7 +94,14 @@ export interface Call {
   span: Span;
 }
 
-export type IRExpr = NumLit | TensorLit | Var | Binary | Unary | Call;
+export type IRExpr =
+  | NumLit
+  | TensorLit
+  | TensorBuild
+  | Var
+  | Binary
+  | Unary
+  | Call;
 
 // ── Statements ──────────────────────────────────────────────────────────
 
@@ -94,9 +117,17 @@ export interface Assign {
   name: string;
   /** Fresh C name allocated for this assignment. */
   cName: string;
-  /** True if the variable is newly introduced (emit `double x = ...;`)
-   *  rather than reassigned (emit `x = ...;`). */
+  /** True if the variable is newly introduced AND will emit a C-side
+   *  declaration (i.e. `double x = ...;` for scalars). For tensors,
+   *  declarations are hoisted to function top by the emitter and
+   *  every Assign uses the assign helper, so this flag is ignored
+   *  for owned types. */
   declare: boolean;
+  /** True iff this Assign produces any C output. False when the RHS
+   *  is purely compile-time (a TensorLit or a value otherwise
+   *  fully-folded), in which case the env's type update is the only
+   *  effect of the statement. */
+  materialize: boolean;
   ty: Type;
   expr: IRExpr;
   span: Span;

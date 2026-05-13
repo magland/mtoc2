@@ -87,6 +87,38 @@ const REGISTRY: ReadonlyMap<string, RuntimeSnippet> = new Map<
 >([
   ["mtoc2_format_double", loadSnippet("format_double.h")],
   ["mtoc2_disp_double", loadSnippet("disp_double.h", ["mtoc2_format_double"])],
+
+  // ── Tensor (real, multi-element) ──────────────────────────────────
+  // Storage shape + alloc + the four "owned value" helpers (copy,
+  // assign, free, plus the `from_row`/`from_matrix` literal builders).
+  // Matches mtoc's runtime — no refcount, no COW; the codegen
+  // invariant is "every tensor RHS is freshly owned, every Var read
+  // wraps in mtoc2_tensor_copy".
+  ["mtoc2_alloc", loadSnippet("alloc.h")],
+  ["mtoc2_tensor_t", loadSnippet("tensor.h")],
+  [
+    "mtoc2_tensor_alloc",
+    loadSnippet("tensor_alloc.h", ["mtoc2_tensor_t", "mtoc2_alloc"]),
+  ],
+  ["mtoc2_tensor_empty", loadSnippet("tensor_empty.h", ["mtoc2_tensor_t"])],
+  [
+    "mtoc2_tensor_copy",
+    loadSnippet("tensor_copy.h", ["mtoc2_tensor_t", "mtoc2_alloc"]),
+  ],
+  ["mtoc2_tensor_assign", loadSnippet("tensor_assign.h", ["mtoc2_tensor_t"])],
+  ["mtoc2_tensor_free", loadSnippet("tensor_free.h", ["mtoc2_tensor_t"])],
+  [
+    "mtoc2_tensor_from_row",
+    loadSnippet("tensor_from_row.h", ["mtoc2_tensor_alloc"]),
+  ],
+  [
+    "mtoc2_tensor_from_matrix",
+    loadSnippet("tensor_from_matrix.h", ["mtoc2_tensor_alloc"]),
+  ],
+  [
+    "mtoc2_disp_tensor",
+    loadSnippet("disp_tensor.h", ["mtoc2_tensor_t", "mtoc2_format_double"]),
+  ],
 ]);
 
 export function getRuntimeSnippet(name: string): RuntimeSnippet {

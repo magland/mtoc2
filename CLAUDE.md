@@ -39,17 +39,21 @@ eventually serve that role.
 ## Scope
 
 mtoc2 is a _static_ translator. Anything outside the supported subset raises
-`UnsupportedConstruct` with a source span. Today's scope is **scalar real
-`double` + exact-only real tensors** — plus arithmetic, comparisons,
-`disp`/`length`/`numel`/`sum`, `if`/`while`/`for`, and user functions with
-type-tuple specialization. "Exact-only tensors" means every tensor's value
-is statically known at compile time (≤ 256 elements via
-`EXACT_ARRAY_MAX_ELEMENTS`); the lowerer folds tensor builtins to scalar
-literals and the `disp(tensor)` path emits a pre-formatted `fputs(...)`
-call. **Tensors of unknown values are not yet supported** — that's the next
-big design step (memory model + runtime tensor codegen). Complex, strings,
-chars, structs, classes, and most builtins are also not yet supported.
-Expanding scope is gated by the cross-runner.
+`UnsupportedConstruct` with a source span. Today's scope:
+
+- **Scalar real `double`** — arithmetic, comparisons, `if`/`while`/`for`,
+  user functions with type-tuple specialization.
+- **Real tensors** — both exact (compile-time fold path) and runtime
+  (mtoc-style "always-copy" model: `mtoc2_tensor_t` struct with
+  `mtoc2_tensor_assign` / `mtoc2_tensor_copy` / `mtoc2_tensor_free`; no
+  refcount, no COW). Builtins: `disp`, `length`, `numel`, `sum`. Tensor
+  construction via literals (`[1 2 3]`, `[1 2; 3 4]`), Var-read copies,
+  pass-by-value to `disp`. Exact-array cap: 256 elements
+  (`EXACT_ARRAY_MAX_ELEMENTS`).
+
+Not yet supported: tensor arithmetic, indexing, runtime-shape constructors
+(`zeros(n)`), complex, strings, chars, structs, classes, most builtins
+beyond the list above. Expanding scope is gated by the cross-runner.
 
 ## Docs are part of the change
 
@@ -89,6 +93,42 @@ Two layers, strict separation:
 
 If a divergence between mtoc2 and numbl is a real numbl bug, file it
 upstream; don't paper over it in mtoc2.
+
+## Owned-value codegen invariant
+
+Tensors (and future owned types: strings, structs, classes) follow mtoc's
+"always-copy, free-at-scope-exit" model:
+
+- Every owned-typed C expression produces a **freshly-owned** value
+  (`mtoc2_tensor_from_row(...)`, `mtoc2_tensor_copy(v)`, op result, or a
+  function return).
+- Every owned local is **pre-declared at function top** via
+  `mtoc2_tensor_empty()` (NULL-pointer state). Every Assign — first or
+  subsequent — uses `mtoc2_tensor_assign(&v, rhs)`. First-call free of
+  NULL is a no-op; uniform path.
+- A tensor `Var` read inside an **Assign RHS** wraps in
+  `mtoc2_tensor_copy(v)` so the receiver gets a freshly-owned value the
+  assign helper can consume. A tensor `Var` read in a non-owning context
+  (e.g. `disp` arg) passes the struct bare — no buffer copy.
+- Scope exit / before every `ReturnFromFunction` emits
+  `mtoc2_tensor_free(&v)` for each owned local.
+- An exact-allocating tensor arg of a top-level Call (e.g.
+  `disp([x 1 2])`) is **hoisted** at lowering time to a temp Assign
+  before the call, so its lifetime is tied to a named local the free
+  walk releases.
+
+## Testing-only directive
+
+`%!numbl:opaque <var> [<var>...]` strips `exact` from each named
+variable in the current env, forcing the runtime codegen path on values
+mtoc2 would otherwise fold at compile time. Numbl's parser recognizes
+the directive but treats unknown directives as no-ops, so cross-runner
+output is unaffected. Use sparingly — only when a test must exercise
+the runtime path.
+
+For exact tensors, the directive synthesizes a TensorBuild Assign so
+the C-side declaration materializes (otherwise the variable would only
+live in the type env, with no corresponding C local).
 
 ## Architectural rules
 

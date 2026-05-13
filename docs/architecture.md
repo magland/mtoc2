@@ -57,20 +57,36 @@ The Type lattice is written from scratch for mtoc2 — see
 
 ### IR (`ir.ts`)
 
-A small typed tree: `NumLit`, `TensorLit`, `Var`, `Binary`, `Unary`,
-`Call` for expressions; `ExprStmt`, `Assign`, `If`, `While`, `For`,
-`ReturnFromFunction`, `Break`, `Continue` for statements. `IRFunc`
-captures a single specialization (params + types + body + output
-type). `IRProgram` is top-level statements + a map of specializations.
+A small typed tree: `NumLit`, `TensorLit`, `TensorBuild`, `Var`,
+`Binary`, `Unary`, `Call` for expressions; `ExprStmt`, `Assign`, `If`,
+`While`, `For`, `ReturnFromFunction`, `Break`, `Continue` for
+statements. `IRFunc` captures a single specialization (params, types,
+body, output type). `IRProgram` is top-level statements plus a map of
+specializations.
 
-`TensorLit` is a compile-time-only construct: it carries the exact
-flat data + shape but never materializes as a runtime C value. The
-emit-time placeholder is a `0.0` with a comment; the only IR sites
-that pass a `TensorLit` to codegen are tensor-aware builtins (e.g.
-`disp`), which read from `argTypes[i].exact` and ignore `argsC[i]`.
-When a builtin's `transfer` folds a tensor argument to a scalar
-result (e.g. `sum`, `length`, `numel`), the `TensorLit` is discarded
-at lowering time and a `NumLit` takes its place.
+Two tensor IR nodes, split by exactness:
+
+- **`TensorLit`** — compile-time-only. Carries flat data + shape but
+  never materializes as a runtime C value. The only IR sites that
+  pass a `TensorLit` to codegen are tensor-aware builtins (e.g.
+  `disp`), which read from `argTypes[i].exact` and ignore `argsC[i]`.
+  When a builtin's `transfer` folds a tensor argument to a scalar
+  result (e.g. `sum`/`length`/`numel`), the `TensorLit` is discarded
+  at lowering time and a `NumLit` takes its place.
+
+- **`TensorBuild`** — runtime tensor construction. Used when at least
+  one element of a tensor literal isn't exact-foldable. Shape is
+  still statically known (it comes from the source-level literal's
+  rows × cols). Codegen emits `mtoc2_tensor_from_row` (1×N) or
+  `mtoc2_tensor_from_matrix` (R×C) with a C99 compound-literal
+  `(double[]){...}` of the per-element expressions.
+
+`Assign` carries a `materialize: boolean` flag in addition to
+`declare`. `materialize: false` marks a compile-time-only assignment
+(today: `TensorLit` RHS) that updates the env's type but emits no C.
+`materialize: true` always emits — for owned types via
+`mtoc2_tensor_assign(&v, rhs)`, for scalars via `<cType> v = rhs;`
+(declare) or `v = rhs;` (reassign).
 
 ### Builtins (`builtins.ts`)
 
@@ -92,13 +108,47 @@ Today's builtins:
   `uminus`.
 - Comparisons (return scalar logical): `eq`, `ne`, `lt`, `le`, `gt`,
   `ge`.
-- I/O: `disp` (scalar real via `mtoc2_disp_double`; exact-tensor path
-  compile-time-formats the body and emits `fputs(...)`).
-- Tensor introspection / reduction: `length`, `numel`, `sum` — all
-  pure compile-time folds; their `codegenC` throws "internal: should
-  have folded at lowering" because no runtime call is emitted.
+- I/O: `disp` — three paths picked by argument shape/exactness:
+  scalar real → `mtoc2_disp_double(x)`; exact tensor →
+  compile-time-formatted `fputs("…\n", stdout)`; runtime tensor →
+  `mtoc2_disp_tensor(t)`.
+- Tensor introspection / reduction: `length`, `numel` — fold from
+  `t.shape`, always compile-time. `sum` — folds when input is exact;
+  runtime path deferred until tensor arithmetic lands.
 
 Operator-to-builtin maps live alongside the registry.
+
+## Owned-value codegen
+
+Scalars stay in C automatic storage as `double`. Multi-element
+tensors compile to `mtoc2_tensor_t` (a struct of two heap pointers
+plus an inline shape array). Memory model is mtoc's: always-copy on
+manipulation, free at scope exit. No refcount, no COW.
+
+Concretely the emit pass:
+
+1. Walks the function body to collect names of owned locals — any
+   variable that has at least one Assign with `materialize=true &&
+isOwned(ty)`. `If`/`While`/`For` bodies are walked too, so inner
+   declarations surface to the function-level free list.
+2. Emits a pre-declaration `mtoc2_tensor_t v = mtoc2_tensor_empty();`
+   at function top for each owned local. The empty tensor has NULL
+   buffers; the first `mtoc2_tensor_assign` does a no-op free of NULL
+   and installs the value.
+3. For each owned Assign, emits
+   `mtoc2_tensor_assign(&v, <rhs-expr>);`. The RHS must be a freshly-
+   owned tensor — TensorBuild produces one via the alloc helper;
+   `Var(otherVar)` wraps in `mtoc2_tensor_copy(otherVar)`. Other
+   tensor-producing expressions follow the same invariant.
+4. At end-of-body / before each `mtoc2_return:` label, emits
+   `mtoc2_tensor_free(&v)` for every owned local.
+
+For `disp([x 1 2])` and similar cases where a freshly-allocating
+tensor expression is passed as a builtin/function-call arg, the
+**lowerer hoists** the TensorBuild to a fresh temp Assign before the
+call (`_mtoc2_t1 = [x 1 2]; disp(_mtoc2_t1);`). This ties the
+allocated tensor's lifetime to a named local that the scope-exit
+free walk releases — no leaked temporaries.
 
 ### Lowerer (`lower.ts`)
 

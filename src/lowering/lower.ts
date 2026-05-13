@@ -24,6 +24,7 @@ import {
   signFromNumber,
   isScalarRealDouble,
   isScalarRealNumeric,
+  isMultiElement,
   isNumeric,
   unify,
   stripExactFromEnv,
@@ -48,6 +49,9 @@ export class Lowerer {
    *  function body. Used to decide `declare: true` on Assign. Reset
    *  when entering a function specialization. */
   private declared: Set<string> = new Set();
+  /** Monotonic counter for synthesizing `_mtoc2_t1`, `_mtoc2_t2`, ...
+   *  hoist-temp names. Reset per function specialization. */
+  private tempCounter: number = 0;
 
   lowerProgram(ast: AbstractSyntaxTree): IRProgram {
     // Pre-scan: collect top-level function definitions.
@@ -109,6 +113,8 @@ export class Lowerer {
         return { kind: "Break", span: s.span };
       case "Continue":
         return { kind: "Continue", span: s.span };
+      case "Directive":
+        return this.lowerDirective(s);
       default:
         throw new UnsupportedConstruct(
           `statement type '${s.type}' not supported`,
@@ -117,11 +123,148 @@ export class Lowerer {
     }
   }
 
-  private lowerExprStmt(s: Extract<Stmt, { type: "ExprStmt" }>): IRStmt | null {
+  /** Numbl directives (`%!numbl:<name> <args>`). Numbl interprets a
+   *  small set (e.g. `assert_jit`) and ignores the rest. Mtoc2 reuses
+   *  the same parsed-directive AST node to host translator-side hints
+   *  that numbl silently passes over:
+   *
+   *  - `%!numbl:opaque <var> [<var>...]` — strip `exact` from each
+   *    named variable in the current env. Used in test scripts to
+   *    force the runtime codegen path on values mtoc2 would otherwise
+   *    fold at compile time. Numbl-side this is a no-op directive,
+   *    so cross-runner output is unaffected. */
+  private lowerDirective(
+    s: Extract<Stmt, { type: "Directive" }>
+  ): IRStmt | IRStmt[] | null {
+    if (s.directive === "opaque") {
+      const out: IRStmt[] = [];
+      for (const name of s.args) {
+        const entry = this.env.get(name);
+        if (entry === undefined) {
+          throw new UnsupportedConstruct(
+            `'%!numbl:opaque' references unknown variable '${name}'`,
+            s.span
+          );
+        }
+        // For exact tensors, the value lived purely in the type
+        // env — there's no C-side declaration yet. We synthesize an
+        // Assign that materializes the data as a TensorBuild so
+        // subsequent reads can reference a real C variable. (Scalar
+        // exact assigns are always materialized as `double x = …;`
+        // by the current path, so stripping env is enough there.)
+        if (
+          entry.ty.kind === "Numeric" &&
+          entry.ty.exact instanceof Float64Array &&
+          entry.ty.shape !== undefined
+        ) {
+          const data = entry.ty.exact;
+          const shape = entry.ty.shape;
+          const elements: IRExpr[] = [];
+          for (let i = 0; i < data.length; i++) {
+            elements.push({
+              kind: "NumLit",
+              value: data[i],
+              ty: scalarDouble(signFromNumber(data[i]), data[i]),
+              span: s.span,
+            });
+          }
+          const newTy = tensorDouble(shape);
+          out.push({
+            kind: "Assign",
+            name,
+            cName: entry.cName,
+            declare: false,
+            materialize: true,
+            ty: newTy,
+            expr: {
+              kind: "TensorBuild",
+              elements,
+              shape: shape.slice(),
+              ty: newTy,
+              span: s.span,
+            },
+            span: s.span,
+          });
+          this.env.set(name, { cName: entry.cName, ty: newTy });
+          continue;
+        }
+        if (entry.ty.kind === "Numeric" && entry.ty.exact !== undefined) {
+          const { exact: _e, ...rest } = entry.ty;
+          void _e;
+          this.env.set(name, { cName: entry.cName, ty: rest });
+        } else if (entry.ty.kind === "String" && entry.ty.exact !== undefined) {
+          this.env.set(name, {
+            cName: entry.cName,
+            ty: { kind: "String" },
+          });
+        }
+      }
+      return out.length === 0 ? null : out;
+    }
+    // Unknown directives are silently ignored — keeps mtoc2 forward-
+    // compatible with numbl directives that don't translate (e.g.
+    // `assert_jit`).
+    return null;
+  }
+
+  private lowerExprStmt(
+    s: Extract<Stmt, { type: "ExprStmt" }>
+  ): IRStmt | IRStmt[] | null {
     const expr = this.lowerExpr(s.expr);
     // If the expression is a folded literal with no side effect, drop it.
     if (expr.kind === "NumLit") return null;
+    // Hoist any TensorBuild args inside a top-level Call to a temp
+    // Assign, so the tensor's lifetime is tied to a named local
+    // (which the scope-exit free walk releases). Without this,
+    // `disp([x 1 2])` would leak the freshly-allocated tensor.
+    const hoists: IRStmt[] = [];
+    const hoisted = this.hoistOwnedArgs(expr, hoists);
+    if (hoists.length > 0) {
+      return [...hoists, { kind: "ExprStmt", expr: hoisted, span: s.span }];
+    }
     return { kind: "ExprStmt", expr, span: s.span };
+  }
+
+  /** When an IR Call has any TensorBuild arg, hoist each such arg to
+   *  a fresh temp Assign and replace the arg with a Var of the temp.
+   *  Returns the (possibly rewritten) expr; pushed Assigns go into
+   *  `hoists` for the caller to splice in before the consuming stmt. */
+  private hoistOwnedArgs(e: IRExpr, hoists: IRStmt[]): IRExpr {
+    if (e.kind !== "Call") return e;
+    let changed = false;
+    const newArgs = e.args.map(a => {
+      if (a.kind === "TensorBuild") {
+        const tempName = this.freshTempName();
+        this.declared.add(tempName);
+        this.env.set(tempName, { cName: tempName, ty: a.ty });
+        hoists.push({
+          kind: "Assign",
+          name: tempName,
+          cName: tempName,
+          declare: true,
+          materialize: true,
+          ty: a.ty,
+          expr: a,
+          span: a.span,
+        });
+        changed = true;
+        return {
+          kind: "Var" as const,
+          name: tempName,
+          cName: tempName,
+          ty: a.ty,
+          span: a.span,
+        };
+      }
+      return a;
+    });
+    if (!changed) return e;
+    return { ...e, args: newArgs };
+  }
+
+  private freshTempName(): string {
+    this.tempCounter += 1;
+    return `_mtoc2_t${this.tempCounter}`;
   }
 
   private lowerAssign(s: Extract<Stmt, { type: "Assign" }>): IRStmt {
@@ -131,15 +274,31 @@ export class Lowerer {
 
   private recordAssignment(name: string, expr: IRExpr, span: Span): IRStmt {
     const existing = this.env.get(name);
+    // Type-compat check: don't allow scalar ↔ tensor mid-flight.
+    // Catches reassignments that would invalidate the C-side
+    // declaration's type. Limited check; will need to grow alongside
+    // the type lattice.
+    if (existing) {
+      if (isMultiElement(existing.ty) !== isMultiElement(expr.ty)) {
+        throw new UnsupportedConstruct(
+          `cannot reassign '${name}' across scalar/tensor boundary`,
+          span
+        );
+      }
+    }
     const declare = !this.declared.has(name);
     this.declared.add(name);
     const cName = existing?.cName ?? name;
     this.env.set(name, { cName, ty: expr.ty });
+    // A TensorLit RHS is purely compile-time: env's type update is
+    // the only side effect; emit can drop the statement.
+    const materialize = expr.kind !== "TensorLit";
     return {
       kind: "Assign",
       name,
       cName,
       declare,
+      materialize,
       ty: expr.ty,
       expr,
       span,
@@ -399,9 +558,15 @@ export class Lowerer {
     };
   }
 
-  /** Lower an AST `Tensor` node ([1 2; 3 4]) into a TensorLit IR node.
-   *  Slope 1: every element must lower to an exact scalar real; the
-   *  total number of elements must fit under EXACT_ARRAY_MAX_ELEMENTS.
+  /** Lower an AST `Tensor` node (`[1 2; 3 4]`).
+   *
+   *  Two paths share the rectangular-shape check + element-lowering
+   *  pass; the split is on whether every element folded to an exact
+   *  scalar real:
+   *  - all-exact  → TensorLit (compile-time only, no runtime alloc)
+   *  - any-mixed  → TensorBuild (runtime `mtoc2_tensor_from_row` /
+   *    `mtoc2_tensor_from_matrix`)
+   *
    *  Layout is column-major to match numbl's RuntimeTensor.data. */
   private lowerTensorLit(e: Extract<Expr, { type: "Tensor" }>): IRExpr {
     if (e.rows.length === 0) {
@@ -426,33 +591,50 @@ export class Lowerer {
     }
     const cols = cols0;
     const total = rows * cols;
-    if (total > EXACT_ARRAY_MAX_ELEMENTS) {
-      throw new UnsupportedConstruct(
-        `tensor literal of ${total} elements exceeds the exact-array cap (${EXACT_ARRAY_MAX_ELEMENTS})`,
-        e.span
-      );
-    }
 
-    // Lower each element first; require all to be exact scalar real
-    // doubles (slope-1 restriction).
-    const data = new Float64Array(total);
+    // Lower every element first. Column-major storage: index = c*rows + r.
+    const loweredFlat: IRExpr[] = new Array(total);
+    let allExact = true;
     for (let r = 0; r < rows; r++) {
       for (let c = 0; c < cols; c++) {
         const lowered = this.lowerExpr(e.rows[r][c]);
-        if (lowered.kind !== "NumLit" || !isScalarRealNumeric(lowered.ty)) {
+        if (!isScalarRealNumeric(lowered.ty)) {
           throw new UnsupportedConstruct(
-            `tensor literal element must lower to an exact scalar real (slope-1 restriction)`,
+            `tensor literal element must be scalar real numeric`,
             e.rows[r][c].span
           );
         }
-        // Column-major flat index.
-        data[c * rows + r] = lowered.value;
+        loweredFlat[c * rows + r] = lowered;
+        if (lowered.kind !== "NumLit") allExact = false;
       }
     }
-    const ty = tensorDouble([rows, cols], data);
+
+    if (allExact) {
+      if (total > EXACT_ARRAY_MAX_ELEMENTS) {
+        throw new UnsupportedConstruct(
+          `tensor literal of ${total} exact elements exceeds the cap (${EXACT_ARRAY_MAX_ELEMENTS})`,
+          e.span
+        );
+      }
+      const data = new Float64Array(total);
+      for (let i = 0; i < total; i++) {
+        data[i] = (loweredFlat[i] as Extract<IRExpr, { kind: "NumLit" }>).value;
+      }
+      const ty = tensorDouble([rows, cols], data);
+      return {
+        kind: "TensorLit",
+        data,
+        shape: [rows, cols],
+        ty,
+        span: e.span,
+      };
+    }
+
+    // Runtime path: at least one element is non-exact.
+    const ty = tensorDouble([rows, cols]);
     return {
-      kind: "TensorLit",
-      data,
+      kind: "TensorBuild",
+      elements: loweredFlat,
       shape: [rows, cols],
       ty,
       span: e.span,
@@ -630,8 +812,10 @@ export class Lowerer {
     // Save outer state.
     const savedEnv = this.env;
     const savedDeclared = this.declared;
+    const savedTempCounter = this.tempCounter;
     this.env = new Map();
     this.declared = new Set();
+    this.tempCounter = 0;
 
     // Bind params.
     for (let i = 0; i < decl.params.length; i++) {
@@ -661,6 +845,7 @@ export class Lowerer {
     // Restore outer state.
     this.env = savedEnv;
     this.declared = savedDeclared;
+    this.tempCounter = savedTempCounter;
 
     const out: IRFunc = {
       ...placeholder,

@@ -207,6 +207,21 @@ export function isScalarRealNumeric(t: Type): boolean {
   );
 }
 
+/** True when any axis is statically known to be > 1 (or unknown).
+ *  Drives the scalar/tensor split in codegen: scalars compile to bare
+ *  `double`; multi-element values compile to `mtoc2_tensor_t`. */
+export function isMultiElement(t: Type): boolean {
+  return isNumeric(t) && t.dims.some(d => d.kind !== "one");
+}
+
+/** Owned-heap-value types — i.e. types whose C representation holds a
+ *  heap pointer the codegen must `free` at scope exit. Today this is
+ *  only the multi-element tensor; future kinds (strings, structs,
+ *  class instances, ...) will join. */
+export function isOwned(t: Type): boolean {
+  return isMultiElement(t);
+}
+
 export function signIsNonneg(s: Sign): boolean {
   return s === "positive" || s === "nonneg" || s === "zero";
 }

@@ -5,9 +5,15 @@
  *   3. Function specialization bodies.
  *   4. `main()` containing top-level statements.
  *
- * MVP scope: everything is `double` in C. The IR types are still
- * useful at lowering time (for exact-folding and signed reasoning)
- * but the emitted C uniformly treats values as scalar real doubles.
+ * Scalars compile to bare `double`. Multi-element tensors compile to
+ * `mtoc2_tensor_t` — no refcount, no COW. The codegen invariant
+ * (matching mtoc's): every tensor RHS is freshly owned, every
+ * ownership-transferring use of a Var read wraps in
+ * `mtoc2_tensor_copy(name)`. Pre-declaration of every owned local
+ * via `mtoc2_tensor_empty()` at function top makes the first-vs-
+ * later distinction uniform (the assign helper releases the prior
+ * buffer, which is NULL on first call). Scope-exit emits a
+ * `mtoc2_tensor_free` for every owned local.
  *
  * `includeRuntime` (default true): when false, the activated runtime
  * helpers are omitted from the output (a placeholder comment is shown
@@ -18,6 +24,12 @@
 
 import type { IRExpr, IRStmt, IRFunc, IRProgram } from "../lowering/ir.js";
 import { getBuiltin } from "../lowering/builtins.js";
+import {
+  isMultiElement,
+  isNumeric,
+  isOwned,
+  type Type,
+} from "../lowering/types.js";
 import {
   BASE_HEADERS,
   collectRuntimeHeaders,
@@ -41,11 +53,11 @@ export function emitProgram(prog: IRProgram, opts: EmitOptions = {}): string {
 
   // Forward declarations.
   for (const fn of prog.functions.values()) {
-    userParts.push(`static double ${fn.cName}(${fnParamList(fn)});`);
+    userParts.push(`static ${fnRetType(fn)} ${fn.cName}(${fnParamList(fn)});`);
   }
   if (prog.functions.size > 0) userParts.push("");
 
-  // Function bodies. Activates runtime snippets as it walks.
+  // Function bodies.
   for (const fn of prog.functions.values()) {
     userParts.push(emitFunction(fn, state));
     userParts.push("");
@@ -53,8 +65,20 @@ export function emitProgram(prog: IRProgram, opts: EmitOptions = {}): string {
 
   // Main.
   userParts.push("int main(void) {");
+  const mainOwned = collectOwnedLocals(prog.topLevelStmts);
+  for (const o of mainOwned) {
+    useRuntimeByName(state, "mtoc2_tensor_empty");
+    userParts.push(`  mtoc2_tensor_t ${o} = mtoc2_tensor_empty();`);
+  }
   for (const s of prog.topLevelStmts) {
-    userParts.push(emitStmt(s, "  ", state));
+    const line = emitStmt(s, "  ", state);
+    if (line !== null) userParts.push(line);
+  }
+  const mainHasRet = bodyHasReturn(prog.topLevelStmts);
+  if (mainHasRet) userParts.push(`mtoc2_return:`);
+  for (const o of mainOwned) {
+    useRuntimeByName(state, "mtoc2_tensor_free");
+    userParts.push(`  mtoc2_tensor_free(&${o});`);
   }
   userParts.push("  return 0;");
   userParts.push("}");
@@ -84,24 +108,95 @@ function runtimePlaceholder(state: RuntimeState): string {
   return `/* runtime helpers omitted (${state.active.size}): ${names} */\n`;
 }
 
+function cTypeFor(t: Type): string {
+  if (isMultiElement(t)) return "mtoc2_tensor_t";
+  return "double";
+}
+
+function fnRetType(fn: IRFunc): string {
+  const t = fn.outputTypes[0];
+  if (!t) return "double";
+  return cTypeFor(t);
+}
+
 function fnParamList(fn: IRFunc): string {
   if (fn.params.length === 0) return "void";
-  return fn.cParams.map(p => `double ${p}`).join(", ");
+  return fn.cParams
+    .map((p, i) => `${cTypeFor(fn.paramTypes[i])} ${p}`)
+    .join(", ");
+}
+
+/** Walk the body and collect cNames of locals that need a tensor
+ *  declaration at function top. A name is "owned" if any of its
+ *  Assigns has materialize=true && isOwned(ty). Walks through If /
+ *  While / For bodies — owned locals declared inside a block still
+ *  live in the surrounding function's stack frame (mtoc puts every
+ *  local declaration at function top to keep the free-on-exit walk
+ *  simple). */
+function collectOwnedLocals(stmts: IRStmt[]): string[] {
+  const seen = new Set<string>();
+  const order: string[] = [];
+  const visit = (ss: IRStmt[]): void => {
+    for (const s of ss) {
+      switch (s.kind) {
+        case "Assign":
+          if (s.materialize && isOwned(s.ty) && !seen.has(s.cName)) {
+            seen.add(s.cName);
+            order.push(s.cName);
+          }
+          break;
+        case "If":
+          visit(s.thenBody);
+          visit(s.elseBody);
+          break;
+        case "While":
+          visit(s.body);
+          break;
+        case "For":
+          visit(s.body);
+          break;
+      }
+    }
+  };
+  visit(stmts);
+  return order;
 }
 
 function emitFunction(fn: IRFunc, state: RuntimeState): string {
   const lines: string[] = [];
-  lines.push(`static double ${fn.cName}(${fnParamList(fn)}) {`);
+  const retType = fnRetType(fn);
+  lines.push(`static ${retType} ${fn.cName}(${fnParamList(fn)}) {`);
+  // Pre-declare the scalar/tensor output slot.
   const cOut = fn.cOutputs[0];
+  const outTy = fn.outputTypes[0];
   const paramNames = new Set(fn.cParams);
   if (!paramNames.has(cOut)) {
-    lines.push(`  double ${cOut} = 0.0;`);
+    if (outTy && isOwned(outTy)) {
+      useRuntimeByName(state, "mtoc2_tensor_empty");
+      lines.push(`  mtoc2_tensor_t ${cOut} = mtoc2_tensor_empty();`);
+    } else {
+      lines.push(`  double ${cOut} = 0.0;`);
+    }
+  }
+  // Pre-declare owned locals (excluding the output, which we already
+  // handled above).
+  const owned = collectOwnedLocals(fn.body).filter(n => n !== cOut);
+  for (const o of owned) {
+    useRuntimeByName(state, "mtoc2_tensor_empty");
+    lines.push(`  mtoc2_tensor_t ${o} = mtoc2_tensor_empty();`);
   }
   for (const s of fn.body) {
-    lines.push(emitStmt(s, "  ", state));
+    const line = emitStmt(s, "  ", state);
+    if (line !== null) lines.push(line);
   }
-  if (bodyHasReturn(fn.body)) {
-    lines.push(`mtoc2_return:`);
+  const hasRet = bodyHasReturn(fn.body);
+  if (hasRet) lines.push(`mtoc2_return:`);
+  // Free every owned local (and the output if it's owned but we're
+  // NOT returning it — for now we always return cOut, so skip its
+  // free; the caller takes ownership).
+  for (const o of owned) {
+    useRuntimeByName(state, "mtoc2_tensor_free");
+    lines.push(`  mtoc2_tensor_free(&${o});`);
   }
   lines.push(`  return ${cOut};`);
   lines.push(`}`);
@@ -120,11 +215,21 @@ function bodyHasReturn(body: IRStmt[]): boolean {
   return false;
 }
 
-function emitStmt(s: IRStmt, indent: string, state: RuntimeState): string {
+function emitStmt(
+  s: IRStmt,
+  indent: string,
+  state: RuntimeState
+): string | null {
   switch (s.kind) {
     case "ExprStmt":
       return `${indent}${emitExpr(s.expr, state)};`;
     case "Assign": {
+      if (!s.materialize) return null;
+      if (isOwned(s.ty)) {
+        useRuntimeByName(state, "mtoc2_tensor_assign");
+        const rhs = emitTensorRhs(s.expr, state);
+        return `${indent}mtoc2_tensor_assign(&${s.cName}, ${rhs});`;
+      }
       const rhs = emitExpr(s.expr, state);
       if (s.declare) {
         return `${indent}double ${s.cName} = ${rhs};`;
@@ -134,16 +239,22 @@ function emitStmt(s: IRStmt, indent: string, state: RuntimeState): string {
     case "If": {
       const lines: string[] = [];
       lines.push(`${indent}if (${emitExpr(s.cond, state)} != 0.0) {`);
-      for (const t of s.thenBody) lines.push(emitStmt(t, indent + "  ", state));
+      for (const t of s.thenBody) {
+        const line = emitStmt(t, indent + "  ", state);
+        if (line !== null) lines.push(line);
+      }
       if (s.elseBody.length > 0) {
         if (s.elseBody.length === 1 && s.elseBody[0].kind === "If") {
-          lines.push(
-            `${indent}} else ${emitStmt(s.elseBody[0], indent, state).trimStart()}`
-          );
+          const inner = emitStmt(s.elseBody[0], indent, state);
+          if (inner !== null)
+            lines.push(`${indent}} else ${inner.trimStart()}`);
+          else lines.push(`${indent}}`);
         } else {
           lines.push(`${indent}} else {`);
-          for (const e of s.elseBody)
-            lines.push(emitStmt(e, indent + "  ", state));
+          for (const e of s.elseBody) {
+            const line = emitStmt(e, indent + "  ", state);
+            if (line !== null) lines.push(line);
+          }
           lines.push(`${indent}}`);
         }
       } else {
@@ -154,7 +265,10 @@ function emitStmt(s: IRStmt, indent: string, state: RuntimeState): string {
     case "While": {
       const lines: string[] = [];
       lines.push(`${indent}while (${emitExpr(s.cond, state)} != 0.0) {`);
-      for (const b of s.body) lines.push(emitStmt(b, indent + "  ", state));
+      for (const b of s.body) {
+        const line = emitStmt(b, indent + "  ", state);
+        if (line !== null) lines.push(line);
+      }
       lines.push(`${indent}}`);
       return lines.join("\n");
     }
@@ -168,7 +282,10 @@ function emitStmt(s: IRStmt, indent: string, state: RuntimeState): string {
       lines.push(
         `${indent}for (double ${s.cVar} = ${startC}; ${s.cVar} ${cmp} ${endC}; ${s.cVar} ${upd}) {`
       );
-      for (const b of s.body) lines.push(emitStmt(b, indent + "  ", state));
+      for (const b of s.body) {
+        const line = emitStmt(b, indent + "  ", state);
+        if (line !== null) lines.push(line);
+      }
       lines.push(`${indent}}`);
       return lines.join("\n");
     }
@@ -181,20 +298,46 @@ function emitStmt(s: IRStmt, indent: string, state: RuntimeState): string {
   }
 }
 
+/** Tensor-typed RHS for an Assign. Var reads of a tensor wrap in
+ *  `mtoc2_tensor_copy` so the receiver gets a freshly-owned value
+ *  (the assign helper consumes it). TensorBuild / Call already
+ *  produce freshly-owned tensors; pass through. */
+function emitTensorRhs(e: IRExpr, state: RuntimeState): string {
+  if (e.kind === "Var") {
+    useRuntimeByName(state, "mtoc2_tensor_copy");
+    return `mtoc2_tensor_copy(${e.cName})`;
+  }
+  return emitExpr(e, state);
+}
+
 function emitExpr(e: IRExpr, state: RuntimeState): string {
   switch (e.kind) {
     case "NumLit":
       return formatDouble(e.value);
     case "TensorLit":
-      // Slope-1: tensor literals never materialize as a runtime C
-      // value. The only IR sites that pass them through to codegen
-      // are tensor-aware builtins (disp), which read the data from
-      // `argTypes[i].exact` and ignore the rendered argsC[i]. We
-      // emit a harmless placeholder so the surrounding C parses;
-      // if some future builtin tries to USE the value as a double,
-      // it gets 0.0 and a comment pointing at the issue.
-      return `0.0 /* tensor [${e.shape.join("x")}] not materialized */`;
+      // Exact tensors never materialize as runtime C values. The
+      // only IR sites that pass them through to codegen are tensor-
+      // aware builtins (disp), which read the data from
+      // `argTypes[i].exact` and ignore `argsC[i]`. Placeholder keeps
+      // the surrounding C parseable.
+      return `0.0 /* exact tensor [${e.shape.join("x")}] (compile-time only) */`;
+    case "TensorBuild": {
+      // Runtime tensor construction. Both row-vector and matrix cases
+      // route through the same compound-literal flat array (the data
+      // is already in column-major order). 1×N picks `from_row` for
+      // a marginally tighter helper.
+      const [rows, cols] = e.shape;
+      const flat = e.elements.map(el => emitExpr(el, state)).join(", ");
+      if (rows === 1) {
+        useRuntimeByName(state, "mtoc2_tensor_from_row");
+        return `mtoc2_tensor_from_row((double[]){${flat}}, ${cols})`;
+      }
+      useRuntimeByName(state, "mtoc2_tensor_from_matrix");
+      return `mtoc2_tensor_from_matrix((double[]){${flat}}, ${rows}, ${cols})`;
+    }
     case "Var":
+      // Tensor Var reads pass the struct by value; downstream context
+      // (Assign RHS, user-function call) wraps in copy where needed.
       return e.cName;
     case "Binary": {
       const b = getBuiltin(e.builtin);
@@ -220,7 +363,13 @@ function emitExpr(e: IRExpr, state: RuntimeState): string {
           e.args.map(a => a.ty)
         );
       }
-      return `${e.cName}(${e.args.map(a => emitExpr(a, state)).join(", ")})`;
+      // User function call: tensor args wrap in copy (callee owns).
+      const args = e.args
+        .map(a =>
+          isOwned(a.ty) ? emitTensorRhs(a, state) : emitExpr(a, state)
+        )
+        .join(", ");
+      return `${e.cName}(${args})`;
     }
   }
 }
@@ -244,3 +393,6 @@ function formatDouble(v: number): string {
   }
   return s;
 }
+
+// Suppress unused-import lints when narrower predicates aren't used.
+void isNumeric;

@@ -227,15 +227,14 @@ registerBuiltin({
     if (
       isNumeric(t) &&
       !t.isComplex &&
-      (t.elem === "double" || t.elem === "logical") &&
-      t.exact instanceof Float64Array &&
-      t.shape !== undefined
+      (t.elem === "double" || t.elem === "logical")
     ) {
-      // Exact tensor — slope-1 path, compile-time format.
+      // Either an exact tensor (compile-time format) or a runtime
+      // tensor with statically-known shape (mtoc2_disp_tensor call).
       return { kind: "Unknown" };
     }
     throw new TypeError(
-      `'disp' arg must be a scalar real or an exact real tensor (slope-1 scope; got ${t.kind})`,
+      `'disp' arg must be a scalar real or a real tensor (got ${t.kind})`,
       span
     );
   },
@@ -259,7 +258,7 @@ registerBuiltin({
       }
       if (t.shape.length !== 2) {
         throw new TypeError(
-          `'disp' on a ${t.shape.length}-D tensor not yet supported (slope-1: 2-D only)`,
+          `'disp' on a ${t.shape.length}-D tensor not yet supported (2-D only)`,
           { file: "<unknown>", start: 0, end: 0 }
         );
       }
@@ -267,10 +266,17 @@ registerBuiltin({
       const body = formatTensor2D(t.exact, rows, cols);
       return `fputs(${cStringLiteral(body + "\n")}, stdout)`;
     }
+    if (isNumeric(t) && !isScalarRealNumeric(t)) {
+      // Runtime tensor — call the runtime disp helper. The arg is
+      // passed by value (struct copy of the pointers); disp_tensor
+      // reads but doesn't take ownership. Lifetime stays with the
+      // caller's local.
+      return `mtoc2_disp_tensor(${argsC[0]})`;
+    }
     // Scalar runtime path.
     return `mtoc2_disp_double(${argsC[0]})`;
   },
-  runtimeDeps: ["mtoc2_disp_double"],
+  runtimeDeps: ["mtoc2_disp_double", "mtoc2_disp_tensor"],
 });
 
 // ── length / numel / sum (compile-time fold for exact args) ─────────────
