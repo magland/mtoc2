@@ -3,6 +3,7 @@ import globals from "globals";
 import tseslint from "typescript-eslint";
 import { defineConfig, globalIgnores } from "eslint/config";
 import eslintConfigPrettier from "eslint-config-prettier";
+import reactHooks from "eslint-plugin-react-hooks";
 
 export default defineConfig([
   globalIgnores([
@@ -12,6 +13,7 @@ export default defineConfig([
     "tmp",
     "test_scripts",
     ".claude",
+    "src/codegen/runtime/snippets.gen.ts",
   ]),
   {
     files: ["**/*.{ts,tsx}"],
@@ -23,6 +25,20 @@ export default defineConfig([
     languageOptions: {
       ecmaVersion: 2022,
       globals: globals.node,
+    },
+  },
+  {
+    files: [
+      "src/components/**/*.{ts,tsx}",
+      "src/hooks/**/*.{ts,tsx}",
+      "src/pages/**/*.{ts,tsx}",
+      "src/App.tsx",
+      "src/main.tsx",
+    ],
+    extends: [reactHooks.configs.flat.recommended],
+    rules: {
+      "react-hooks/set-state-in-effect": "off",
+      "react-hooks/refs": "off",
     },
   },
 ]);

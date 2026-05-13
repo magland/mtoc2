@@ -14,7 +14,7 @@
  * that throws `UnsupportedConstruct` with a span.
  */
 
-import type { AbstractSyntaxTree, Expr, Stmt, Span } from "../parser.js";
+import type { AbstractSyntaxTree, Expr, Stmt, Span } from "../parser/index.js";
 import { UnsupportedConstruct, TypeError } from "./errors.js";
 import {
   type Type,

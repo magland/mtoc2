@@ -1,0 +1,282 @@
+import {
+  Box,
+  Alert,
+  FormControl,
+  FormControlLabel,
+  MenuItem,
+  Select,
+  Switch,
+  Tooltip,
+  Typography,
+} from "@mui/material";
+import Editor from "@monaco-editor/react";
+import type { TranslateError, SourceFile } from "../translate";
+import { OPT_PROFILES, type OptProfile } from "../optProfile";
+import type { WasmOptLevel } from "../utils/wasmExecution";
+
+const WASM_OPT_LEVELS: ReadonlyArray<WasmOptLevel> = ["O0", "O2", "O3"];
+
+interface CSourcePanelProps {
+  c: string;
+  error: TranslateError | null;
+  /** Other (non-active) files in the project. Used to suggest "function
+   *  defined in helpers.m — switch to that file" when the active file
+   *  references a function defined elsewhere. */
+  otherFiles: SourceFile[];
+  activeName: string;
+  includeRuntime: boolean;
+  onIncludeRuntimeChange: (value: boolean) => void;
+  /** Last-selected optimization profile. Changing this resets the three
+   *  toggles below to the profile's defaults via `onProfileChange`; the
+   *  user can then override individual toggles without the dropdown
+   *  "drifting." */
+  profile: OptProfile;
+  onProfileChange: (value: OptProfile) => void;
+  enableTempInlining: boolean;
+  onEnableTempInliningChange: (value: boolean) => void;
+  /** `-ffast-math` toggle. Does NOT change the displayed C — only
+   *  affects the compile-and-run output. Lives here alongside the
+   *  other build toggles for a single place to find them. */
+  fastMath: boolean;
+  onFastMathChange: (value: boolean) => void;
+  /** Optimization level for the WASM build (`emcc -O{0,2,3}`). */
+  wasmOptLevel: WasmOptLevel;
+  onWasmOptLevelChange: (value: WasmOptLevel) => void;
+  /** Whether to pass `-msimd128` to emcc. WASM-mode only. */
+  wasmSimd: boolean;
+  onWasmSimdChange: (value: boolean) => void;
+  /** True while a run is in flight — toggling fast-math mid-run
+   *  wouldn't take effect until the next run. We disable the switch
+   *  to make that obvious. */
+  isRunning: boolean;
+}
+
+const UNRESOLVED_PATTERN = /unresolved function or builtin '(\w+)'/;
+
+function findFunctionInOtherFiles(
+  fnName: string,
+  otherFiles: SourceFile[]
+): string | null {
+  const pattern = new RegExp(
+    `^\\s*function\\b[^=\\n]*?\\b${fnName}\\s*\\(`,
+    "m"
+  );
+  for (const f of otherFiles) {
+    if (pattern.test(f.source)) return f.name;
+  }
+  return null;
+}
+
+function buildErrorMessage(
+  error: TranslateError,
+  otherFiles: SourceFile[],
+  activeName: string
+): string {
+  let msg = `${error.kind}: ${error.message}`;
+  if (error.fileName && error.fileName !== activeName) {
+    msg = `${error.fileName}: ${msg}`;
+  }
+  const m = error.message.match(UNRESOLVED_PATTERN);
+  if (m) {
+    const otherFile = findFunctionInOtherFiles(m[1], otherFiles);
+    if (otherFile) {
+      msg += `\n'${m[1]}' is defined in ${otherFile} — only the active file is translated. Switch to ${otherFile} to translate it directly.`;
+    }
+  }
+  return msg;
+}
+
+export function CSourcePanel({
+  c,
+  error,
+  otherFiles,
+  activeName,
+  includeRuntime,
+  onIncludeRuntimeChange,
+  profile,
+  onProfileChange,
+  enableTempInlining,
+  onEnableTempInliningChange,
+  fastMath,
+  onFastMathChange,
+  wasmOptLevel,
+  onWasmOptLevelChange,
+  wasmSimd,
+  onWasmSimdChange,
+  isRunning,
+}: CSourcePanelProps) {
+  return (
+    <Box
+      sx={{
+        height: "100%",
+        display: "flex",
+        flexDirection: "column",
+        bgcolor: "background.paper",
+      }}
+    >
+      <Box
+        sx={{
+          px: 1.5,
+          py: 0.5,
+          borderBottom: 1,
+          borderColor: "divider",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+        }}
+      >
+        <Typography
+          variant="caption"
+          sx={{ fontWeight: 600, color: "text.secondary" }}
+        >
+          GENERATED C
+        </Typography>
+        <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
+          <FormControl size="small" sx={{ m: 0 }}>
+            <Select
+              value={profile}
+              onChange={e => onProfileChange(e.target.value as OptProfile)}
+              variant="standard"
+              disableUnderline
+              renderValue={v => `opt: ${v}`}
+              sx={{
+                fontSize: 12,
+                color: "text.secondary",
+                "& .MuiSelect-select": { py: 0, pr: "18px !important" },
+              }}
+            >
+              {OPT_PROFILES.map(p => (
+                <MenuItem key={p} value={p} dense>
+                  <Typography variant="caption">opt: {p}</Typography>
+                </MenuItem>
+              ))}
+            </Select>
+          </FormControl>
+          <Tooltip title="Inline single-use tensor temporaries.">
+            <FormControlLabel
+              sx={{ m: 0 }}
+              control={
+                <Switch
+                  size="small"
+                  checked={enableTempInlining}
+                  onChange={e => onEnableTempInliningChange(e.target.checked)}
+                />
+              }
+              label={
+                <Typography variant="caption" color="text.secondary">
+                  inline temps
+                </Typography>
+              }
+            />
+          </Tooltip>
+          <Tooltip title="Compile with -ffast-math.">
+            <FormControlLabel
+              sx={{ m: 0 }}
+              control={
+                <Switch
+                  size="small"
+                  checked={fastMath}
+                  onChange={e => onFastMathChange(e.target.checked)}
+                  disabled={isRunning}
+                />
+              }
+              label={
+                <Typography variant="caption" color="text.secondary">
+                  fast math
+                </Typography>
+              }
+            />
+          </Tooltip>
+          <FormControl size="small" sx={{ m: 0 }}>
+            <Select
+              value={wasmOptLevel}
+              onChange={e =>
+                onWasmOptLevelChange(e.target.value as WasmOptLevel)
+              }
+              variant="standard"
+              disableUnderline
+              renderValue={v => `-${v}`}
+              disabled={isRunning}
+              sx={{
+                fontSize: 12,
+                color: "text.secondary",
+                "& .MuiSelect-select": { py: 0, pr: "18px !important" },
+              }}
+            >
+              {WASM_OPT_LEVELS.map(p => (
+                <MenuItem key={p} value={p} dense>
+                  <Typography variant="caption">-{p}</Typography>
+                </MenuItem>
+              ))}
+            </Select>
+          </FormControl>
+          <Tooltip title="Compile WASM with -msimd128 for vectorized loops.">
+            <FormControlLabel
+              sx={{ m: 0 }}
+              control={
+                <Switch
+                  size="small"
+                  checked={wasmSimd}
+                  onChange={e => onWasmSimdChange(e.target.checked)}
+                  disabled={isRunning}
+                />
+              }
+              label={
+                <Typography variant="caption" color="text.secondary">
+                  simd
+                </Typography>
+              }
+            />
+          </Tooltip>
+          <Tooltip title="Show runtime helpers inline.">
+            <FormControlLabel
+              sx={{ m: 0 }}
+              control={
+                <Switch
+                  size="small"
+                  checked={includeRuntime}
+                  onChange={e => onIncludeRuntimeChange(e.target.checked)}
+                />
+              }
+              label={
+                <Typography variant="caption" color="text.secondary">
+                  runtime helpers
+                </Typography>
+              }
+            />
+          </Tooltip>
+        </Box>
+      </Box>
+      {error && (
+        <Alert
+          severity="error"
+          variant="outlined"
+          sx={{
+            borderRadius: 0,
+            whiteSpace: "pre-wrap",
+            fontFamily: "monospace",
+            fontSize: 12,
+            "& .MuiAlert-message": { py: 0.5 },
+          }}
+        >
+          {buildErrorMessage(error, otherFiles, activeName)}
+        </Alert>
+      )}
+      <Box sx={{ flex: 1, minHeight: 0 }}>
+        <Editor
+          height="100%"
+          language="c"
+          value={c}
+          options={{
+            readOnly: true,
+            minimap: { enabled: false },
+            fontSize: 13,
+            lineNumbers: "on",
+            wordWrap: "on",
+            scrollBeyondLastLine: false,
+          }}
+        />
+      </Box>
+    </Box>
+  );
+}

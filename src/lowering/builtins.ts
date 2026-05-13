@@ -14,8 +14,8 @@
  * MVP scope: scalar real double arithmetic, comparisons, disp.
  */
 
-import type { Span } from "../parser.js";
-import { BinaryOperation, UnaryOperation } from "../parser.js";
+import type { Span } from "../parser/index.js";
+import { BinaryOperation, UnaryOperation } from "../parser/index.js";
 import { UnsupportedConstruct, TypeError } from "./errors.js";
 import {
   type Type,
@@ -38,6 +38,11 @@ export interface Builtin {
   transfer(argTypes: Type[], span: Span): Type;
   /** Emit C expression. The caller wraps it as a statement when needed. */
   codegenC(argsC: string[], argTypes: Type[]): string;
+  /** Runtime-snippet names this builtin's codegenC output calls into.
+   *  Registered names live in `src/codegen/runtime.ts`'s REGISTRY.
+   *  The emitter activates each on every codegenC site so deps are
+   *  pulled into the final output in topological order. */
+  runtimeDeps?: ReadonlyArray<string>;
 }
 
 const REGISTRY = new Map<string, Builtin>();
@@ -51,6 +56,11 @@ export function registerBuiltin(b: Builtin): void {
 
 export function getBuiltin(name: string): Builtin | undefined {
   return REGISTRY.get(name);
+}
+
+/** Names of every registered builtin. Drives Monaco syntax highlighting. */
+export function allBuiltinNames(): readonly string[] {
+  return Array.from(REGISTRY.keys());
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────
@@ -214,6 +224,7 @@ registerBuiltin({
   codegenC(argsC) {
     return `mtoc2_disp_double(${argsC[0]})`;
   },
+  runtimeDeps: ["mtoc2_disp_double"],
 });
 
 // ── Operator-to-builtin map ─────────────────────────────────────────────

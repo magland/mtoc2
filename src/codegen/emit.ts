@@ -1,6 +1,6 @@
 /**
  * Single-file C codegen for mtoc2 IR. Emits:
- *   1. Runtime header (format helpers + disp).
+ *   1. Standard headers + activated runtime snippets (in dep order).
  *   2. Forward declarations for user-function specializations.
  *   3. Function specialization bodies.
  *   4. `main()` containing top-level statements.
@@ -8,41 +8,80 @@
  * MVP scope: everything is `double` in C. The IR types are still
  * useful at lowering time (for exact-folding and signed reasoning)
  * but the emitted C uniformly treats values as scalar real doubles.
+ *
+ * `includeRuntime` (default true): when false, the activated runtime
+ * helpers are omitted from the output (a placeholder comment is shown
+ * instead) so the IDE's "runtime helpers" toggle can show user-level
+ * code in isolation. The emitted C is not compilable in that mode —
+ * it's a viewing aid.
  */
 
 import type { IRExpr, IRStmt, IRFunc, IRProgram } from "../lowering/ir.js";
 import { getBuiltin } from "../lowering/builtins.js";
-import { RUNTIME_HEADER } from "./runtime.js";
+import {
+  BASE_HEADERS,
+  collectRuntimeHeaders,
+  newRuntimeState,
+  renderRuntimeBodies,
+  useRuntimeByName,
+  type RuntimeState,
+} from "./runtime.js";
 
-export function emitProgram(prog: IRProgram): string {
-  const parts: string[] = [];
+export interface EmitOptions {
+  /** Include the activated runtime helper bodies in the output.
+   *  Default true. When false, headers + a placeholder stub replace
+   *  them so the user sees only their generated code. */
+  includeRuntime?: boolean;
+}
 
-  // Runtime helpers.
-  parts.push(RUNTIME_HEADER);
-  parts.push("");
+export function emitProgram(prog: IRProgram, opts: EmitOptions = {}): string {
+  const includeRuntime = opts.includeRuntime ?? true;
+  const state = newRuntimeState();
+  const userParts: string[] = [];
 
   // Forward declarations.
   for (const fn of prog.functions.values()) {
-    parts.push(`static double ${fn.cName}(${fnParamList(fn)});`);
+    userParts.push(`static double ${fn.cName}(${fnParamList(fn)});`);
   }
-  parts.push("");
+  if (prog.functions.size > 0) userParts.push("");
 
-  // Function bodies.
+  // Function bodies. Activates runtime snippets as it walks.
   for (const fn of prog.functions.values()) {
-    parts.push(emitFunction(fn));
-    parts.push("");
+    userParts.push(emitFunction(fn, state));
+    userParts.push("");
   }
 
   // Main.
-  parts.push("int main(void) {");
+  userParts.push("int main(void) {");
   for (const s of prog.topLevelStmts) {
-    parts.push(emitStmt(s, "  "));
+    userParts.push(emitStmt(s, "  ", state));
   }
-  parts.push("  return 0;");
-  parts.push("}");
-  parts.push("");
+  userParts.push("  return 0;");
+  userParts.push("}");
+  userParts.push("");
 
-  return parts.join("\n");
+  // Headers: BASE_HEADERS ∪ activated-snippet headers, deduped.
+  const headers = new Set<string>(BASE_HEADERS);
+  for (const h of collectRuntimeHeaders(state)) headers.add(h);
+
+  const out: string[] = [];
+  for (const h of headers) out.push(`#include ${h}`);
+  out.push("");
+
+  if (state.active.size > 0) {
+    out.push(
+      includeRuntime ? renderRuntimeBodies(state) : runtimePlaceholder(state)
+    );
+  }
+
+  out.push(...userParts);
+  return out.join("\n");
+}
+
+function runtimePlaceholder(state: RuntimeState): string {
+  if (state.active.size === 0) return "";
+  const names = Array.from(state.active).join(", ");
+  return `/* runtime helpers omitted (${state.active.size}): ${names} */\n`;
 }
 
 function fnParamList(fn: IRFunc): string {
@@ -50,7 +89,7 @@ function fnParamList(fn: IRFunc): string {
   return fn.cParams.map(p => `double ${p}`).join(", ");
 }
 
-function emitFunction(fn: IRFunc): string {
+function emitFunction(fn: IRFunc, state: RuntimeState): string {
   const lines: string[] = [];
   lines.push(`static double ${fn.cName}(${fnParamList(fn)}) {`);
   const cOut = fn.cOutputs[0];
@@ -59,7 +98,7 @@ function emitFunction(fn: IRFunc): string {
     lines.push(`  double ${cOut} = 0.0;`);
   }
   for (const s of fn.body) {
-    lines.push(emitStmt(s, "  "));
+    lines.push(emitStmt(s, "  ", state));
   }
   if (bodyHasReturn(fn.body)) {
     lines.push(`mtoc2_return:`);
@@ -81,12 +120,12 @@ function bodyHasReturn(body: IRStmt[]): boolean {
   return false;
 }
 
-function emitStmt(s: IRStmt, indent: string): string {
+function emitStmt(s: IRStmt, indent: string, state: RuntimeState): string {
   switch (s.kind) {
     case "ExprStmt":
-      return `${indent}${emitExpr(s.expr)};`;
+      return `${indent}${emitExpr(s.expr, state)};`;
     case "Assign": {
-      const rhs = emitExpr(s.expr);
+      const rhs = emitExpr(s.expr, state);
       if (s.declare) {
         return `${indent}double ${s.cName} = ${rhs};`;
       }
@@ -94,17 +133,17 @@ function emitStmt(s: IRStmt, indent: string): string {
     }
     case "If": {
       const lines: string[] = [];
-      lines.push(`${indent}if (${emitExpr(s.cond)} != 0.0) {`);
-      for (const t of s.thenBody) lines.push(emitStmt(t, indent + "  "));
+      lines.push(`${indent}if (${emitExpr(s.cond, state)} != 0.0) {`);
+      for (const t of s.thenBody) lines.push(emitStmt(t, indent + "  ", state));
       if (s.elseBody.length > 0) {
-        // Detect a single-If else for nicer "else if" output.
         if (s.elseBody.length === 1 && s.elseBody[0].kind === "If") {
           lines.push(
-            `${indent}} else ${emitStmt(s.elseBody[0], indent).trimStart()}`
+            `${indent}} else ${emitStmt(s.elseBody[0], indent, state).trimStart()}`
           );
         } else {
           lines.push(`${indent}} else {`);
-          for (const e of s.elseBody) lines.push(emitStmt(e, indent + "  "));
+          for (const e of s.elseBody)
+            lines.push(emitStmt(e, indent + "  ", state));
           lines.push(`${indent}}`);
         }
       } else {
@@ -114,31 +153,26 @@ function emitStmt(s: IRStmt, indent: string): string {
     }
     case "While": {
       const lines: string[] = [];
-      lines.push(`${indent}while (${emitExpr(s.cond)} != 0.0) {`);
-      for (const b of s.body) lines.push(emitStmt(b, indent + "  "));
+      lines.push(`${indent}while (${emitExpr(s.cond, state)} != 0.0) {`);
+      for (const b of s.body) lines.push(emitStmt(b, indent + "  ", state));
       lines.push(`${indent}}`);
       return lines.join("\n");
     }
     case "For": {
       const lines: string[] = [];
-      const startC = emitExpr(s.start);
-      const endC = emitExpr(s.end);
+      const startC = emitExpr(s.start, state);
+      const endC = emitExpr(s.end, state);
       const stepC = formatDouble(s.step);
       const cmp = s.step > 0 ? "<=" : ">=";
       const upd = s.step > 0 ? `+= ${stepC}` : `-= ${formatDouble(-s.step)}`;
       lines.push(
         `${indent}for (double ${s.cVar} = ${startC}; ${s.cVar} ${cmp} ${endC}; ${s.cVar} ${upd}) {`
       );
-      for (const b of s.body) lines.push(emitStmt(b, indent + "  "));
+      for (const b of s.body) lines.push(emitStmt(b, indent + "  ", state));
       lines.push(`${indent}}`);
       return lines.join("\n");
     }
     case "ReturnFromFunction":
-      // Single-return-arg model: assume `return cOut;` is at the
-      // function's tail (emitFunction handles that). An early return
-      // here uses `goto`? For MVP, we don't support early returns —
-      // numbl's `return` lowers to ReturnFromFunction; we emit a goto
-      // to a label at function tail.
       return `${indent}goto mtoc2_return;`;
     case "Break":
       return `${indent}break;`;
@@ -147,7 +181,7 @@ function emitStmt(s: IRStmt, indent: string): string {
   }
 }
 
-function emitExpr(e: IRExpr): string {
+function emitExpr(e: IRExpr, state: RuntimeState): string {
   switch (e.kind) {
     case "NumLit":
       return formatDouble(e.value);
@@ -156,28 +190,38 @@ function emitExpr(e: IRExpr): string {
     case "Binary": {
       const b = getBuiltin(e.builtin);
       if (!b) throw new Error(`emit: builtin '${e.builtin}' not found`);
+      activateRuntimeDeps(b.runtimeDeps, state);
       return b.codegenC(
-        [emitExpr(e.left), emitExpr(e.right)],
+        [emitExpr(e.left, state), emitExpr(e.right, state)],
         [e.left.ty, e.right.ty]
       );
     }
     case "Unary": {
       const b = getBuiltin(e.builtin);
       if (!b) throw new Error(`emit: builtin '${e.builtin}' not found`);
-      return b.codegenC([emitExpr(e.operand)], [e.operand.ty]);
+      activateRuntimeDeps(b.runtimeDeps, state);
+      return b.codegenC([emitExpr(e.operand, state)], [e.operand.ty]);
     }
     case "Call": {
       const builtinB = getBuiltin(e.name);
       if (builtinB) {
+        activateRuntimeDeps(builtinB.runtimeDeps, state);
         return builtinB.codegenC(
-          e.args.map(emitExpr),
+          e.args.map(a => emitExpr(a, state)),
           e.args.map(a => a.ty)
         );
       }
-      // User function call: cName is the mangled name.
-      return `${e.cName}(${e.args.map(emitExpr).join(", ")})`;
+      return `${e.cName}(${e.args.map(a => emitExpr(a, state)).join(", ")})`;
     }
   }
+}
+
+function activateRuntimeDeps(
+  deps: ReadonlyArray<string> | undefined,
+  state: RuntimeState
+): void {
+  if (!deps) return;
+  for (const d of deps) useRuntimeByName(state, d);
 }
 
 /** Format a JS number as a C double literal that round-trips. */
@@ -185,10 +229,7 @@ function formatDouble(v: number): string {
   if (Number.isInteger(v) && Math.abs(v) < 1e15) {
     return `${v}.0`;
   }
-  // Use the shortest representation that round-trips.
-  // Number.prototype.toString does this for doubles.
   const s = v.toString();
-  // Make sure it contains a `.` or `e` so C parses it as a double.
   if (!s.includes(".") && !s.includes("e") && !s.includes("E")) {
     return `${s}.0`;
   }

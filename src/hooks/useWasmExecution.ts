@@ -1,0 +1,189 @@
+import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  buildWasm,
+  getWasmServiceUrl,
+  runWasm,
+  type RunEvent,
+  type WasmOptLevel,
+} from "../utils/wasmExecution";
+import { evictExpiredWasm } from "../db/wasmCache";
+import type { SourceFile } from "../translate";
+
+export type RunStatus =
+  | "idle"
+  /** The translated C is in flight to the public compile service and we're
+   *  waiting on the wasm bytes back. Separate from "running" so the UI can
+   *  tell the user that the current latency is the network round trip, not
+   *  anything the program itself is doing. */
+  | "compiling"
+  | "running"
+  | "success"
+  | "error"
+  | "aborted"
+  | "compile_error";
+
+export interface ConsoleLine {
+  /** Distinguishes channels in the UI; mirrors the worker / wasm-service
+   *  event types we emit, plus a synthetic "info" for client-generated
+   *  banners. */
+  channel: "stdout" | "stderr" | "compile_error" | "translate_error" | "info";
+  text: string;
+}
+
+export interface RunOptions {
+  enableTempInlining?: boolean;
+  fastMath?: boolean;
+  simd?: boolean;
+  optLevel?: WasmOptLevel;
+}
+
+interface UseWasmExecutionResult {
+  status: RunStatus;
+  /** Console output as a list of typed lines. Cleared at run start. */
+  lines: ConsoleLine[];
+  /** Translate + compile + run the project via the WASM pipeline. */
+  run: (
+    files: SourceFile[],
+    activeName: string,
+    opts?: RunOptions
+  ) => Promise<void>;
+  /** Abort the currently-running execution. */
+  stop: () => void;
+}
+
+export function useWasmExecution(): UseWasmExecutionResult {
+  const [status, setStatus] = useState<RunStatus>("idle");
+  const [lines, setLines] = useState<ConsoleLine[]>([]);
+  const abortRef = useRef<AbortController | null>(null);
+
+  const append = useCallback((line: ConsoleLine) => {
+    setLines(prev => [...prev, line]);
+  }, []);
+
+  const stop = useCallback(() => {
+    abortRef.current?.abort();
+  }, []);
+
+  const handleEvent = useCallback(
+    (event: RunEvent) => {
+      if (event.type === "stdout" || event.type === "stderr") {
+        append({ channel: event.type, text: event.text });
+      } else if (event.type === "compile_error") {
+        append({ channel: "compile_error", text: event.text });
+      } else if (event.type === "translate_error") {
+        const where = event.fileName ? ` (${event.fileName})` : "";
+        append({
+          channel: "translate_error",
+          text: `${event.kind}${where}: ${event.message}\n`,
+        });
+      }
+      // "done" is consumed by the caller via the resolved RunResult.
+    },
+    [append]
+  );
+
+  const run = useCallback(
+    async (files: SourceFile[], activeName: string, opts: RunOptions = {}) => {
+      if (status === "running" || status === "compiling") return;
+
+      setLines([]);
+      setStatus("running");
+
+      const abort = new AbortController();
+      abortRef.current = abort;
+
+      const finish = (next: RunStatus) => {
+        abortRef.current = null;
+        setStatus(next);
+      };
+
+      const wasmUrl = getWasmServiceUrl();
+      const build = await buildWasm(
+        files,
+        activeName,
+        {
+          enableTempInlining: opts.enableTempInlining ?? false,
+          fastMath: opts.fastMath ?? false,
+          simd: opts.simd ?? false,
+          optLevel: opts.optLevel ?? "O3",
+        },
+        wasmUrl,
+        abort.signal,
+        {
+          // Flip to "compiling" only when the build actually goes to the
+          // network. On a cache hit this never fires and we stay on
+          // "running" — the worker will be spawned almost instantly so
+          // the user never sees the intermediate state.
+          onCompileStart: () => {
+            setStatus("compiling");
+            append({ channel: "info", text: "[compiling WASM…]\n" });
+          },
+        }
+      );
+      if (!build.ok) {
+        if (build.kind === "aborted") {
+          append({ channel: "info", text: "\n[stopped]\n" });
+          finish("aborted");
+          return;
+        }
+        if (build.kind === "transport") {
+          append({
+            channel: "info",
+            text: `\n[wasm service error: ${build.message}]\n`,
+          });
+          finish("error");
+          return;
+        }
+        if (build.kind === "translate") {
+          const where = build.error.fileName
+            ? ` (${build.error.fileName})`
+            : "";
+          append({
+            channel: "translate_error",
+            text: `${build.error.kind}${where}: ${build.error.message}\n`,
+          });
+          finish("error");
+          return;
+        }
+        // compile error
+        append({ channel: "compile_error", text: build.stderr });
+        finish("compile_error");
+        return;
+      }
+
+      // Compile leg done (or skipped on cache hit). Back to the "running"
+      // pill while the worker drives the wasm — important for the
+      // cache-miss path where status is currently "compiling".
+      setStatus("running");
+      const result = await runWasm(
+        build.artifact,
+        { onEvent: handleEvent },
+        abort.signal
+      );
+      if (result.aborted) {
+        append({ channel: "info", text: "\n[stopped]\n" });
+        finish("aborted");
+        return;
+      }
+      if (result.transportError) {
+        append({
+          channel: "info",
+          text: `\n[wasm error: ${result.transportError}]\n`,
+        });
+        finish("error");
+        return;
+      }
+      finish(result.success ? "success" : "error");
+    },
+    [append, handleEvent, status]
+  );
+
+  // On mount, sweep expired entries out of the wasm cache so a multi-MB
+  // stale cache from previous sessions doesn't sit forever. get/put are
+  // fast either way, but a large cache slightly slows opening the IDB.
+  useEffect(() => {
+    void evictExpiredWasm();
+  }, []);
+
+  return { status, lines, run, stop };
+}

@@ -10,7 +10,7 @@ import { tmpdir } from "node:os";
 import { join, basename } from "node:path";
 import { spawnSync } from "node:child_process";
 
-import { parseMFile } from "../parser.js";
+import { parseMFile } from "../parser/index.js";
 import { Lowerer } from "../lowering/lower.js";
 import { emitProgram } from "../codegen/emit.js";
 import {

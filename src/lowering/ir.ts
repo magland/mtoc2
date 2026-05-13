@@ -7,9 +7,9 @@
  * carries a `Type`.
  */
 
-import type { Span } from "../parser.js";
+import type { Span } from "../parser/index.js";
 import type { Type } from "./types.js";
-import { BinaryOperation, UnaryOperation } from "../parser.js";
+import { BinaryOperation, UnaryOperation } from "../parser/index.js";
 
 // ── Expressions ─────────────────────────────────────────────────────────
 

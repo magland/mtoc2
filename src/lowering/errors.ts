@@ -3,7 +3,7 @@
  * point at the offending source location.
  */
 
-import type { Span } from "../parser.js";
+import type { Span } from "../parser/index.js";
 
 export class UnsupportedConstruct extends Error {
   span: Span;

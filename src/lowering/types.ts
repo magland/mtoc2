@@ -10,7 +10,7 @@
  * codegen reject anything outside scope with UnsupportedConstruct.
  */
 
-import type { Span } from "../parser.js";
+import type { Span } from "../parser/index.js";
 
 // ── Sign lattice ────────────────────────────────────────────────────────
 
