@@ -1,0 +1,33 @@
+{
+  "name": "mtoc2",
+  "version": "0.0.1",
+  "description": "Static numbl-to-C translator (rewrite, exact-value first)",
+  "license": "Apache-2.0",
+  "type": "module",
+  "private": true,
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "translate": "tsx src/cli/index.ts translate",
+    "run": "tsx src/cli/index.ts run",
+    "test": "vitest run",
+    "test:scripts": "tsx scripts/run_test_scripts.ts",
+    "typecheck": "tsc -b",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "lint": "eslint ."
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.4",
+    "@types/node": "^24.10.1",
+    "eslint": "^9.39.4",
+    "eslint-config-prettier": "^10.1.8",
+    "globals": "^16.5.0",
+    "prettier": "^3.8.3",
+    "tsx": "^4.21.0",
+    "typescript": "~5.9.3",
+    "typescript-eslint": "^8.59.2",
+    "vitest": "^4.0.18"
+  }
+}

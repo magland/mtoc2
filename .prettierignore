@@ -1,0 +1,6 @@
+dist
+node_modules
+coverage
+tmp
+test_scripts
+package-lock.json
