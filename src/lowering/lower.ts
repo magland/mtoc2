@@ -396,6 +396,37 @@ export class Lowerer {
         }
       }
     }
+    // Same drop-all peek for a bare `pkg.foo(x);` whose target is an
+    // N≥2-output packaged user function. Without this, `lowerExpr`
+    // routes through `lowerMethodCall`, which throws on `>= 2`
+    // outputs because there is no value to consume.
+    if (s.expr.type === "MethodCall") {
+      const mc = s.expr;
+      const dottedBase = tryExtractDottedName(mc.base);
+      if (dottedBase && !this.env.has(dottedBase.split(".")[0])) {
+        const qname = `${dottedBase}.${mc.name}`;
+        if (!this.workspace.isClass(qname)) {
+          const target = this.workspace.resolve(
+            qname,
+            [],
+            this.callSite(),
+            mc.span
+          );
+          if (
+            target?.kind === "userFunction" &&
+            target.ast.outputs.length >= 2
+          ) {
+            return this.lowerMultiAssign({
+              type: "MultiAssign",
+              lvalues: [],
+              expr: mc,
+              suppressed: s.suppressed,
+              span: s.span,
+            });
+          }
+        }
+      }
+    }
     const expr = this.lowerExpr(s.expr);
     // If the expression is a folded literal with no side effect, drop it.
     if (expr.kind === "NumLit") return null;

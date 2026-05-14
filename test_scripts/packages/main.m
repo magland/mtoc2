@@ -6,6 +6,7 @@ test_pkg_func_handle();
 test_pkg_handle_through_local();
 test_pkg_multi_assign();
 test_anon_captures_through_pkg_call();
+test_pkg_multi_drop_all();
 
 function test_basic_pkg_call()
   % pkg.foo lives in +pkg/foo.m
@@ -52,6 +53,16 @@ function test_pkg_multi_assign()
   [a, b] = pkg.pair(5);
   disp(a);
   disp(b);
+end
+
+function test_pkg_multi_drop_all()
+  % `pkg.pair(5);` — bare-statement form of a multi-output package
+  % call. The `lowerExprStmt` peek must route MethodCall RHSs to the
+  % drop-all multi-assign path (the same way it does for FuncCall),
+  % otherwise lowerMethodCall throws because there is no value to
+  % consume from an N>=2-output call.
+  pkg.pair(5);
+  disp(99);
 end
 
 function test_anon_captures_through_pkg_call()
