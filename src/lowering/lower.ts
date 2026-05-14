@@ -1,13 +1,20 @@
 /**
  * mtoc2 lowerer. Walks the numbl AST, threads a type env (with exact-
  * value tracking), and produces typed IR. The same pass:
- *   - statically evaluates fully-exact expressions and emits literals;
  *   - allocates per-call function specializations (mangled by the
  *     FNV-1a hash of the canonicalized arg-type tuple);
  *   - merges types across control-flow joins;
  *   - widens variables assigned inside loop bodies (strips exact)
  *     before lowering the body, so the one-pass lowering doesn't
  *     bake the entry-state value into the emitted code.
+ *
+ * Exact-value tracking threads through the type system (builtin
+ * transfer fns still compute exact results), but the only place the
+ * lowerer substitutes a literal for a computation is the `if` /
+ * `elseif` condition — when the cond's type has a `number` exact, the
+ * branch is statically taken or dropped. Arithmetic, comparisons,
+ * builtin calls, and Ident reads all emit runtime IR even when their
+ * exact value is known.
  *
  * MVP scope: scalar real double + arithmetic + comparisons + disp +
  * if/while/for + user functions with single output. Anything outside
@@ -28,7 +35,6 @@ import {
   unify,
   stripExactFromEnv,
   specializationKey,
-  EXACT_ARRAY_MAX_ELEMENTS,
 } from "./types.js";
 import { type IRExpr, type IRStmt, type IRFunc, type IRProgram } from "./ir.js";
 import { getBuiltin, binaryOpBuiltin, unaryOpBuiltin } from "./builtins.js";
@@ -197,7 +203,6 @@ export class Lowerer {
   private anfChildren(e: IRExpr, hoists: IRStmt[]): IRExpr {
     switch (e.kind) {
       case "NumLit":
-      case "TensorLit":
       case "Var":
         return e;
       case "TensorBuild":
@@ -228,14 +233,10 @@ export class Lowerer {
 
   /** Walk `e` and ensure the returned expression is either scalar or a
    *  Var. Recursively ANFs children; if `e` itself is owned-producing
-   *  (multi-element non-Var, non-TensorLit), hoist it. */
+   *  (multi-element non-Var), hoist it. */
   private anfRequireScalarOrVar(e: IRExpr, hoists: IRStmt[]): IRExpr {
     const rewritten = this.anfChildren(e, hoists);
-    if (
-      isMultiElement(rewritten.ty) &&
-      rewritten.kind !== "Var" &&
-      rewritten.kind !== "TensorLit"
-    ) {
+    if (isMultiElement(rewritten.ty) && rewritten.kind !== "Var") {
       return this.hoistToTemp(rewritten, hoists);
     }
     return rewritten;
@@ -277,14 +278,10 @@ export class Lowerer {
     // mismatched ownership) and the top-level itself may need hoisting.
     const hoists: IRStmt[] = [];
     const lhsOwned = isMultiElement(expr.ty);
-    const rhsOwnedDirectProducer =
-      isMultiElement(expr.ty) &&
-      expr.kind !== "Var" &&
-      expr.kind !== "TensorLit";
-    const newExpr =
-      lhsOwned && rhsOwnedDirectProducer
-        ? this.anfChildren(expr, hoists)
-        : this.anfRequireScalarOrVar(expr, hoists);
+    const rhsOwnedDirectProducer = lhsOwned && expr.kind !== "Var";
+    const newExpr = rhsOwnedDirectProducer
+      ? this.anfChildren(expr, hoists)
+      : this.anfRequireScalarOrVar(expr, hoists);
     const main = this.recordAssignment(s.name, newExpr, s.span);
     if (hoists.length === 0) return main;
     return [...hoists, main];
@@ -447,19 +444,26 @@ export class Lowerer {
     if (s.expr.step) {
       const stepExpr = this.lowerExpr(s.expr.step);
       this.requireScalarReal(stepExpr.ty, "for-loop step", s.expr.step.span);
-      if (stepExpr.kind !== "NumLit") {
+      // Step must be a compile-time-known scalar — read its exact from
+      // the type (no IR-level fold runs anymore, but the transfer fns
+      // still propagate exact through e.g. unary-minus on a literal).
+      const stepVal =
+        isNumeric(stepExpr.ty) && typeof stepExpr.ty.exact === "number"
+          ? stepExpr.ty.exact
+          : undefined;
+      if (stepVal === undefined) {
         throw new UnsupportedConstruct(
-          `for-loop step must be a numeric literal`,
+          `for-loop step must be a compile-time-known numeric literal`,
           s.expr.step.span
         );
       }
-      if (stepExpr.value === 0) {
+      if (stepVal === 0) {
         throw new UnsupportedConstruct(
           `for-loop step must be non-zero`,
           s.expr.step.span
         );
       }
-      step = stepExpr.value;
+      step = stepVal;
     }
 
     const envBefore = new Map(this.env);
@@ -543,25 +547,6 @@ export class Lowerer {
         e.span
       );
     }
-    // Substitute scalar-real Var → NumLit when exact is set. This emits
-    // a literal in C where the variable would have appeared, letting the
-    // C compiler constant-fold downstream. Tensor exact intentionally
-    // does NOT substitute at Ident-read sites: we always materialize
-    // tensors in C, and downstream folding still works because builtins'
-    // `transfer` reads `.exact` from `argTypes` (it doesn't need the IR
-    // node to be a literal).
-    if (
-      isNumeric(entry.ty) &&
-      typeof entry.ty.exact === "number" &&
-      isScalarRealNumeric(entry.ty)
-    ) {
-      return {
-        kind: "NumLit",
-        value: entry.ty.exact,
-        ty: entry.ty,
-        span: e.span,
-      };
-    }
     return {
       kind: "Var",
       name: e.name,
@@ -571,24 +556,23 @@ export class Lowerer {
     };
   }
 
-  /** Lower an AST `Tensor` node (`[1 2; 3 4]`).
+  /** Lower an AST `Tensor` node (`[1 2; 3 4]`) to a TensorBuild IR node.
+   *  The shape is statically known; each cell becomes an IRExpr (a
+   *  NumLit for literal cells, Var / Binary / ... for computed cells).
+   *  Layout is column-major to match numbl's RuntimeTensor.data.
    *
-   *  Two paths share the rectangular-shape check + element-lowering
-   *  pass; the split is on whether every element folded to an exact
-   *  scalar real:
-   *  - all-exact  → TensorLit (compile-time only, no runtime alloc)
-   *  - any-mixed  → TensorBuild (runtime `mtoc2_tensor_from_row` /
-   *    `mtoc2_tensor_from_matrix`)
-   *
-   *  Layout is column-major to match numbl's RuntimeTensor.data. */
+   *  Special case: a 1×1 tensor literal `[x]` is the same as `x` in
+   *  MATLAB (both are scalars). The lowerer returns the inner scalar
+   *  expression directly so the C-side variable type stays a bare
+   *  `double` rather than an `mtoc2_tensor_t`. */
   private lowerTensorLit(e: Extract<Expr, { type: "Tensor" }>): IRExpr {
     if (e.rows.length === 0) {
       // Empty `[]`. Numbl uses an empty 0×0 tensor — we mirror.
       return {
-        kind: "TensorLit",
-        data: new Float64Array(0),
+        kind: "TensorBuild",
+        elements: [],
         shape: [0, 0],
-        ty: tensorDouble([0, 0], new Float64Array(0)),
+        ty: tensorDouble([0, 0]),
         span: e.span,
       };
     }
@@ -607,7 +591,6 @@ export class Lowerer {
 
     // Lower every element first. Column-major storage: index = c*rows + r.
     const loweredFlat: IRExpr[] = new Array(total);
-    let allExact = true;
     for (let r = 0; r < rows; r++) {
       for (let c = 0; c < cols; c++) {
         const lowered = this.lowerExpr(e.rows[r][c]);
@@ -618,32 +601,13 @@ export class Lowerer {
           );
         }
         loweredFlat[c * rows + r] = lowered;
-        if (lowered.kind !== "NumLit") allExact = false;
       }
     }
 
-    if (allExact) {
-      if (total > EXACT_ARRAY_MAX_ELEMENTS) {
-        throw new UnsupportedConstruct(
-          `tensor literal of ${total} exact elements exceeds the cap (${EXACT_ARRAY_MAX_ELEMENTS})`,
-          e.span
-        );
-      }
-      const data = new Float64Array(total);
-      for (let i = 0; i < total; i++) {
-        data[i] = (loweredFlat[i] as Extract<IRExpr, { kind: "NumLit" }>).value;
-      }
-      const ty = tensorDouble([rows, cols], data);
-      return {
-        kind: "TensorLit",
-        data,
-        shape: [rows, cols],
-        ty,
-        span: e.span,
-      };
+    if (rows === 1 && cols === 1) {
+      return loweredFlat[0];
     }
 
-    // Runtime path: at least one element is non-exact.
     const ty = tensorDouble([rows, cols]);
     return {
       kind: "TensorBuild",
@@ -666,8 +630,6 @@ export class Lowerer {
       );
     }
     const ty = b.transfer([left.ty, right.ty], e.span);
-    const folded = foldedLiteralFromType(ty, e.span);
-    if (folded !== null) return folded;
     return {
       kind: "Binary",
       builtin: name,
@@ -690,8 +652,6 @@ export class Lowerer {
       );
     }
     const ty = b.transfer([operand.ty], e.span);
-    const folded = foldedLiteralFromType(ty, e.span);
-    if (folded !== null) return folded;
     return {
       kind: "Unary",
       builtin: name,
@@ -716,8 +676,6 @@ export class Lowerer {
         );
       }
       const ty = b.transfer(argTypes, e.span);
-      const folded = foldedLiteralFromType(ty, e.span);
-      if (folded !== null) return folded;
       return {
         kind: "Call",
         cName: e.name, // builtins use their bare name in C (mtoc2_<name> via codegen)
@@ -735,8 +693,6 @@ export class Lowerer {
     }
     const spec = this.specializeUserFunction(decl, argTypes);
     const ty = spec.outputTypes[0] ?? { kind: "Unknown" };
-    const folded = foldedLiteralFromType(ty, e.span);
-    if (folded !== null) return folded;
     return {
       kind: "Call",
       cName: spec.cName,
@@ -872,41 +828,18 @@ export class Lowerer {
 
 // ── Helpers (free functions) ────────────────────────────────────────────
 
-/** When `ty` is a fully-foldable result (scalar real numeric — double
- *  or logical — with `number` exact, or a tensor with Float64Array
- *  `exact` + known shape), return the corresponding literal IR node.
- *  Returns null otherwise — caller emits a runtime Binary/Unary/Call
- *  node in that case.
- *
- *  Accepting `logical` here matters for if-folds: comparison builtins
- *  return scalarLogical with exact 0/1; without folding to a NumLit,
- *  the if's cond stays a Binary IR and `condToBool` (which only
- *  recognizes NumLit) misses the fold.
- *
- *  Centralized so lowerBinary / lowerUnary / lowerFuncCall all use
- *  the same post-transfer fold rule and stay in sync. */
-function foldedLiteralFromType(ty: Type, span: Span): IRExpr | null {
-  if (!isNumeric(ty)) return null;
-  if (typeof ty.exact === "number" && isScalarRealNumeric(ty)) {
-    return { kind: "NumLit", value: ty.exact, ty, span };
-  }
-  if (ty.exact instanceof Float64Array && ty.shape !== undefined) {
-    return {
-      kind: "TensorLit",
-      data: ty.exact,
-      shape: ty.shape.slice(),
-      ty,
-      span,
-    };
-  }
-  return null;
-}
-
-/** Returns true/false if `cond` is a literal logical value, null otherwise. */
+/** If the lowered cond's type carries an exact scalar value, return
+ *  its boolean interpretation; otherwise null. This is the ONLY place
+ *  the lowerer turns a known exact value into a compile-time decision —
+ *  the resulting branch is taken/dropped before codegen. Arithmetic /
+ *  comparisons / builtin calls and Ident reads all produce runtime IR
+ *  even when their `ty.exact` is known. */
 function condToBool(cond: IRExpr): boolean | null {
-  if (cond.kind !== "NumLit") return null;
-  if (!Number.isFinite(cond.value)) return null;
-  return cond.value !== 0;
+  if (!isNumeric(cond.ty)) return null;
+  const x = cond.ty.exact;
+  if (typeof x !== "number") return null;
+  if (!Number.isFinite(x)) return null;
+  return x !== 0;
 }
 
 /** Walk a stmt-tree and collect names of LHS targets (Assign, MultiAssign,

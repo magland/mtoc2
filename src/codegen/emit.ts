@@ -44,6 +44,7 @@ import {
   nullAtScopeExit,
   type FutureTouchMap,
 } from "./liveness.js";
+import { irFuncDocComment, irStmtHeader } from "./prettyIR.js";
 
 export interface EmitOptions {
   /** Include the activated runtime helper bodies in the output.
@@ -178,6 +179,7 @@ function collectOwnedLocals(stmts: IRStmt[]): string[] {
 function emitFunction(fn: IRFunc, state: RuntimeState): string {
   const lines: string[] = [];
   const retType = fnRetType(fn);
+  lines.push(irFuncDocComment(fn));
   lines.push(`static ${retType} ${fn.cName}(${fnParamList(fn)}) {`);
   // Pre-declare the scalar/tensor output slot.
   const cOut = fn.cOutputs[0];
@@ -244,6 +246,10 @@ function emitBody(
 ): string {
   const out: string[] = [];
   for (const s of stmts) {
+    const header = irStmtHeader(s);
+    if (header !== null) {
+      out.push(`${indent}/* ${header} */`);
+    }
     const line = emitStmt(s, indent, state, futureTouches);
     if (line !== null) out.push(line);
     const freeNames = earlyFreeCandidates(s, futureTouches);
@@ -344,48 +350,21 @@ function emitStmt(
 
 /** Tensor-typed RHS for an Assign. Each kind produces a freshly-owned
  *  tensor that `mtoc2_tensor_assign` consumes:
- *  - `Var`         → `mtoc2_tensor_copy(name)` (deep copy)
- *  - `TensorLit`   → `mtoc2_tensor_from_row/_matrix(...)` materialized
- *                    from the compile-time-known data
+ *  - `Var`           → `mtoc2_tensor_copy(name)` (deep copy)
  *  - everything else → `emitExpr` (TensorBuild + Binary/Unary/Call
- *                    already emit fresh-allocating helpers) */
+ *                      already emit fresh-allocating helpers) */
 function emitTensorRhs(e: IRExpr, state: RuntimeState): string {
   if (e.kind === "Var") {
     useRuntimeByName(state, "mtoc2_tensor_copy");
     return `mtoc2_tensor_copy(${e.cName})`;
   }
-  if (e.kind === "TensorLit") {
-    return emitTensorLitMaterialize(e.data, e.shape, state);
-  }
   return emitExpr(e, state);
-}
-
-function emitTensorLitMaterialize(
-  data: Float64Array,
-  shape: number[],
-  state: RuntimeState
-): string {
-  const [rows, cols] = shape;
-  const flat = Array.from(data).map(formatDouble).join(", ");
-  if (rows === 1) {
-    useRuntimeByName(state, "mtoc2_tensor_from_row");
-    return `mtoc2_tensor_from_row((double[]){${flat}}, ${cols})`;
-  }
-  useRuntimeByName(state, "mtoc2_tensor_from_matrix");
-  return `mtoc2_tensor_from_matrix((double[]){${flat}}, ${rows}, ${cols})`;
 }
 
 function emitExpr(e: IRExpr, state: RuntimeState): string {
   switch (e.kind) {
     case "NumLit":
       return formatDouble(e.value);
-    case "TensorLit":
-      // Exact tensors never materialize as runtime C values. The
-      // only IR sites that pass them through to codegen are tensor-
-      // aware builtins (disp), which read the data from
-      // `argTypes[i].exact` and ignore `argsC[i]`. Placeholder keeps
-      // the surrounding C parseable.
-      return `0.0 /* exact tensor [${e.shape.join("x")}] (compile-time only) */`;
     case "TensorBuild": {
       // Runtime tensor construction. Both row-vector and matrix cases
       // route through the same compound-literal flat array (the data

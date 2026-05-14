@@ -5,11 +5,16 @@ Project instructions for agents working in mtoc2.
 ## What this project is
 
 mtoc2 is a static numbl-to-C translator. It accepts a strict subset of what
-numbl can run and emits a single C file you can compile with `cc`. The
-defining feature is **exact-value tracking in the type system**: when the
-lowerer can prove a value, it folds the computation at compile time and emits
-a literal instead of a runtime call. The compiler embeds interpreter
-capability — that's not an afterthought, it's the design center.
+numbl can run and emits a single C file you can compile with `cc`. The type
+system threads **exact-value tracking** through every scalar — builtin
+transfer functions compute exact results when all inputs are exact, and the
+canonical type form includes the exact value, so each distinct exact-input
+gets its own function specialization. Codegen emits runtime C for
+arithmetic / comparisons / builtin calls / Ident reads regardless of
+whether their `exact` is known; the **only** place the lowerer turns an
+exact value into a compile-time decision is the `if` / `elseif` condition,
+where a known-`exact` cond takes or drops the branch before the IR reaches
+codegen.
 
 This is a from-scratch rewrite of mtoc. Build up only what we're certain
 about. Don't port mtoc features speculatively.
@@ -43,21 +48,24 @@ mtoc2 is a _static_ translator. Anything outside the supported subset raises
 
 - **Scalar real `double`** — arithmetic, comparisons, `if`/`while`/`for`,
   user functions with type-tuple specialization.
-- **Real tensors** — both exact (compile-time fold path) and runtime
-  (mtoc-style "always-copy" model: `mtoc2_tensor_t` struct with
-  `mtoc2_tensor_assign` / `mtoc2_tensor_copy` / `mtoc2_tensor_free`; no
-  refcount, no COW).
+- **Real tensors** — mtoc-style "always-copy" model: `mtoc2_tensor_t`
+  struct with `mtoc2_tensor_assign` / `mtoc2_tensor_copy` /
+  `mtoc2_tensor_free`; no refcount, no COW. Every tensor source-literal
+  lowers to a `TensorBuild` IR node (column-major flat array of element
+  expressions), materialized at the use-site via `mtoc2_tensor_from_row`
+  / `mtoc2_tensor_from_matrix`. (Special case: a 1×1 tensor literal
+  `[x]` lowers to the inner scalar — same as MATLAB.)
 - **Tensor arithmetic** — elementwise `+` `-` `.*` `./` `-` (unary)
-  on same-shape tensors and tensor-with-scalar-broadcast. Mixes via
-  per-op runtime helpers (`mtoc2_tensor_<op>_tt` / `_ts` / `_st`).
-  Folds at compile time when every input has `exact`. Matrix `*` `/`
-  (i.e. `mtimes` / `mrdivide` between two tensors) is not yet
-  supported.
+  on same-shape tensors and tensor-with-scalar-broadcast. Each op
+  emits a per-op runtime helper call
+  (`mtoc2_tensor_<op>_tt` / `_ts` / `_st`). Matrix `*` `/` (i.e.
+  `mtimes` / `mrdivide` between two tensors) is not yet supported.
 - **Reduction**: `sum` on vectors via `mtoc2_sum`; matrix→row-vector
-  reduction deferred. `length` / `numel` always fold from `shape`.
-- **disp** routes on shape/exactness: scalar runtime → `mtoc2_disp_double`,
-  exact tensor → compile-time-formatted `fputs`, runtime tensor →
-  `mtoc2_disp_tensor`.
+  reduction deferred. `length` / `numel` emit `mtoc2_length` /
+  `mtoc2_numel` runtime calls (for scalar args, codegen emits the
+  literal `1.0` directly since the C arg is a bare `double`).
+- **disp** routes on shape: scalar → `mtoc2_disp_double`,
+  multi-element tensor → `mtoc2_disp_tensor`.
 
 Not yet supported: matrix multiplication / division, indexing
 (`a(k)`), runtime-shape constructors (`zeros(n)`), general broadcast
@@ -146,54 +154,63 @@ Tensors (and future owned types: strings, structs, classes) follow mtoc's
   allocates fresh, so elementwise IS owned-producing here. (Inline
   iter-loop fusion is a future optimization.)
 
-### Materialize every tensor Assign
+## Folding only at if-cond
 
-Every tensor Assign emits C — including when the RHS is an exact
-`TensorLit`. The lit's data is materialized via `mtoc2_tensor_from_row`
-or `mtoc2_tensor_from_matrix` at the assignment site. The exact value
-also stays in the env's type for downstream folding (subsequent
-arithmetic, `length`/`numel`/`sum` reductions, scalar Ident-read
-literalization), but the C variable always holds the runtime value too.
+Exact tracking still threads through the type system: builtin transfer
+functions compute exact results when all inputs are exact, and the
+specialization key includes `exact` so each distinct value triggers a
+fresh specialization. But the lowerer **does not** substitute literals
+for known-exact computations anywhere except the `if` / `elseif`
+condition:
 
-Why always-materialize: a tensor Assign with `TensorLit` RHS used to be
-skipped at emit, with reads substituting to TensorLit. That broke when
-the variable was later mutated (loop body) or had its exact stripped by
-`%!numbl:opaque` — subsequent reads found an uninitialized empty tensor
-and produced NaN. Always-materializing is the simple-correct rule.
-Eliding redundant materialization (when every consumer fully folds)
-is a future optimization.
+- `a = 2 + 3` lowers to a `Binary` IR node (with `ty.exact = 5`) and
+  emits `double a = (2.0 + 3.0);` — the C compiler folds, not the
+  lowerer.
+- An Ident read of a scalar variable with `exact` always emits a `Var`,
+  never a `NumLit`. The C variable holds the value at runtime.
+- A tensor source-literal always lowers to `TensorBuild` and
+  materializes at runtime. There is no `TensorLit` IR node.
+- `length` / `numel` emit runtime helper calls; `sum` emits
+  `mtoc2_sum`. None fold into a literal at codegen time.
+- `disp(a)` always emits the runtime `mtoc2_disp_double` or
+  `mtoc2_disp_tensor` helper — no compile-time formatting path.
 
-### Scalar exact still substitutes at Ident-read
+The only fold site is `condToBool` in `lower.ts`, called from `lowerIf`:
+when `cond.ty.exact` is a finite `number`, the corresponding branch is
+returned directly and the surrounding `if` is not emitted. This lets
+type-directed dead-branch elimination work (e.g. a user function
+specialized for `x :: double=5` can have its `if x > 0` arm decided at
+spec time) without baking constants into the user's emitted code.
 
-For scalar reals, Ident reads with `exact: number` still substitute to a
-`NumLit` at the read site so the C output contains the literal value
-where the variable would have appeared. This lets the C compiler
-constant-fold downstream (e.g. `mtoc2_disp_double(5.0)` rather than
-`mtoc2_disp_double(x)`). Tensor exact does NOT substitute at Ident
-reads — the runtime variable holds the value, and downstream folding
-still works because builtin `transfer` functions read `.exact` from
-`argTypes` rather than from the IR node kind.
+## Always-materialize tensor Assign
+
+Every tensor Assign emits C — there is no IR node for "compile-time-
+only tensor data". TensorBuild RHSs materialize via
+`mtoc2_tensor_from_row` / `mtoc2_tensor_from_matrix`; `Var` RHSs wrap
+in `mtoc2_tensor_copy`; computed tensor RHSs (`Binary` / `Unary` /
+`Call`) emit their per-op runtime helper. The C variable always holds
+a freshly-owned tensor after the Assign.
 
 ## Testing-only directive
 
 `%!numbl:opaque <var> [<var>...]` strips `exact` from each named
-variable in the current env, forcing the runtime codegen path on values
-mtoc2 would otherwise fold at compile time. Numbl's parser recognizes
+variable in the current env. With the no-fold-at-codegen rule, this is
+mostly a no-op for variables holding tensors (the runtime path is the
+default), but it still matters for `if`-cond folding on scalar vars:
+`x = 5; %!numbl:opaque x; if x > 0` forces the if to emit as a runtime
+branch instead of being statically taken. Numbl's parser recognizes
 the directive but treats unknown directives as no-ops, so cross-runner
-output is unaffected. Use sparingly — only when a test must exercise
-the runtime path.
-
-For exact tensors, the directive synthesizes a TensorBuild Assign so
-the C-side declaration materializes (otherwise the variable would only
-live in the type env, with no corresponding C local).
+output is unaffected.
 
 ## Architectural rules
 
-- **Exact-value-first**. Every scalar in the type system has an optional
-  `exact` field. When all inputs to an op/builtin have `exact`, the
-  builtin's `transfer` runs the computation and returns an exact-tagged
-  output; the lowerer emits a literal. Builtins that can't evaluate
-  exactly leave `exact` unset and codegen emits the runtime call.
+- **Exact-tracking through the type lattice, fold only at if-cond**.
+  Every scalar in the type system has an optional `exact` field; all
+  builtin `transfer` fns propagate it when every input is exact. The
+  exact value affects function specialization (it's part of the key)
+  and the if-cond fold. It does NOT cause the lowerer to substitute
+  literals for arithmetic / Ident reads / builtin calls — those always
+  emit runtime IR. See the "Folding only at if-cond" section above.
 - **No JitType reuse**. The type system in `src/lowering/types.ts` is
   written from scratch — not derived from numbl's `JitType`. numbl's JIT
   is on a path to retirement; mtoc2's lattice is meant to outlive it.
@@ -206,6 +223,14 @@ live in the type env, with no corresponding C local).
   the body is lowered (`stripExactFromEnv` + `collectAssignedNames`),
   otherwise the single pass would bake iteration-1 values into the
   emitted code.
+- **Emit doc-comments alongside C**. `src/codegen/prettyIR.ts` renders
+  each `IRFunc` to a multi-line block comment (name, mangled
+  identifier, per-param and per-output types) and each `IRStmt` to a
+  one-line numbl-like summary. The emitter places the function comment
+  above every specialized definition and the stmt comment above every
+  emitted statement. Synthetic ANF temps (`_mtoc2_t<N>`) and folded
+  branches show through — these comments reflect the IR after
+  lowering, not the original source.
 
 ## Naming
 

@@ -33,8 +33,6 @@ import {
   isScalar,
   EXACT_ARRAY_MAX_ELEMENTS,
 } from "./types.js";
-import { formatNumber, formatTensor2D } from "./formatNumber.js";
-
 export interface Builtin {
   /** Source-level name. */
   name: string;
@@ -449,32 +447,6 @@ registerBuiltin({
   },
   codegenC(argsC, argTypes) {
     const t = argTypes[0];
-    if (
-      isNumeric(t) &&
-      t.exact instanceof Float64Array &&
-      t.shape !== undefined
-    ) {
-      // Compile-time-format the tensor; emit fputs of the literal.
-      // Numbl's specialBuiltins.disp suppresses empty tensors entirely.
-      const total = t.shape.reduce((a, b) => a * b, 1);
-      if (total === 0) {
-        return `((void)0)`;
-      }
-      // 1×1 tensor displays as a scalar.
-      if (total === 1) {
-        const s = formatNumber(t.exact[0]) + "\n";
-        return `fputs(${cStringLiteral(s)}, stdout)`;
-      }
-      if (t.shape.length !== 2) {
-        throw new TypeError(
-          `'disp' on a ${t.shape.length}-D tensor not yet supported (2-D only)`,
-          { file: "<unknown>", start: 0, end: 0 }
-        );
-      }
-      const [rows, cols] = t.shape;
-      const body = formatTensor2D(t.exact, rows, cols);
-      return `fputs(${cStringLiteral(body + "\n")}, stdout)`;
-    }
     if (isNumeric(t) && !isScalarRealNumeric(t)) {
       // Runtime tensor — call the runtime disp helper. The arg is
       // passed by value (struct copy of the pointers); disp_tensor
@@ -488,7 +460,7 @@ registerBuiltin({
   runtimeDeps: ["mtoc2_disp_double", "mtoc2_disp_tensor"],
 });
 
-// ── length / numel / sum (compile-time fold for exact args) ─────────────
+// ── length / numel / sum ────────────────────────────────────────────────
 
 registerBuiltin({
   name: "length",
@@ -510,11 +482,16 @@ registerBuiltin({
     else v = t.shape.reduce((a, b) => Math.max(a, b), 0);
     return scalarDouble(signFromNumber(v), v);
   },
-  codegenC() {
-    // Always compile-time folded (transfer returns exact for any input
-    // type with a known shape). codegenC should not be reached.
-    throw new Error("internal: length should have folded at lowering");
+  codegenC(argsC, argTypes) {
+    const t = argTypes[0];
+    if (isNumeric(t) && isScalar(t)) {
+      // length of a scalar is 1 — the C arg is a bare `double`, not a
+      // tensor, so the runtime helper doesn't apply.
+      return `1.0`;
+    }
+    return `mtoc2_length(${argsC[0]})`;
   },
+  runtimeDeps: ["mtoc2_length"],
 });
 
 registerBuiltin({
@@ -534,9 +511,14 @@ registerBuiltin({
     const v = t.shape.reduce((a, b) => a * b, 1);
     return scalarDouble(signFromNumber(v), v);
   },
-  codegenC() {
-    throw new Error("internal: numel should have folded at lowering");
+  codegenC(argsC, argTypes) {
+    const t = argTypes[0];
+    if (isNumeric(t) && isScalar(t)) {
+      return `1.0`;
+    }
+    return `mtoc2_numel(${argsC[0]})`;
   },
+  runtimeDeps: ["mtoc2_numel"],
 });
 
 registerBuiltin({
@@ -593,24 +575,6 @@ registerBuiltin({
   },
   runtimeDeps: ["mtoc2_sum"],
 });
-
-/** Escape a JS string into a C string literal (double-quoted). */
-function cStringLiteral(s: string): string {
-  let out = '"';
-  for (let i = 0; i < s.length; i++) {
-    const c = s.charCodeAt(i);
-    if (c === 0x22 /* " */) out += '\\"';
-    else if (c === 0x5c /* \ */) out += "\\\\";
-    else if (c === 0x0a /* \n */) out += "\\n";
-    else if (c === 0x0d /* \r */) out += "\\r";
-    else if (c === 0x09 /* \t */) out += "\\t";
-    else if (c < 0x20 || c === 0x7f)
-      out += `\\x${c.toString(16).padStart(2, "0")}`;
-    else out += s[i];
-  }
-  out += '"';
-  return out;
-}
 
 // ── Operator-to-builtin map ─────────────────────────────────────────────
 

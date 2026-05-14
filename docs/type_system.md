@@ -1,29 +1,47 @@
 # Type system
 
-mtoc2's type lattice lives in `src/lowering/types.ts`. It's the most
-distinctive subsystem in the codebase — the whole compiler is organized
-around the **exact-value-first** idea: any scalar (and eventually any
-small array) carries an optional `exact` field, and the lowerer treats
-"I know this value" as the most precise type rather than a side
-optimization.
+mtoc2's type lattice lives in `src/lowering/types.ts`. Every scalar
+(and small array) carries an optional `exact` field threaded through
+the lowerer by every builtin's `transfer` function. The lattice is
+**exact-aware** rather than exact-folding: knowing the value is the
+most precise type and feeds two specific consumers, but the lowerer
+does NOT substitute literals for runtime computations.
 
-## Why exact-first
+## Where `exact` is used
 
-A static compiler that doesn't know any values has to emit a runtime
-call for every operation. A static compiler that knows the exact
-values can just compute the answer at compile time and emit a literal.
-That's the optimization story.
+Two consumers, only:
 
-The deeper consequence is that **the compiler becomes a partial
-interpreter**. When `sqrt(9)` shows up at compile time, the lowerer
-runs the JS `Math.sqrt(9)` and emits `3.0`. When `sqrt(x)` with x of
-unknown value shows up, it emits the runtime call. Same code path,
-same builtin definition — the difference is whether the inputs
-carried `exact`.
+1. **Function specialization**. The canonical type form includes
+   `exact` (see `canonicalizeType` + the FNV-1a hash). So `sq(5)` and
+   `sq(2.5)` produce two different specializations, each with its own
+   exact-tagged param type. The body lowers under those refined types,
+   which (combined with consumer #2) can statically take/drop
+   branches.
 
-For this to work without drift, the JS-side evaluation of a builtin
-must produce the same value numbl would produce at runtime. The
-cross-runner enforces this byte-for-byte.
+2. **`if` / `elseif` cond folding**. When the cond expression's
+   `ty.exact` is a finite `number`, the lowerer takes the matching
+   branch and drops the rest — including any user-function calls the
+   dropped arms would have triggered. This is the one place a known
+   value short-circuits codegen.
+
+`exact` does NOT cause:
+
+- Substitution of `NumLit` for `Var` at Ident reads.
+- Substitution of `NumLit` for a `Binary`/`Unary`/`Call` whose
+  transfer returned an exact-tagged scalar.
+- Substitution of a compile-time-formatted `fputs` for `disp(a)` when
+  `a` is an exact tensor.
+- Folding of `length(t)` / `numel(t)` / `sum(t)` to a literal — they
+  emit runtime helper calls (with `1.0` as a literal special case
+  when the C arg is a bare scalar `double`).
+
+The C compiler does the runtime constant-folding work for arithmetic.
+mtoc2 stays out of the way.
+
+For specialization and if-cond folding to work without drift between
+mtoc2 and numbl, the JS-side `transfer` of a builtin must produce the
+same exact result numbl would produce at runtime. The cross-runner
+enforces this byte-for-byte.
 
 ## Type variants
 
@@ -108,30 +126,9 @@ work with.
 
 ## Inference flow
 
-Three rules govern how types thread through the lowerer.
+Two rules govern how types thread through the lowerer.
 
-### 1. Scalar Ident reads substitute literals
-
-When the lowerer looks up `x` in env and finds `ty.exact` is a
-scalar-real `number`, it returns a `NumLit` IR node instead of a `Var`.
-The C output then contains the literal value where the variable would
-have appeared (`mtoc2_disp_double(5.0)` rather than
-`mtoc2_disp_double(x)`), letting the C compiler constant-fold
-downstream.
-
-Tensor exact does NOT substitute at Ident-read sites — the runtime
-variable holds the value (always-materialize), and downstream folding
-still works because builtin `transfer` functions read `.exact` from
-`argTypes` rather than from the IR node kind. So `b = a + 1` where
-`a` has tensor exact still folds the elementwise add at compile time
-(the transfer sees both operands' exacts), but `disp(a)` emits
-`mtoc2_disp_tensor(a)` using the materialized variable — except that
-disp's `codegenC` checks `argTypes[0].exact` and emits a compile-time
-`fputs(...)` when the exact is known, ignoring the materialized
-variable. Both paths are correct; the difference is whether the C
-compiler or our lowerer does the constant work.
-
-### 2. Control-flow joins drop exact (unless both sides agree)
+### 1. Control-flow joins drop exact (unless both sides agree)
 
 After an `if`, the env from the then-arm and the env from the else-arm
 are merged via `unify(a, b)` for each shared variable. `unify` keeps
@@ -146,19 +143,21 @@ or the result drops to `Unknown`.
 
 The same `unify` runs on while/for joins (`envBefore` ∪ `envAfterBody`).
 
-### 3. Loop-body mutations widen entry-state exact
+### 2. Loop-body mutations widen entry-state exact
 
 This is the subtle one. Because the lowerer is one-pass, loop bodies
 are lowered with the entry env unchanged. If `s = 0` is in env when we
-enter `while ...; s = s + 1; end`, and we don't widen, then the body's
-first read of `s` substitutes literal `0` and we emit `s = 0 + 1` —
-baking iteration-1 into the body forever.
+enter `while ...; s = s + 1; end` and we don't widen, then every
+transfer inside the body sees `s.ty.exact === 0`, and the resulting
+function-call specializations and if-cond folds would freeze iteration-1
+into the body forever.
 
 The fix: before lowering the body, walk the body AST and collect every
 name that gets assigned (`collectAssignedNames`). Strip `exact` from
 each of those env entries (`stripExactFromEnv`). Now `s` is just a
-non-exact scalar with `sign: nonneg`, and the body emits a real
-runtime add.
+non-exact scalar with `sign: nonneg`, and the body specializes its
+function calls against `s` as a generic scalar and never folds an `if
+s == 0` branch by accident.
 
 `collectAssignedNames` recurses through `If`/`While`/`For`/`Switch`/
 `TryCatch` so a deeply-nested mutation still triggers stripping at
@@ -174,22 +173,14 @@ folds it through FNV-1a to an 8-hex tag. The canonical form includes:
 - `exact` **when set**.
 
 So `sq(5)` and `sq(2.5)` produce two different specializations, each
-with its own exact-tagged param type. In the MVP this almost always
-folds the function call site to a literal (since both inputs are
-exact and the body only does exact-foldable operations), in which
-case the call is replaced inline and the spec emits as dead code.
-
-This will be more useful once we have ops that can't fold (runtime
-math on unknown inputs) — the spec gives us sign-refined param types
-to lean on in those bodies.
+with its own exact-tagged param type. The body lowers under the refined
+types — and because the if-cond fold is the only place exact short-
+circuits codegen, the practical effect of a per-exact-value spec is
+that branches guarded on the input value disappear from the emitted
+body. Arithmetic still emits as runtime C.
 
 ## What's not in the lattice yet
 
-- **Runtime (non-exact) tensors**. Today only exact tensors live in
-  the type system; a tensor whose values aren't known at compile time
-  is rejected. The next big design step is the memory model for
-  runtime tensors — at which point `exact` becomes an optimization
-  fold on top of a general tensor representation.
 - **Logical as a distinct kind** — comparisons return `elem: "logical"`
   today, but in C they're still emitted as `double` (0.0 or 1.0). Once
   the codegen layer cares (e.g. for bit ops), this might split off.

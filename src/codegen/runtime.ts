@@ -131,6 +131,10 @@ const REGISTRY: ReadonlyMap<string, RuntimeSnippet> = new Map<
 
   // ── sum (reduce real tensor to scalar) ────────────────────────────
   ["mtoc2_sum", loadSnippet("sum.h", ["mtoc2_tensor_t"])],
+
+  // ── length / numel (tensor → scalar shape queries) ───────────────
+  ["mtoc2_length", loadSnippet("length.h", ["mtoc2_tensor_t"])],
+  ["mtoc2_numel", loadSnippet("numel.h", ["mtoc2_tensor_t"])],
 ]);
 
 export function getRuntimeSnippet(name: string): RuntimeSnippet {

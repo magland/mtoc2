@@ -57,40 +57,29 @@ The Type lattice is written from scratch for mtoc2 — see
 
 ### IR (`ir.ts`)
 
-A small typed tree: `NumLit`, `TensorLit`, `TensorBuild`, `Var`,
-`Binary`, `Unary`, `Call` for expressions; `ExprStmt`, `Assign`, `If`,
-`While`, `For`, `ReturnFromFunction`, `Break`, `Continue` for
-statements. `IRFunc` captures a single specialization (params, types,
-body, output type). `IRProgram` is top-level statements plus a map of
-specializations.
+A small typed tree: `NumLit`, `TensorBuild`, `Var`, `Binary`, `Unary`,
+`Call` for expressions; `ExprStmt`, `Assign`, `If`, `While`, `For`,
+`ReturnFromFunction`, `Break`, `Continue` for statements. `IRFunc`
+captures a single specialization (params, types, body, output type).
+`IRProgram` is top-level statements plus a map of specializations.
 
-Two tensor IR nodes, split by exactness:
-
-- **`TensorLit`** — compile-time-only. Carries flat data + shape but
-  never materializes as a runtime C value. The only IR sites that
-  pass a `TensorLit` to codegen are tensor-aware builtins (e.g.
-  `disp`), which read from `argTypes[i].exact` and ignore `argsC[i]`.
-  When a builtin's `transfer` folds a tensor argument to a scalar
-  result (e.g. `sum`/`length`/`numel`), the `TensorLit` is discarded
-  at lowering time and a `NumLit` takes its place.
-
-- **`TensorBuild`** — runtime tensor construction. Used when at least
-  one element of a tensor literal isn't exact-foldable. Shape is
-  still statically known (it comes from the source-level literal's
-  rows × cols). Codegen emits `mtoc2_tensor_from_row` (1×N) or
-  `mtoc2_tensor_from_matrix` (R×C) with a C99 compound-literal
-  `(double[]){...}` of the per-element expressions.
+**`TensorBuild`** is the only tensor-construction IR node: every
+source-level tensor literal lowers through it (the all-literal case
+just has `NumLit` cells, the mixed case has `Var` / `Binary` / …).
+Shape is statically known. Codegen emits `mtoc2_tensor_from_row`
+(1×N) or `mtoc2_tensor_from_matrix` (R×C) with a C99 compound-literal
+`(double[]){...}` of the per-element expressions. Special case at
+lowering: a 1×1 tensor literal `[x]` returns the inner scalar IR
+directly — MATLAB treats `[x]` and `x` as the same scalar.
 
 Every `Assign` emits C. For owned types via
 `mtoc2_tensor_assign(&v, rhs)`, for scalars via `<cType> v = rhs;`
-(declare) or `v = rhs;` (reassign). Exact-`TensorLit` RHS materializes
-at the Assign site via `mtoc2_tensor_from_row` / `_from_matrix` —
-the data was computed at compile time but is realized as a live C
-tensor. The env's type still carries the `exact` for downstream
-folding, but the variable always holds the runtime value too. This
-"always-materialize" rule is the simple-correct policy; elision of
-redundant materialization (when every consumer fully folds) is a
-future optimization.
+(declare) or `v = rhs;` (reassign). Every tensor RHS materializes
+freshly — `TensorBuild` via `from_row`/`from_matrix`, `Var` via
+`mtoc2_tensor_copy`, computed tensor RHSs via their per-op runtime
+helper. The type system still tracks `exact` (so specialization keys
+distinguish `f(2)` from `f(3)`), but the lowerer doesn't fold it into
+the IR — see the "Folding only at if-cond" section below.
 
 ### Builtins (`builtins.ts`)
 
@@ -98,11 +87,14 @@ Each builtin is a fused (transfer + codegenC) pair:
 
 - **transfer**: given input types, return the output type. When all
   inputs have `exact` set, the transfer runs the computation in JS and
-  returns a type with `exact` populated.
+  returns a type with `exact` populated. This is what makes the
+  function-specialization key distinguish `f(2)` from `f(3)`, and what
+  feeds the if-cond fold.
 - **codegenC**: given the args' rendered C expressions, return the C
-  expression that evaluates this builtin at runtime. Not invoked when
-  the transfer returned an exact-tagged scalar (the lowerer
-  short-circuits to a `NumLit`).
+  expression that evaluates this builtin at runtime. Always called for
+  every builtin Binary/Unary/Call IR node — the lowerer no longer
+  substitutes a literal even when `transfer` produced an exact-tagged
+  result.
 - **runtimeDeps**: optional list of snippet names this builtin's C
   output calls into. The emitter activates them on each codegen site.
 
@@ -115,23 +107,24 @@ Today's builtins:
     `_st` for non-commutative ops)
   - tensor OP tensor (same statically-known shape) →
     `mtoc2_tensor_<op>_tt`
-    Folds at compile time when every input has `exact` (scalar
-    `number` or tensor `Float64Array`). General broadcast for
-    mismatched non-scalar shapes is not yet supported.
+
+  General broadcast for mismatched non-scalar shapes is not yet
+  supported.
+
 - **Matrix `*` / `/`** — `mtimes`, `mrdivide`. Fall through to the
   elementwise siblings when at least one arg is scalar; throw
   `UnsupportedConstruct` for the both-tensor case (matrix
   multiplication and right-division are not yet implemented).
 - **Comparisons** (return scalar logical): `eq`, `ne`, `lt`, `le`,
-  `gt`, `ge`.
-- **I/O**: `disp` — three paths picked by argument shape/exactness:
-  scalar real → `mtoc2_disp_double(x)`; exact tensor →
-  compile-time-formatted `fputs("…\n", stdout)`; runtime tensor →
+  `gt`, `ge`. Inline `((a cOp b) ? 1.0 : 0.0)` in C.
+- **I/O**: `disp` — two paths picked by argument shape:
+  scalar real → `mtoc2_disp_double(x)`; multi-element tensor →
   `mtoc2_disp_tensor(t)`.
-- **Introspection / reduction**: `length`, `numel` — fold from
-  `t.shape`, always compile-time. `sum` — folds when input is exact;
-  runtime vectors emit `mtoc2_sum(t)`. Matrix → row-vector reduction
-  deferred.
+- **Introspection / reduction**: `length`, `numel` — runtime
+  `mtoc2_length` / `mtoc2_numel` on tensors; literal `1.0` for scalar
+  args (the C arg type is `double`, not `mtoc2_tensor_t`). `sum` →
+  `mtoc2_sum(t)` for tensors, identity for scalars. Matrix →
+  row-vector reduction deferred.
 
 Operator-to-builtin maps live alongside the registry.
 
@@ -186,8 +179,6 @@ free walk releases.
 
 Owned-producing in mtoc2 is: `TensorBuild`, or any
 `Binary`/`Unary`/`Call` whose result is a multi-element tensor.
-`TensorLit` is excluded — it's compile-time only and never
-materializes in C.
 
 Example: `disp(a + b + c)` (all tensors) lowers to
 
@@ -215,26 +206,26 @@ The `Lowerer` class owns three pieces of mutable state:
 - `functionDefs: Map<name, FuncStmt>` — pre-scanned from top-level.
 - `specializations: Map<specKey, IRFunc>` — cached completed specs.
 
-Three rules drive exact propagation:
+Two rules drive exact propagation:
 
-1. **Ident read substitution**. When we look up a variable whose type
-   has scalar `exact` set, we return a `NumLit` instead of a `Var` —
-   the lowerer effectively inlines the literal at every read.
-
-2. **Loop-body exact stripping**. Before lowering a `while`/`for` body,
+1. **Loop-body exact stripping**. Before lowering a `while`/`for` body,
    we collect names assigned in the body and strip `exact` from those
    env entries. Without this, the one-pass walk would bake iteration-1
    values into the body. Implementation in `stripExactFromEnv` +
    `collectAssignedNames`.
 
-3. **Terminator stop in `lowerStmts`**. After we emit a
+2. **Terminator stop in `lowerStmts`**. After we emit a
    `ReturnFromFunction`/`Break`/`Continue`, we stop processing siblings
    in the same block. Otherwise dead code after an early-return would
    pollute the function's return type.
 
-If-folding: when the if-condition lowers to a literal, only the taken
-arm is lowered. The other arms aren't visited (no side effects on env,
-no spurious function specializations).
+If-folding: when the if-condition's type has a known finite `number`
+`exact`, only the taken arm is lowered. The other arms aren't visited
+(no side effects on env, no spurious function specializations). This
+is the **only** place the lowerer substitutes a known value for a
+runtime computation — Ident reads, arithmetic, and builtin calls all
+emit runtime IR regardless of whether `exact` is set. See
+[type_system.md](type_system.md) for the rationale.
 
 ### Function specialization
 
@@ -252,6 +243,17 @@ Recursion isn't supported yet — the placeholder pattern at the top of
 ## Stage 3: emit
 
 `src/codegen/emit.ts` walks the IR and produces a single C string.
+
+Every emitted function carries a block-comment header
+(`src/codegen/prettyIR.ts:irFuncDocComment`) with the source name, the
+mangled C identifier, and the per-parameter and per-output types
+(rendered by `typeToString` — so signs, exact values, and shapes show
+through). Every emitted statement carries a one-line comment header
+above it (`irStmtHeader` → `irExprToString`) — a numbl-like reconstruction
+of the lowered expression. These comments reflect the IR _after_
+lowering: synthetic ANF temps (`_mtoc2_t<N>`) and folded branches are
+visible. They're a debugging aid for the translator, not a transcription
+of the user's source.
 
 Headers + runtime helpers live in `src/codegen/runtime.ts` (the
 registry/activator) backed by `.h` files under `src/codegen/runtime/`.

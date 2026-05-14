@@ -1,0 +1,170 @@
+/**
+ * Numbl-like pretty-printer for the IR. Used by the C emitter to
+ * annotate the generated source with readable comments — function
+ * signatures with detailed type info, and a per-statement summary
+ * of the lowered expression above each emitted block.
+ *
+ * The output is NOT a faithful reproduction of the user's source
+ * (synthetic names like `_mtoc2_t1`, ANF temps, and folded branches
+ * are visible). It IS a faithful render of what the IR actually says
+ * after lowering — useful when debugging the translator.
+ */
+
+import type { IRExpr, IRStmt, IRFunc } from "../lowering/ir.js";
+import { BinaryOperation, UnaryOperation } from "../parser/index.js";
+import { typeToString } from "../lowering/types.js";
+
+function binaryOpSym(op: BinaryOperation): string {
+  switch (op) {
+    case BinaryOperation.Add:
+      return "+";
+    case BinaryOperation.Sub:
+      return "-";
+    case BinaryOperation.Mul:
+      return "*";
+    case BinaryOperation.ElemMul:
+      return ".*";
+    case BinaryOperation.Div:
+      return "/";
+    case BinaryOperation.ElemDiv:
+      return "./";
+    case BinaryOperation.LeftDiv:
+      return "\\";
+    case BinaryOperation.ElemLeftDiv:
+      return ".\\";
+    case BinaryOperation.Pow:
+      return "^";
+    case BinaryOperation.ElemPow:
+      return ".^";
+    case BinaryOperation.Equal:
+      return "==";
+    case BinaryOperation.NotEqual:
+      return "~=";
+    case BinaryOperation.Less:
+      return "<";
+    case BinaryOperation.LessEqual:
+      return "<=";
+    case BinaryOperation.Greater:
+      return ">";
+    case BinaryOperation.GreaterEqual:
+      return ">=";
+    case BinaryOperation.OrOr:
+      return "||";
+    case BinaryOperation.AndAnd:
+      return "&&";
+    case BinaryOperation.BitOr:
+      return "|";
+    case BinaryOperation.BitAnd:
+      return "&";
+  }
+}
+
+function unaryOpSym(op: UnaryOperation): { sym: string; postfix: boolean } {
+  switch (op) {
+    case UnaryOperation.Plus:
+      return { sym: "+", postfix: false };
+    case UnaryOperation.Minus:
+      return { sym: "-", postfix: false };
+    case UnaryOperation.Not:
+      return { sym: "~", postfix: false };
+    case UnaryOperation.Transpose:
+      return { sym: "'", postfix: true };
+    case UnaryOperation.NonConjugateTranspose:
+      return { sym: ".'", postfix: true };
+  }
+}
+
+function numLitText(v: number): string {
+  if (Number.isNaN(v)) return "NaN";
+  if (v === Infinity) return "Inf";
+  if (v === -Infinity) return "-Inf";
+  if (Number.isInteger(v) && Math.abs(v) < 1e15) return v.toString();
+  return v.toString();
+}
+
+export function irExprToString(e: IRExpr): string {
+  switch (e.kind) {
+    case "NumLit":
+      return numLitText(e.value);
+    case "Var":
+      return e.name;
+    case "Binary":
+      return `(${irExprToString(e.left)} ${binaryOpSym(e.op)} ${irExprToString(e.right)})`;
+    case "Unary": {
+      const { sym, postfix } = unaryOpSym(e.op);
+      const inner = irExprToString(e.operand);
+      return postfix ? `${inner}${sym}` : `${sym}${inner}`;
+    }
+    case "Call":
+      return `${e.name}(${e.args.map(irExprToString).join(", ")})`;
+    case "TensorBuild": {
+      const [rows, cols] = e.shape;
+      if (rows === 0 || cols === 0) return "[]";
+      // elements is column-major: index = c*rows + r.
+      const rowsOut: string[] = [];
+      for (let r = 0; r < rows; r++) {
+        const cells: string[] = [];
+        for (let c = 0; c < cols; c++) {
+          cells.push(irExprToString(e.elements[c * rows + r]));
+        }
+        rowsOut.push(cells.join(" "));
+      }
+      return `[${rowsOut.join("; ")}]`;
+    }
+  }
+}
+
+/** One-line summary of a statement (no trailing newline). Returns null
+ *  for stmts the emitter handles structurally (compound-block bodies
+ *  get their own per-stmt comments inside). */
+export function irStmtHeader(s: IRStmt): string | null {
+  switch (s.kind) {
+    case "ExprStmt":
+      return irExprToString(s.expr);
+    case "Assign":
+      return `${s.name} = ${irExprToString(s.expr)}`;
+    case "If":
+      return `if ${irExprToString(s.cond)}`;
+    case "While":
+      return `while ${irExprToString(s.cond)}`;
+    case "For": {
+      const stepPart = s.step === 1 ? "" : `${numLitText(s.step)}:`;
+      return `for ${s.varName} = ${irExprToString(s.start)}:${stepPart}${irExprToString(s.end)}`;
+    }
+    case "ReturnFromFunction":
+      return "return";
+    case "Break":
+      return "break";
+    case "Continue":
+      return "continue";
+  }
+}
+
+/** Multi-line C block comment for a function specialization, listing
+ *  name, mangled C identifier, per-parameter types, and output types. */
+export function irFuncDocComment(fn: IRFunc): string {
+  const lines: string[] = [];
+  lines.push("/**");
+  lines.push(` * ${fn.name} (specialized as \`${fn.cName}\`)`);
+  if (fn.params.length === 0) {
+    lines.push(" *");
+    lines.push(" * params: (none)");
+  } else {
+    lines.push(" *");
+    lines.push(" * params:");
+    for (let i = 0; i < fn.params.length; i++) {
+      lines.push(` *   ${fn.params[i]} :: ${typeToString(fn.paramTypes[i])}`);
+    }
+  }
+  if (fn.outputs.length > 0) {
+    lines.push(" *");
+    lines.push(" * returns:");
+    for (let i = 0; i < fn.outputs.length; i++) {
+      const ty = fn.outputTypes[i];
+      const tyStr = ty ? typeToString(ty) : "unknown";
+      lines.push(` *   ${fn.outputs[i]} :: ${tyStr}`);
+    }
+  }
+  lines.push(" */");
+  return lines.join("\n");
+}
