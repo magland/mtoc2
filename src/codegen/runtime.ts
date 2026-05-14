@@ -138,6 +138,18 @@ const REGISTRY: ReadonlyMap<string, RuntimeSnippet> = new Map<
   ],
   ["mtoc2_disp_text", loadSnippet("disp_text.h", ["mtoc2_text_view_t"])],
 
+  // ── Format engine + fprintf ───────────────────────────────────────
+  // `format_engine.h` is the numbl-compatible printf walker shared by
+  // fprintf and (future) sprintf. It declares `mtoc2_fprintf_arg_t`
+  // (a tagged union) for arg transport; codegen builds a per-call
+  // compound-literal array. Depends on the tensor type for the tensor-
+  // flattening slot kind and on the text view for the format string.
+  [
+    "mtoc2_format_engine",
+    loadSnippet("format_engine.h", ["mtoc2_text_view_t", "mtoc2_tensor_t"]),
+  ],
+  ["mtoc2_fprintf", loadSnippet("fprintf.h", ["mtoc2_format_engine"])],
+
   // ── Tensor (real, multi-element) ──────────────────────────────────
   // Storage shape + alloc + the four "owned value" helpers (copy,
   // assign, free, plus the `from_row`/`from_matrix` literal builders).

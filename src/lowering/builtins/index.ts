@@ -30,6 +30,7 @@ import { le } from "./compare/le.js";
 import { gt } from "./compare/gt.js";
 import { ge } from "./compare/ge.js";
 import { disp } from "./io/disp.js";
+import { fprintf } from "./io/fprintf.js";
 import { length } from "./reduction/length.js";
 import { numel } from "./reduction/numel.js";
 import { sum } from "./reduction/sum.js";
@@ -89,6 +90,7 @@ for (const b of [
   gt,
   ge,
   disp,
+  fprintf,
   length,
   numel,
   sum,
