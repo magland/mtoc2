@@ -74,6 +74,35 @@ async function captureStdout(cmd: string, args: string[]): Promise<string> {
   return stdout;
 }
 
+interface Captured {
+  stdout: string;
+  stderr: string;
+}
+
+/** Mtoc2 invocations run with `--check-leaks`, which builds the C with
+ *  `-fsanitize=address`. Two stderr signals matter:
+ *
+ *  - A `LeakSanitizer:` report at exit means an `mtoc2_tensor_t` (or
+ *    other owned buffer) was not freed. We pass `LSAN_OPTIONS=exitcode=0`
+ *    so LSan still emits its report but does NOT swap the program's
+ *    return value for its own — that way the binary exits 0 on a
+ *    pure-leak run and stdio cleanup flushes normally (LSan's own
+ *    `_exit()` would otherwise drop the program's buffered stdout).
+ *    The caller checks stderr after the stdout match.
+ *  - Any other ASan trigger (heap overflow, UAF, etc.) still aborts
+ *    the binary with non-zero exit; execFile throws and that path is
+ *    surfaced as a real error. */
+async function captureMtoc2(scriptPath: string): Promise<Captured> {
+  const args = ["tsx", cliPath, "run", "--check-leaks", scriptPath];
+  const r = await execFileAsync("npx", args, {
+    maxBuffer: 16 * 1024 * 1024,
+    timeout: TIMEOUT_MS,
+    killSignal: "SIGKILL",
+    env: { ...process.env, LSAN_OPTIONS: "exitcode=0" },
+  });
+  return { stdout: r.stdout, stderr: r.stderr ?? "" };
+}
+
 function diff(expected: string, actual: string): string {
   const al = expected.split("\n");
   const bl = actual.split("\n");
@@ -123,9 +152,9 @@ async function runOne(scriptPath: string): Promise<Result> {
     return { name, status: "FAIL", detail: `numbl errored: ${msg}` };
   }
 
-  let actual: string;
+  let actual: Captured;
   try {
-    actual = await captureStdout("npx", ["tsx", cliPath, "run", scriptPath]);
+    actual = await captureMtoc2(scriptPath);
   } catch (e) {
     const err = e as Error & { stderr?: string };
     const tail = (err.stderr ?? "").trim();
@@ -136,8 +165,17 @@ async function runOne(scriptPath: string): Promise<Result> {
     return { name, status: "FAIL", detail };
   }
 
-  if (actual === expected) return { name, status: "PASS", detail: null };
-  return { name, status: "FAIL", detail: diff(expected, actual) };
+  if (actual.stdout !== expected) {
+    return { name, status: "FAIL", detail: diff(expected, actual.stdout) };
+  }
+  if (actual.stderr.includes("LeakSanitizer:")) {
+    return {
+      name,
+      status: "FAIL",
+      detail: `LeakSanitizer reported leaks:\n${actual.stderr.trim()}`,
+    };
+  }
+  return { name, status: "PASS", detail: null };
 }
 
 async function runPool<T, R>(

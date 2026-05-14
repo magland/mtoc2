@@ -76,26 +76,35 @@ function translate(scriptPath: string): string {
   return result.c ?? "";
 }
 
-function runScript(scriptPath: string): void {
+interface RunOptions {
+  /** Build the C output with `-fsanitize=address -g`. AddressSanitizer
+   *  pulls in LeakSanitizer at exit on Linux, so any unfreed
+   *  `mtoc2_tensor_t` (or other owned buffer) is reported on stderr
+   *  and the process exits non-zero. ~2x slowdown; off by default,
+   *  but the cross-runner enables it for every script. */
+  checkLeaks?: boolean;
+}
+
+function runScript(scriptPath: string, opts: RunOptions = {}): void {
   const cSrc = translate(scriptPath);
   const dir = mkdtempSync(join(tmpdir(), "mtoc2-"));
   const cFile = join(dir, "out.c");
   const exeFile = join(dir, "out");
   writeFileSync(cFile, cSrc);
 
-  const cc = spawnSync(
-    "cc",
-    [
-      "-O0",
-      "-Wno-unused-label",
-      "-Wno-unused-function",
-      "-o",
-      exeFile,
-      cFile,
-      "-lm",
-    ],
-    { stdio: ["ignore", "inherit", "inherit"] }
-  );
+  const ccArgs = [
+    "-O0",
+    "-Wno-unused-label",
+    "-Wno-unused-function",
+    "-o",
+    exeFile,
+    cFile,
+    "-lm",
+  ];
+  if (opts.checkLeaks) ccArgs.unshift("-fsanitize=address", "-g");
+  const cc = spawnSync("cc", ccArgs, {
+    stdio: ["ignore", "inherit", "inherit"],
+  });
   if (cc.status !== 0) {
     console.error(`cc failed (status ${cc.status}); generated C at ${cFile}`);
     process.exit(cc.status ?? 1);
@@ -112,8 +121,16 @@ function main(): void {
   if (argv.length === 0) usage();
   const cmd = argv[0];
   if (cmd === "run") {
-    if (argv.length < 2) usage();
-    runScript(argv[1]);
+    let checkLeaks = false;
+    let script: string | null = null;
+    for (let i = 1; i < argv.length; i++) {
+      const a = argv[i];
+      if (a === "--check-leaks") checkLeaks = true;
+      else if (script === null) script = a;
+      else usage();
+    }
+    if (script === null) usage();
+    runScript(script, { checkLeaks });
     return;
   }
   if (cmd === "translate") {
