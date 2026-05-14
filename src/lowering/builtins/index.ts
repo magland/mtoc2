@@ -65,7 +65,47 @@ for (const b of [
 export type { Builtin } from "./registry.js";
 export { registerBuiltin, getBuiltin, allBuiltinNames } from "./registry.js";
 
-export function binaryOpBuiltin(op: BinaryOperation): string {
+/** Source-level surface form for a binary op. Used to phrase
+ *  user-facing rejection messages so the unsupported construct is
+ *  identified by what the user typed (`^`, `||`, etc.), not by the
+ *  AST enum tag. */
+function binaryOpSurface(op: BinaryOperation): string {
+  switch (op) {
+    case BinaryOperation.Pow:
+      return "^";
+    case BinaryOperation.ElemPow:
+      return ".^";
+    case BinaryOperation.LeftDiv:
+      return "\\";
+    case BinaryOperation.ElemLeftDiv:
+      return ".\\";
+    case BinaryOperation.OrOr:
+      return "||";
+    case BinaryOperation.AndAnd:
+      return "&&";
+    case BinaryOperation.BitOr:
+      return "|";
+    case BinaryOperation.BitAnd:
+      return "&";
+    default:
+      return op;
+  }
+}
+
+function unaryOpSurface(op: UnaryOperation): string {
+  switch (op) {
+    case UnaryOperation.Not:
+      return "~";
+    case UnaryOperation.Transpose:
+      return "'";
+    case UnaryOperation.NonConjugateTranspose:
+      return ".'";
+    default:
+      return op;
+  }
+}
+
+export function binaryOpBuiltin(op: BinaryOperation, span: Span): string {
   switch (op) {
     case BinaryOperation.Add:
       return "plus";
@@ -92,18 +132,30 @@ export function binaryOpBuiltin(op: BinaryOperation): string {
     case BinaryOperation.GreaterEqual:
       return "ge";
     default:
-      throw new Error(`binaryOpBuiltin: unmapped op ${op}`);
+      // The remaining BinaryOperation cases (Pow / ElemPow / LeftDiv /
+      // ElemLeftDiv / OrOr / AndAnd / BitOr / BitAnd) are valid numbl
+      // operators that mtoc2 doesn't yet support. Surface as a span-
+      // attributed UnsupportedConstruct so the CLI prints the source
+      // location of the offending operator instead of an internal
+      // "unmapped op" error.
+      throw new UnsupportedConstruct(
+        `binary operator '${binaryOpSurface(op)}' is not yet supported`,
+        span
+      );
   }
 }
 
-export function unaryOpBuiltin(op: UnaryOperation): string {
+export function unaryOpBuiltin(op: UnaryOperation, span: Span): string {
   switch (op) {
     case UnaryOperation.Minus:
       return "uminus";
     case UnaryOperation.Plus:
       return "uplus";
     default:
-      throw new Error(`unaryOpBuiltin: unmapped op ${op}`);
+      throw new UnsupportedConstruct(
+        `unary operator '${unaryOpSurface(op)}' is not yet supported`,
+        span
+      );
   }
 }
 

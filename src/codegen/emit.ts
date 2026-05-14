@@ -525,8 +525,23 @@ function emitFunction(fn: IRFunc, state: RuntimeState): string {
   // happens BEFORE the scope-exit free walk so the writes can read
   // the live locals before any tensor frees would zero them. For v1
   // outputs are scalar, but the ordering still matches mtoc's pattern.
+  //
+  // Defensive guard: an owned output slot would be both written via
+  // `*_mtoc2_o${i} = <local>` (struct copy of the buffer pointer) AND
+  // freed in the scope-exit walk below — the caller would then see
+  // a dangling pointer and the next assign would double-free. The
+  // lowerer rejects owned multi-output slots in v1, so this guard is
+  // latent today; it surfaces a clear internal error if that
+  // restriction is ever lifted without first fixing this codegen
+  // path to transfer ownership (e.g. `*_mtoc2_o${i} = <local>;
+  // <local> = <empty>();` so the scope-exit free is a no-op).
   if (isMulti) {
     for (let i = 0; i < nOutputs; i++) {
+      if (isOwned(fn.outputTypes[i])) {
+        throw new Error(
+          `internal: multi-output owned slot at index ${i} of '${fn.name}' — codegen does not yet transfer ownership for N≥2 outputs (would double-free at scope exit)`
+        );
+      }
       lines.push(`  *_mtoc2_o${i} = ${fn.cOutputs[i]};`);
     }
   }
@@ -1415,9 +1430,14 @@ function emitIndexSliceStore(
       lines.push(`${indent}  long _mtoc2_rhs_n = ${rhsParts.join(" * ")};`);
       lines.push(`${indent}  if (_mtoc2_n != _mtoc2_rhs_n) {`);
       lines.push(
-        `${indent}    fprintf(stderr, "mtoc2: range-write count mismatch: lhs slice has %ld elements, rhs has %ld\\n", _mtoc2_n, _mtoc2_rhs_n);`
+        `${indent}    fprintf(stderr, "mtoc2: Subscripted assignment dimension mismatch (lhs slice has %ld elements, rhs has %ld)\\n", _mtoc2_n, _mtoc2_rhs_n);`
       );
-      lines.push(`${indent}    abort();`);
+      // exit(1) rather than abort(): abort raises SIGABRT, which
+      // spawnSync surfaces as `signal` instead of `status`, so the
+      // CLI's `process.exit(run.status ?? 0)` would report a clean
+      // run despite the diagnostic. exit(1) gives a non-zero status
+      // the cross-runner sees.
+      lines.push(`${indent}    exit(1);`);
       lines.push(`${indent}  }`);
       lines.push(
         `${indent}  for (long _mtoc2_k = 0; _mtoc2_k < _mtoc2_n; _mtoc2_k++) {`
@@ -1466,9 +1486,11 @@ function emitIndexSliceStore(
     lines.push(`${indent}  long _mtoc2_rhs_n = ${rhsParts.join(" * ")};`);
     lines.push(`${indent}  if (_mtoc2_n != _mtoc2_rhs_n) {`);
     lines.push(
-      `${indent}    fprintf(stderr, "mtoc2: range-write count mismatch: lhs slice has %ld elements, rhs has %ld\\n", _mtoc2_n, _mtoc2_rhs_n);`
+      `${indent}    fprintf(stderr, "mtoc2: Subscripted assignment dimension mismatch (lhs slice has %ld elements, rhs has %ld)\\n", _mtoc2_n, _mtoc2_rhs_n);`
     );
-    lines.push(`${indent}    abort();`);
+    // exit(1), not abort() — see emitIndexSliceStore single-slot path
+    // for rationale (CLI swallows SIGABRT).
+    lines.push(`${indent}    exit(1);`);
     lines.push(`${indent}  }`);
   }
 

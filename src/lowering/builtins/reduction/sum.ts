@@ -40,13 +40,25 @@ export const sum: Builtin = {
           span
         );
       }
+    } else {
+      // Shape unknown at compile time. Accept ONLY if the dim signature
+      // proves vector-ness (one of the axes is statically `one`).
+      // Otherwise reject — `mtoc2_sum` collapses every element to one
+      // scalar regardless of runtime shape, while numbl reduces a
+      // matrix by columns to a row vector. Common trigger: a multi-
+      // slot range slice like `M(:, 2:5)` produces dims `[notOne,
+      // notOne]` with no `shape`, and silently summing it diverges
+      // from numbl.
+      const isProvenVector =
+        t.dims.length === 2 &&
+        (t.dims[0].kind === "one" || t.dims[1].kind === "one");
+      if (!isProvenVector) {
+        throw new UnsupportedConstruct(
+          `'sum' on a non-vector tensor (matrix → row-vector reduction) is not yet supported`,
+          span
+        );
+      }
     }
-    // Shape unknown at compile time (e.g. tensor stored on a struct/
-    // class field): trust the caller to pass a vector at runtime.
-    // The runtime helper handles any shape but the user's expectation
-    // is "vector → scalar". A non-vector at runtime computes
-    // sum-of-all-elements, which matches numbl's behavior for the
-    // 1-d-or-degenerate case.
     if (t.exact instanceof Float64Array) {
       let acc = 0;
       for (let i = 0; i < t.exact.length; i++) acc += t.exact[i];

@@ -939,7 +939,7 @@ export class Lowerer {
     }
     const declare = !this.declared.has(name);
     this.declared.add(name);
-    const cName = existing?.cName ?? name;
+    const cName = existing?.cName ?? cIdentForUserName(name);
     this.env.set(name, { cName, ty: expr.ty });
     return {
       kind: "Assign",
@@ -957,12 +957,25 @@ export class Lowerer {
     this.requireScalarCond(cond.ty, "if condition", s.span);
 
     // If-fold: when the top cond is exact, take/drop the then-arm and
-    // recurse on the remaining elseif chain.
+    // recurse on the remaining elseif chain. The cond's COMPUTATION is
+    // still emitted (as an `ExprStmt` prefix) so any side effects in
+    // the cond — e.g. a `log_then_5() > 0` where the user function's
+    // body has a `disp` and its spec returns an exact 5 — still run at
+    // runtime. Only the BRANCH decision is folded out. `condIsPure`
+    // skips the prefix when no side effect is reachable from cond
+    // (NumLit / Var / EndRef / pure arithmetic on those) so the
+    // common literal-cond case stays clean.
     const folded = condToBool(cond);
-    if (folded === true) return this.lowerStmts(s.thenBody);
+    const condPrefix: IRStmt[] = condIsPure(cond)
+      ? []
+      : [{ kind: "ExprStmt", expr: cond, span: s.cond.span }];
+    if (folded === true) return [...condPrefix, ...this.lowerStmts(s.thenBody)];
     if (folded === false) {
       if (s.elseifBlocks.length === 0) {
-        return s.elseBody ? this.lowerStmts(s.elseBody) : [];
+        return [
+          ...condPrefix,
+          ...(s.elseBody ? this.lowerStmts(s.elseBody) : []),
+        ];
       }
       const [first, ...rest] = s.elseifBlocks;
       // Reshape: `elseif first ... rest else B` becomes a fresh If.
@@ -974,7 +987,8 @@ export class Lowerer {
         elseBody: s.elseBody,
         span: first.cond.span,
       };
-      return this.lowerIf(synthetic);
+      const inner = this.lowerIf(synthetic);
+      return [...condPrefix, ...(Array.isArray(inner) ? inner : [inner])];
     }
 
     // Non-folded path.
@@ -1116,9 +1130,10 @@ export class Lowerer {
     else if (step < 0 && startSign === "negative") kSign = "negative";
     else kSign = loopVarSign;
 
+    const cVar = cIdentForUserName(s.varName);
     this.declared.add(s.varName);
     this.env.set(s.varName, {
-      cName: s.varName,
+      cName: cVar,
       ty: scalarDouble(kSign),
     });
 
@@ -1129,7 +1144,7 @@ export class Lowerer {
     return {
       kind: "For",
       varName: s.varName,
-      cVar: s.varName,
+      cVar,
       start,
       step,
       end,
@@ -1291,6 +1306,19 @@ export class Lowerer {
       // statically-known shape and the runtime-allocated buffer agree.
       const raw = Math.floor((eExact - sExact) / tExact + 1 + 1e-10);
       const n = raw > 0 ? raw : 0;
+      // Length-1 collapse: a `1:1`-style range is a single-element
+      // tensor with dims [1, 1]. The type system classifies that as
+      // scalar (both dims `one`), so the LHS would be declared
+      // `double` — but the IR is `MakeRange`, which always emits a
+      // tensor-returning helper. Returning `start` directly resolves
+      // the type/IR mismatch and matches MATLAB / numbl, which both
+      // treat `1:1` as the scalar `1`. Side effects in `start` are
+      // preserved (it's the returned IR); side effects in `step` /
+      // `end` are dropped — accepted limitation since both must have
+      // exact values for us to know the length statically, and
+      // exact-bearing IR is overwhelmingly NumLit / Var / pure
+      // arithmetic in practice.
+      if (n === 1) return start;
       resultTy = tensorDouble([1, n]);
     } else {
       resultTy = tensorDouble([1, 1]); // placeholder; will be overridden
@@ -1616,7 +1644,7 @@ export class Lowerer {
     this.requireValueType(left, "binary operator operand");
     const right = this.lowerExpr(e.right);
     this.requireValueType(right, "binary operator operand");
-    const name = binaryOpBuiltin(e.op);
+    const name = binaryOpBuiltin(e.op, e.span);
     const b = getBuiltin(name);
     if (!b) {
       throw new UnsupportedConstruct(
@@ -1639,7 +1667,7 @@ export class Lowerer {
   private lowerUnary(e: Extract<Expr, { type: "Unary" }>): IRExpr {
     const operand = this.lowerExpr(e.operand);
     this.requireValueType(operand, "unary operator operand");
-    const name = unaryOpBuiltin(e.op);
+    const name = unaryOpBuiltin(e.op, e.span);
     const b = getBuiltin(name);
     if (!b) {
       throw new UnsupportedConstruct(
@@ -1678,10 +1706,17 @@ export class Lowerer {
     // means the user wrote `name(args)` expecting indexing/call, which
     // mtoc2 doesn't support yet — emit a clearer error than "unknown
     // function".
-    if (e.name === "struct") {
+    // Look up the env BEFORE the `struct(...)` constructor shortcut so
+    // `struct = [1 2 3]; struct(2)` reads the local (yields `2`)
+    // rather than dispatching to the `struct(...)` constructor and
+    // erroring on "expects an even number of args". MATLAB precedence
+    // is env > builtin; this honors it for the one builtin name that
+    // has special-cased lowering. Other in-scope-variable cases
+    // (handle, multi-element numeric, scalar) are handled below.
+    const envEntry = this.env.get(e.name);
+    if (envEntry === undefined && e.name === "struct") {
       return this.lowerStructConstructor(e);
     }
-    const envEntry = this.env.get(e.name);
     if (envEntry !== undefined && isHandle(envEntry.ty)) {
       return this.dispatchHandleCall(e.name, envEntry, e.args, e.span);
     }
@@ -2032,7 +2067,10 @@ export class Lowerer {
     this.tempCounter = 0;
     this.currentFile = reg.file;
     for (let i = 0; i < decl.params.length; i++) {
-      this.env.set(decl.params[i], { cName: decl.params[i], ty: argTypes[i] });
+      this.env.set(decl.params[i], {
+        cName: cIdentForUserName(decl.params[i]),
+        ty: argTypes[i],
+      });
       this.declared.add(decl.params[i]);
     }
 
@@ -2367,10 +2405,10 @@ export class Lowerer {
       name: decl.name,
       cName: key,
       params: decl.params.slice(),
-      cParams: decl.params.slice(),
+      cParams: decl.params.map(cIdentForUserName),
       paramTypes: argTypes,
       outputs: decl.outputs.slice(),
-      cOutputs: decl.outputs.slice(),
+      cOutputs: decl.outputs.map(cIdentForUserName),
       outputTypes: [],
       body: [],
       span: decl.span,
@@ -2387,10 +2425,12 @@ export class Lowerer {
     this.tempCounter = 0;
     this.currentFile = file;
 
-    // Bind params.
+    // Bind params. The C name goes through `cIdentForUserName` so a
+    // user-source `function r = f(struct)` doesn't reference the C
+    // keyword `struct` for reads of `struct` inside the body.
     for (let i = 0; i < decl.params.length; i++) {
       const pName = decl.params[i];
-      this.env.set(pName, { cName: pName, ty: argTypes[i] });
+      this.env.set(pName, { cName: cIdentForUserName(pName), ty: argTypes[i] });
       this.declared.add(pName);
     }
     // Outputs are declared but not yet assigned (the normal path).
@@ -2501,6 +2541,64 @@ function sanitizeCIdent(s: string): string {
   return s.replace(/[^A-Za-z0-9_]/g, "_");
 }
 
+/** C reserved words that are also legal numbl identifiers. mtoc2 maps
+ *  every user variable / param name through `cIdentForUserName` at
+ *  declaration time so a variable named `struct`, `for`, `int`, etc.
+ *  doesn't collide with a C keyword on the emit side. The keyword
+ *  list mirrors numbl's C-JIT codegen. `mtoc2_` is reserved for the
+ *  translator's own synthetic names. */
+const C_RESERVED_NAMES: ReadonlySet<string> = new Set([
+  "auto",
+  "break",
+  "case",
+  "char",
+  "const",
+  "continue",
+  "default",
+  "do",
+  "double",
+  "else",
+  "enum",
+  "extern",
+  "float",
+  "for",
+  "goto",
+  "if",
+  "inline",
+  "int",
+  "long",
+  "register",
+  "restrict",
+  "return",
+  "short",
+  "signed",
+  "sizeof",
+  "static",
+  "struct",
+  "switch",
+  "typedef",
+  "union",
+  "unsigned",
+  "void",
+  "volatile",
+  "while",
+  "main",
+  // C99/C11 keywords seen in our runtime headers
+  "_Bool",
+  "_Complex",
+  "_Imaginary",
+]);
+
+/** Map a user-source variable name to a safe C identifier. C keywords
+ *  get a `v_` prefix; other names pass through unchanged so emitted C
+ *  remains readable for the common case. The numbl parser already
+ *  rejects identifiers starting with `_`, so a user `for` only collides
+ *  with the C keyword (not with `v_for` from any other source). */
+function cIdentForUserName(name: string): string {
+  if (C_RESERVED_NAMES.has(name)) return `v_${name}`;
+  return name;
+}
+
 /** Scan a constructor body for the FIRST top-level direct
  *  `<receiver>.<propName> = <rhs>` assignment. Returns the rhs Expr,
  *  or `null` if no such assignment is found. Conditional / loop /
@@ -2573,6 +2671,29 @@ function condToBool(cond: IRExpr): boolean | null {
   if (typeof x !== "number") return null;
   if (!Number.isFinite(x)) return null;
   return x !== 0;
+}
+
+/** True when `e` is guaranteed side-effect-free: NumLit, Var, EndRef,
+ *  HandleCaptureLoad, and pure compositions of those via Binary /
+ *  Unary. Calls (user functions and any builtin — `disp`, `tic`,
+ *  bounds-checked indexing) are conservatively treated as impure.
+ *  Used by `lowerIf`'s fold path: when the cond folds to a constant,
+ *  pure conds are dropped entirely; impure ones get prepended as an
+ *  `ExprStmt` so their side effects still run. */
+function condIsPure(e: IRExpr): boolean {
+  switch (e.kind) {
+    case "NumLit":
+    case "Var":
+    case "EndRef":
+    case "HandleCaptureLoad":
+      return true;
+    case "Unary":
+      return condIsPure(e.operand);
+    case "Binary":
+      return condIsPure(e.left) && condIsPure(e.right);
+    default:
+      return false;
+  }
 }
 
 /** Walk an anonymous-function body and register every free `Ident`
