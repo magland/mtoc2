@@ -52,6 +52,7 @@ import {
   scalarDouble,
   tensorDouble,
   classType,
+  signFromExactArray,
   signFromNumber,
   unifySign,
   isScalarRealNumeric,
@@ -670,8 +671,21 @@ export class Lowerer {
       // Both lower helpers above require lv.base to be an Ident, so
       // pulling its name here is safe.
       if (lv.base.type === "Ident") {
-        const rhsSign = rhsSignFromStoreResult(result);
-        widenAfterIndexedWrite(this.env, lv.base.name, rhsSign);
+        // Try to refresh the exact Float64Array in place when the
+        // store's indices and rhs are both compile-time-known and the
+        // base already carries exact data. This keeps downstream
+        // builtin transfers (`zeros(sz)` after `sz(1) = ...`) able to
+        // see the post-write shape. If any precondition fails, fall
+        // back to the default widening (strip exact).
+        const refreshed = tryRefreshExactAfterIndexedWrite(
+          this.env,
+          lv.base.name,
+          result
+        );
+        if (!refreshed) {
+          const rhsSign = rhsSignFromStoreResult(result);
+          widenAfterIndexedWrite(this.env, lv.base.name, rhsSign);
+        }
       }
       return result;
     }
@@ -3432,6 +3446,63 @@ function stripQuotes(s: string): string {
     }
   }
   return s;
+}
+
+/** Refresh the env entry's `exact: Float64Array` in place after a
+ *  scalar IndexStore when both the indices and the rhs are compile-
+ *  time-known. Returns true on success (env updated), false if any
+ *  precondition fails — the caller falls back to widening (strip
+ *  exact). Only handles `IndexStore` (scalar lvalue); slice stores
+ *  keep the existing strip-exact behavior. */
+function tryRefreshExactAfterIndexedWrite(
+  env: Map<string, { cName: string; ty: Type }>,
+  name: string,
+  result: IRStmt | IRStmt[]
+): boolean {
+  const last = Array.isArray(result) ? result[result.length - 1] : result;
+  if (last.kind !== "IndexStore") return false;
+  const e = env.get(name);
+  if (e === undefined) return false;
+  if (e.ty.kind !== "Numeric") return false;
+  const ty = e.ty;
+  const shape = ty.shape;
+  const data = ty.exact;
+  if (shape === undefined || !(data instanceof Float64Array)) return false;
+  if (!isNumeric(last.rhs.ty) || typeof last.rhs.ty.exact !== "number") {
+    return false;
+  }
+  const rhsVal = last.rhs.ty.exact;
+  const idxVals: number[] = [];
+  for (const ix of last.indices) {
+    if (!isNumeric(ix.ty) || typeof ix.ty.exact !== "number") return false;
+    const v = ix.ty.exact;
+    if (!Number.isFinite(v) || !Number.isInteger(v) || v < 1) return false;
+    idxVals.push(v);
+  }
+  let offset: number;
+  if (idxVals.length === 1) {
+    const total = shape.reduce((a, b) => a * b, 1);
+    if (idxVals[0] > total) return false;
+    offset = idxVals[0] - 1;
+  } else if (idxVals.length === shape.length) {
+    offset = 0;
+    let stride = 1;
+    for (let k = 0; k < shape.length; k++) {
+      if (idxVals[k] > shape[k]) return false;
+      offset += (idxVals[k] - 1) * stride;
+      stride *= shape[k];
+    }
+  } else {
+    return false;
+  }
+  const newData = new Float64Array(data);
+  newData[offset] = rhsVal;
+  const newSign = signFromExactArray(newData);
+  env.set(name, {
+    cName: e.cName,
+    ty: { ...ty, exact: newData, sign: newSign },
+  });
+  return true;
 }
 
 /** Walk a stmt-tree and collect names of LHS targets (Assign, MultiAssign,

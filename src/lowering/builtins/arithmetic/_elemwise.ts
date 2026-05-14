@@ -175,7 +175,9 @@ function buildElemwiseRealBinary(opts: {
         }
         return tensorDouble(outShape, data);
       }
-      return tensorDouble(outShape);
+      const out = tensorDouble(outShape);
+      out.sign = signRule(aN, bN);
+      return out;
     },
     codegenC(argsC, argTypes) {
       const aMulti = isMultiElement(argTypes[0]);
@@ -227,8 +229,7 @@ export function signDiff(a: NumericType, b: NumericType): Sign {
 }
 
 export function signProd(a: NumericType, b: NumericType): Sign {
-  const same = (x: Sign, y: Sign): boolean => x === y;
-  if (same(a.sign, "zero") || same(b.sign, "zero")) return "zero";
+  if (a.sign === "zero" || b.sign === "zero") return "zero";
   if (a.sign === "positive" && b.sign === "positive") return "positive";
   if (a.sign === "negative" && b.sign === "negative") return "positive";
   if (
@@ -237,6 +238,17 @@ export function signProd(a: NumericType, b: NumericType): Sign {
   ) {
     return "negative";
   }
+  // Lift the bounds to nonneg/nonpositive when both operands share a
+  // sign. `0 * Inf = NaN` is the edge case; NaN is not `< 0` so it
+  // doesn't violate the "≥ 0" interpretation our sqrt-domain check
+  // relies on (and it doesn't violate `≤ 0` either).
+  const aNonneg = a.sign === "positive" || a.sign === "nonneg";
+  const bNonneg = b.sign === "positive" || b.sign === "nonneg";
+  const aNonpos = a.sign === "negative" || a.sign === "nonpositive";
+  const bNonpos = b.sign === "negative" || b.sign === "nonpositive";
+  if (aNonneg && bNonneg) return "nonneg";
+  if (aNonpos && bNonpos) return "nonneg";
+  if ((aNonneg && bNonpos) || (aNonpos && bNonneg)) return "nonpositive";
   return "unknown";
 }
 
@@ -256,5 +268,16 @@ export function signQuot(a: NumericType, b: NumericType): Sign {
   ) {
     return "negative";
   }
+  // Same "nonneg / nonneg = nonneg (NaN allowed)" relaxation as
+  // signProd. Required for chains like `sqrt(errs / errs0 / k)` where
+  // the numerator/denominator are sum-of-squares (nonneg) and we want
+  // sqrt to accept the quotient.
+  const aNonneg = a.sign === "positive" || a.sign === "nonneg";
+  const bNonneg = b.sign === "positive" || b.sign === "nonneg";
+  const aNonpos = a.sign === "negative" || a.sign === "nonpositive";
+  const bNonpos = b.sign === "negative" || b.sign === "nonpositive";
+  if (aNonneg && bNonneg) return "nonneg";
+  if (aNonpos && bNonpos) return "nonneg";
+  if ((aNonneg && bNonpos) || (aNonpos && bNonneg)) return "nonpositive";
   return "unknown";
 }

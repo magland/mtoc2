@@ -36,6 +36,8 @@ test_range_empty();
 test_scalar_write_invalidates_sum();
 test_slice_write_invalidates_sum();
 test_scalar_write_invalidates_disp();
+test_scalar_read_exact_propagates();
+test_scalar_write_exact_refresh();
 
 test_index_write_in_for_strips_exact();
 test_slice_write_in_for_strips_exact();
@@ -316,6 +318,32 @@ function test_scalar_write_invalidates_disp()
   x = ones(1, 3);
   x(2) = 99;
   disp(x);
+end
+
+% Scalar index-read of an exact-tracked tensor propagates the element
+% value into the result type. Without that, the downstream `zeros(r, c)`
+% would fail with "dim vector must be statically known". numbl sees the
+% same `disp` output; mtoc2 silently routes through static folding.
+function test_scalar_read_exact_propagates()
+  x = zeros(4, 5);
+  sz = size(x);
+  r = sz(1) - 1;
+  c = sz(2);
+  y = zeros(r, c);
+  disp(size(y, 1));
+  disp(size(y, 2));
+end
+
+% Scalar indexed-write with an exact RHS and exact index refreshes
+% (rather than strips) the base tensor's exact data. Downstream
+% `zeros(sz)` then folds. Matches `lege.derpol`'s `sz(1) = max(...)`
+% pattern.
+function test_scalar_write_exact_refresh()
+  sz = [4, 5];
+  sz(1) = max(sz(1) - 1, 0);
+  y = zeros(sz);
+  disp(size(y, 1));
+  disp(size(y, 2));
 end
 
 % -------- loop-body widening on indexed writes --------

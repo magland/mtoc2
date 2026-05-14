@@ -13,6 +13,8 @@ test_binary_runtime();
 test_logical_input();
 test_in_loop();
 test_pass_to_func();
+test_minmax_two_arg();
+test_sign_propagation_chain();
 
 function test_scalar_exact_unary()
   % Trig
@@ -269,4 +271,37 @@ end
 
 function d = distance(x, y)
   d = sqrt(x * x + y * y);
+end
+
+% Elementwise 2-arg form of `max`/`min` on scalars. Backed by C99
+% `fmax`/`fmin`. NaN follows MATLAB semantics: the non-NaN operand
+% wins.
+function test_minmax_two_arg()
+  disp(max(3, 5));
+  disp(min(3, 5));
+  disp(max(-7, -2));
+  disp(min(-7, -2));
+  disp(max(7 - 10, 0));
+  disp(min(NaN, 4));
+  disp(max(NaN, 4));
+  disp(max(NaN, NaN));
+  a = 3;
+  b = 5;
+  %!numbl:opaque a b
+  disp(max(a, b));
+  disp(min(a, b));
+end
+
+% Sign-tracking improvements: even-integer power → nonneg, nonneg ⊗
+% nonneg → nonneg (multiply / divide). Without these, the `sqrt`
+% domain check would reject `chunkerfunc.m`'s spectral resolution
+% chain. The runtime values match numbl; the test exists to lock in
+% the static accept.
+function test_sign_propagation_chain()
+  d = [-1, -2, -3; -4, -5, -6];
+  %!numbl:opaque d
+  v = sqrt(sum(d .^ 2, 1));
+  disp(v);
+  e = sqrt(sum(abs(d).^2 / 4, 1));
+  disp(e);
 end

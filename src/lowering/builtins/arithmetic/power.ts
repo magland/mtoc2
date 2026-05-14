@@ -67,6 +67,17 @@ function powerSign(a: NumericType, b: NumericType): Sign {
   // exponent exact zero → result is exactly 1 (positive).
   const bx = exactDouble(b);
   if (bx === 0) return "positive";
+  // Even-integer exponent → result is x^(2k), always ≥ 0 regardless
+  // of base sign. `nonneg` (becomes `positive` only if the base is
+  // provably nonzero, which we don't track).
+  if (
+    bx !== undefined &&
+    Number.isFinite(bx) &&
+    Number.isInteger(bx) &&
+    bx % 2 === 0
+  ) {
+    return "nonneg";
+  }
   if (signIsNonneg(a.sign) && signIsNonneg(b.sign)) {
     // base positive → positive; base nonneg → nonneg.
     if (a.sign === "positive") return "positive";
@@ -182,7 +193,9 @@ export const power: Builtin = {
       }
       if (allFinite) return tensorDouble(outShape, data);
     }
-    return tensorDouble(outShape);
+    const out = tensorDouble(outShape);
+    out.sign = powerSign(a, b);
+    return out;
   },
   codegenC(argsC, argTypes) {
     const aMulti = isMultiElement(argTypes[0]);

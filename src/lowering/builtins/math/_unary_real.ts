@@ -85,7 +85,9 @@ export function defineUnaryRealMath(opts: UnaryRealMathOpts): Builtin {
         }
         if (allFinite) return tensorDouble(a.shape, out);
       }
-      return tensorDouble(a.shape);
+      const out = tensorDouble(a.shape);
+      out.sign = signRule(a);
+      return out;
     },
     codegenC(argsC, argTypes) {
       if (isMultiElement(argTypes[0])) {

@@ -456,14 +456,14 @@ export function reductionTransfer(
       span
     );
   }
-  // min/max: 2-arg form is the elementwise slope. Reject (separate
-  // slope, not part of this family).
+  // min/max: 2-arg form is the elementwise slope (`max(a, b)`,
+  // `min(a, b)`), not a reduction. Route to a separate transfer.
+  // Scalar-scalar only for now; tensor / broadcast forms are deferred.
   if (spec.dimArgIndex === 2 && argTypes.length === 2) {
-    throw new UnsupportedConstruct(
-      `'${spec.name}' two-arg form (elementwise '${spec.name}(A, B)') ` +
-        `is not yet supported — use the reduction form ` +
-        `'${spec.name}(A, [], dim)' or '${spec.name}(A)'`,
-      span
+    return elementwiseMinMaxTransfer(
+      argTypes,
+      span,
+      spec.name as "min" | "max"
     );
   }
   // 3-arg form for min/max requires the [] placeholder in slot 2.
@@ -623,12 +623,106 @@ export function reductionTransfer(
 
 /** Build the codegenC closure for a reducer. The kernel name powers
  *  the emitted helper call (`mtoc2_<kernel>_all` / `_dim`). */
+// ── Elementwise 2-arg min/max (not a reduction) ────────────────────────
+
+/** `max(a, b)` / `min(a, b)` scalar-scalar transfer. Result is a scalar
+ *  real double; folds when both inputs are exact (NaN-aware, matching
+ *  C99 `fmax`/`fmin` — NaN is treated as missing data, so the non-NaN
+ *  operand wins). Tensor and broadcast forms are deferred. */
+function elementwiseMinMaxTransfer(
+  argTypes: Type[],
+  span: Span,
+  name: "min" | "max"
+): Type {
+  const [a, b] = argTypes;
+  if (!isNumeric(a) || a.isComplex || !isNumeric(b) || b.isComplex) {
+    throw new TypeError(`'${name}(a, b)' args must be real numeric`, span);
+  }
+  if (a.elem !== "double" && a.elem !== "logical") {
+    throw new TypeError(
+      `'${name}(a, b)' arg 1 must be double or logical (got ${a.elem})`,
+      span
+    );
+  }
+  if (b.elem !== "double" && b.elem !== "logical") {
+    throw new TypeError(
+      `'${name}(a, b)' arg 2 must be double or logical (got ${b.elem})`,
+      span
+    );
+  }
+  if (!isScalar(a) || !isScalar(b)) {
+    throw new UnsupportedConstruct(
+      `'${name}(a, b)' tensor / broadcast form is not yet supported — ` +
+        `both args must be scalar`,
+      span
+    );
+  }
+  const av = exactDouble(a);
+  const bv = exactDouble(b);
+  if (av !== undefined && bv !== undefined) {
+    // NaN-aware: if exactly one is NaN, the non-NaN one wins.
+    let v: number;
+    if (Number.isNaN(av)) {
+      v = bv;
+    } else if (Number.isNaN(bv)) {
+      v = av;
+    } else {
+      v = name === "max" ? Math.max(av, bv) : Math.min(av, bv);
+    }
+    return scalarDouble(signFromNumber(v), v);
+  }
+  return scalarDouble(elementwiseMinMaxSign(name, a.sign, b.sign));
+}
+
+/** Sign rule for `max(a, b)` / `min(a, b)` on two scalars. */
+function elementwiseMinMaxSign(name: "min" | "max", sa: Sign, sb: Sign): Sign {
+  if (name === "max") {
+    // max(a, b) >= a and >= b, so any "≥ 0" constraint on either
+    // operand carries through.
+    if (sa === "positive" || sb === "positive") return "positive";
+    if (sa === "nonneg" || sb === "nonneg") return "nonneg";
+    if (sa === "zero" && sb === "zero") return "zero";
+    if (
+      (sa === "zero" || sa === "negative" || sa === "nonpositive") &&
+      (sb === "zero" || sb === "negative" || sb === "nonpositive")
+    ) {
+      // Both operands are ≤ 0; max is also ≤ 0.
+      // If either is exactly zero we already know max ≥ 0, so combined
+      // with ≤ 0 we'd get zero — but the caller doesn't reach here
+      // because the positive/nonneg cases short-circuited above.
+      if (sa === "negative" && sb === "negative") return "negative";
+      return "nonpositive";
+    }
+    return "unknown";
+  }
+  // min: symmetric. min(a, b) <= a and <= b.
+  if (sa === "negative" || sb === "negative") return "negative";
+  if (sa === "nonpositive" || sb === "nonpositive") return "nonpositive";
+  if (sa === "zero" && sb === "zero") return "zero";
+  if (
+    (sa === "zero" || sa === "positive" || sa === "nonneg") &&
+    (sb === "zero" || sb === "positive" || sb === "nonneg")
+  ) {
+    if (sa === "positive" && sb === "positive") return "positive";
+    return "nonneg";
+  }
+  return "unknown";
+}
+
 export function reductionCodegen(spec: {
   name: string;
   dimArgIndex: 1 | 2;
   outputElem: "double" | "logical";
 }): (argsC: string[], argTypes: Type[]) => string {
   return (argsC, argTypes) => {
+    // Elementwise 2-arg min/max: dispatch before the reduction logic
+    // (the surface form is the same `min`/`max` builtin, but the
+    // semantics — and the C side — are completely separate).
+    if (spec.dimArgIndex === 2 && argTypes.length === 2) {
+      // Transfer already verified both args are scalar real numeric.
+      // C99 `fmax`/`fmin` match MATLAB's NaN-aware rule.
+      return `${spec.name === "max" ? "fmax" : "fmin"}((double)(${argsC[0]}), (double)(${argsC[1]}))`;
+    }
     const inputT = argTypes[0];
     if (!isNumeric(inputT)) {
       throw new Error(`internal: ${spec.name} codegen got non-numeric arg`);
