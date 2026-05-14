@@ -13,7 +13,7 @@ static mtoc2_tensor_t mtoc2_tensor_make_range(double start, double step, double 
   long n = mtoc2_loop_count(start, end, step);
   mtoc2_tensor_t t = mtoc2_tensor_alloc_nd(2, (long[]){1, n});
   for (long k = 0; k < n; k++) {
-    t.real[k] = start + step * (double)k;
+    t.real[k] = mtoc2_range_value(start, step, end, n, k);
   }
   return t;
 }

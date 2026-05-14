@@ -531,11 +531,13 @@ function emitFunction(fn: IRFunc, state: RuntimeState): string {
     }
   }
   // Scope-exit frees: skip owned locals that nullAtScopeExit proves
-  // are NULL on every reaching path (already early-freed).
-  const scopeExitNames = new Set<string>([
-    ...owned.map(o => o.cName),
-    ...ownedParams.map(p => p.cName),
-  ]);
+  // are NULL on every reaching path (already early-freed). Owned
+  // params arrive freshly-owned from the caller — they are NOT null
+  // at entry, so they MUST NOT be seeded into nullAtScopeExit's
+  // entry set; doing so would let a body that never reassigns the
+  // param keep the param in the null-set and skip its scope-exit
+  // free, leaking the caller's `mtoc2_tensor_copy` allocation.
+  const scopeExitNames = new Set<string>(owned.map(o => o.cName));
   const fnNullAtExit = nullAtScopeExit(fn.body, scopeExitNames, futureTouches);
   for (const o of [...owned, ...ownedParams]) {
     if (fnNullAtExit.has(o.cName)) continue;
@@ -708,23 +710,46 @@ function emitStmt(
       return lines.join("\n");
     }
     case "For": {
+      // MATLAB / numbl evaluate `start:step:end` ONCE at loop entry
+      // (the range becomes a vector and the loop iterates over its
+      // elements). To match: snapshot start/end into block-scoped
+      // locals, derive the iteration count via `mtoc2_loop_count` so
+      // it agrees with `mtoc2_tensor_make_range`'s formula, and use
+      // `mtoc2_range_value` to apply the snap-to-end on the final
+      // iteration. Without this, the body re-reads the live binding
+      // for `end` every iteration — so e.g. `for k=1:n; n=100; end`
+      // becomes a 100-iter loop instead of the MATLAB-correct 3.
+      useRuntimeByName(state, "mtoc2_loop_count");
+      useRuntimeByName(state, "mtoc2_range_value");
       const lines: string[] = [];
       const startC = emitExpr(s.start, state);
       const endC = emitExpr(s.end, state);
       const stepC = formatDouble(s.step);
-      const cmp = s.step > 0 ? "<=" : ">=";
-      const upd = s.step > 0 ? `+= ${stepC}` : `-= ${formatDouble(-s.step)}`;
+      // Block-scope the snapshot temps so nested For loops don't
+      // collide on the fixed `_mtoc2_for_*` names.
+      lines.push(`${indent}{`);
+      lines.push(`${indent}  const double _mtoc2_for_start = ${startC};`);
+      lines.push(`${indent}  const double _mtoc2_for_end = ${endC};`);
       lines.push(
-        `${indent}for (double ${s.cVar} = ${startC}; ${s.cVar} ${cmp} ${endC}; ${s.cVar} ${upd}) {`
+        `${indent}  const long _mtoc2_for_n = mtoc2_loop_count(_mtoc2_for_start, _mtoc2_for_end, ${stepC});`
+      );
+      lines.push(
+        `${indent}  for (long _mtoc2_for_i = 0; _mtoc2_for_i < _mtoc2_for_n; _mtoc2_for_i++) {`
+      );
+      // The user may mutate the loop variable inside the body (the
+      // next iteration overrides it), so it stays non-const.
+      lines.push(
+        `${indent}    double ${s.cVar} = mtoc2_range_value(_mtoc2_for_start, ${stepC}, _mtoc2_for_end, _mtoc2_for_n, _mtoc2_for_i);`
       );
       const bodyText = emitBody(
         s.body,
-        indent + "  ",
+        indent + "    ",
         state,
         futureTouches,
         ownedTypes
       );
       if (bodyText.length > 0) lines.push(bodyText);
+      lines.push(`${indent}  }`);
       lines.push(`${indent}}`);
       return lines.join("\n");
     }
@@ -1023,35 +1048,45 @@ function formatDouble(v: number): string {
 
 /** Compute the column-major linear buffer offset for a scalar
  *  IndexLoad / IndexStore: 1-arg linear, 2-arg row/col, or N-arg N-D.
- *  Mirrors mtoc's `emitNdScalarOffset` — one source of truth for the
- *  offset formula. */
+ *  Each axis index is wrapped in a runtime bounds-check call
+ *  (`mtoc2_idx_axis` for per-axis; `mtoc2_idx_lin` for 1-arg linear)
+ *  so an OOB access aborts with a numbl-style "Index exceeds array
+ *  bounds" message instead of silently reading/writing past the
+ *  buffer. Mirrors mtoc's `emitNdScalarOffset` — one source of truth
+ *  for the offset formula. */
 function emitNdScalarOffset(
   state: RuntimeState,
   indices: ReadonlyArray<IRExpr>,
   baseCName: string
 ): string {
+  useRuntimeByName(state, "mtoc2_oob_abort");
   if (indices.length === 1) {
-    return `(long)(${emitExpr(indices[0], state)}) - 1L`;
-  }
-  if (indices.length === 2) {
-    return (
-      `(long)(${emitExpr(indices[0], state)}) - 1L + ` +
-      `((long)(${emitExpr(indices[1], state)}) - 1L) * ` +
-      `${baseCName}.dims[0]`
-    );
+    const loc = locStringOf(indices[0].span);
+    return `mtoc2_idx_lin(&${baseCName}, (long)(${emitExpr(indices[0], state)}), ${loc})`;
   }
   const terms: string[] = [];
   for (let i = 0; i < indices.length; i++) {
-    const idxStr = `((long)(${emitExpr(indices[i], state)}) - 1L)`;
+    const loc = locStringOf(indices[i].span);
+    const checked = `mtoc2_idx_axis(&${baseCName}, ${i}, (long)(${emitExpr(indices[i], state)}), ${loc})`;
     if (i === 0) {
-      terms.push(idxStr);
+      terms.push(checked);
     } else {
       const strideParts: string[] = [];
       for (let j = 0; j < i; j++) strideParts.push(`${baseCName}.dims[${j}]`);
-      terms.push(`${idxStr} * ${strideParts.join(" * ")}`);
+      terms.push(`${checked} * ${strideParts.join(" * ")}`);
     }
   }
   return terms.join(" + ");
+}
+
+/** Format a Span as a quoted "<file>:<offset>" string literal for
+ *  passing to a runtime helper. The file path is JSON-escaped (the
+ *  emitter already requires a single C-string-safe form), and the
+ *  offset is the byte offset of the violating expression — matches
+ *  the format used by translate-time `UnsupportedConstruct` errors,
+ *  so the user sees a familiar location for runtime OOB too. */
+function locStringOf(span: { file: string; start: number }): string {
+  return `${JSON.stringify(`${span.file}:offset ${span.start}`)}`;
 }
 
 /** Compute the column-major linear offset for an N-D access given
@@ -1096,9 +1131,16 @@ function emitSliceSlotSetup(
       lines.push(`${indent}long _mtoc2_n_${i} = ${baseCName}.dims[${i}];`);
       slotSrc.push(kVar);
     } else if (slot.kind === "Scalar") {
+      // Per-axis bounds check at setup time. Same `mtoc2_idx_axis`
+      // helper used by scalar IndexLoad / IndexStore — aborts with
+      // a numbl-style "Index in position N exceeds array bounds".
+      useRuntimeByName(state, "mtoc2_oob_abort");
       const scalarStr = emitExpr(slot.expr, state);
+      const loc = locStringOf(slot.span);
       lines.push(`${indent}long _mtoc2_n_${i} = 1;`);
-      lines.push(`${indent}long _mtoc2_src_${i} = (long)(${scalarStr}) - 1L;`);
+      lines.push(
+        `${indent}long _mtoc2_src_${i} = mtoc2_idx_axis(&${baseCName}, ${i}, (long)(${scalarStr}), ${loc});`
+      );
       slotSrc.push(`_mtoc2_src_${i}`);
     } else {
       if (slot.step.kind !== "NumLit") {
@@ -1107,15 +1149,37 @@ function emitSliceSlotSetup(
             "should have been caught at lowering"
         );
       }
+      // Range-slot bounds check: validate first and last 1-based
+      // indices once at setup time. The per-iter index expression
+      // doesn't need its own check — `mtoc2_loop_count` derives `n`
+      // monotonically from start/end/step, so the iteration stays
+      // within `[first, last]`.
       useRuntimeByName(state, "mtoc2_loop_count");
+      useRuntimeByName(state, "mtoc2_oob_abort");
       const startStr = emitExpr(slot.start, state);
       const endStr = emitExpr(slot.end, state);
       const stepStr = formatDouble(slot.step.value);
+      const loc = locStringOf(slot.span);
       lines.push(`${indent}double _mtoc2_start_${i} = ${startStr};`);
       lines.push(`${indent}double _mtoc2_end_${i} = ${endStr};`);
       lines.push(
         `${indent}long _mtoc2_n_${i} = mtoc2_loop_count(_mtoc2_start_${i}, _mtoc2_end_${i}, ${stepStr});`
       );
+      // Skip the bounds check on an empty range — the loop won't run
+      // and validating an out-of-range start/end would reject benign
+      // cases like `v(5:4)` on a 3-element vector (which yields an
+      // empty slice in MATLAB).
+      lines.push(`${indent}if (_mtoc2_n_${i} > 0) {`);
+      lines.push(
+        `${indent}  long _mtoc2_first_${i} = (long)_mtoc2_start_${i};`
+      );
+      lines.push(
+        `${indent}  long _mtoc2_last_${i} = (long)(_mtoc2_start_${i} + ${stepStr} * (double)(_mtoc2_n_${i} - 1));`
+      );
+      lines.push(
+        `${indent}  mtoc2_check_axis_range(&${baseCName}, ${i}, _mtoc2_first_${i}, _mtoc2_last_${i}, ${loc});`
+      );
+      lines.push(`${indent}}`);
       slotSrc.push(
         `((long)(_mtoc2_start_${i} + ${stepStr} * (double)${kVar}) - 1L)`
       );
@@ -1165,14 +1229,29 @@ function emitIndexSliceProducer(
         throw new Error("emit internal: index-slot Range step must be NumLit");
       }
       useRuntimeByName(state, "mtoc2_loop_count");
+      useRuntimeByName(state, "mtoc2_oob_abort");
       const startStr = emitExpr(slot.start, state);
       const endStr = emitExpr(slot.end, state);
       const stepStr = formatDouble(slot.step.value);
+      const loc = locStringOf(slot.span);
       lines.push(`double _mtoc2_start = ${startStr};`);
       lines.push(`double _mtoc2_end = ${endStr};`);
       lines.push(
         `long _mtoc2_n = mtoc2_loop_count(_mtoc2_start, _mtoc2_end, ${stepStr});`
       );
+      // Single-slot range slice indexes linearly over numel(base),
+      // not against a single axis dim — `v(2:10)` on a 4-element row
+      // vector is OOB regardless of `dims[0]`. Skip the check on an
+      // empty range (MATLAB allows `v(5:4)` to yield 1×0).
+      lines.push(`if (_mtoc2_n > 0) {`);
+      lines.push(`  long _mtoc2_first = (long)_mtoc2_start;`);
+      lines.push(
+        `  long _mtoc2_last = (long)(_mtoc2_start + ${stepStr} * (double)(_mtoc2_n - 1));`
+      );
+      lines.push(
+        `  mtoc2_check_linear_range(&${baseCName}, _mtoc2_first, _mtoc2_last, ${loc});`
+      );
+      lines.push(`}`);
       count = "_mtoc2_n";
       srcIndexFor = k =>
         `(long)(_mtoc2_start + ${stepStr} * (double)${k}) - 1L`;
@@ -1271,14 +1350,28 @@ function emitIndexSliceStore(
         throw new Error("emit internal: index-slot Range step must be NumLit");
       }
       useRuntimeByName(state, "mtoc2_loop_count");
+      useRuntimeByName(state, "mtoc2_oob_abort");
       const startStr = emitExpr(slot.start, state);
       const endStr = emitExpr(slot.end, state);
       const stepStr = formatDouble(slot.step.value);
+      const loc = locStringOf(slot.span);
       lines.push(`${indent}  double _mtoc2_start = ${startStr};`);
       lines.push(`${indent}  double _mtoc2_end = ${endStr};`);
       lines.push(
         `${indent}  long _mtoc2_n = mtoc2_loop_count(_mtoc2_start, _mtoc2_end, ${stepStr});`
       );
+      // Linear-form bounds check (single-slot range slice writes
+      // index linearly over numel(base)). Skip the check on an
+      // empty range to allow `v(5:4) = []`-style no-ops.
+      lines.push(`${indent}  if (_mtoc2_n > 0) {`);
+      lines.push(`${indent}    long _mtoc2_first = (long)_mtoc2_start;`);
+      lines.push(
+        `${indent}    long _mtoc2_last = (long)(_mtoc2_start + ${stepStr} * (double)(_mtoc2_n - 1));`
+      );
+      lines.push(
+        `${indent}    mtoc2_check_linear_range(&${baseCName}, _mtoc2_first, _mtoc2_last, ${loc});`
+      );
+      lines.push(`${indent}  }`);
       dstOffsetFor = k =>
         `(long)(_mtoc2_start + ${stepStr} * (double)${k}) - 1L`;
     } else {

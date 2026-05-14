@@ -569,10 +569,21 @@ export class Lowerer {
   ): IRStmt | IRStmt[] {
     const lv = s.lvalue;
     if (lv.type === "Index") {
-      if (lv.indices.some(isSliceArg)) {
-        return lowerIndexSliceStore.call(this, lv, s.expr, s.span);
+      const result = lv.indices.some(isSliceArg)
+        ? lowerIndexSliceStore.call(this, lv, s.expr, s.span)
+        : lowerIndexStore.call(this, lv, s.expr, s.span);
+      // The runtime tensor was mutated in place, but the env entry
+      // for the base variable still carries the pre-write `exact`
+      // (set by e.g. `zeros(N,M)` at construction). Subsequent
+      // transfer fns (sum, etc.) and the if-cond folder would read
+      // the stale exact and silently mis-emit. Drop exact on every
+      // indexed write so the env reflects the post-write reality.
+      // Both lower helpers above require lv.base to be an Ident, so
+      // pulling its name here is safe.
+      if (lv.base.type === "Ident") {
+        stripExactFromEnv(this.env, [lv.base.name]);
       }
-      return lowerIndexStore.call(this, lv, s.expr, s.span);
+      return result;
     }
     if (lv.type !== "Member") {
       throw new UnsupportedConstruct(
@@ -1244,7 +1255,13 @@ export class Lowerer {
       Number.isFinite(tExact) &&
       Number.isFinite(eExact)
     ) {
-      const raw = Math.floor((eExact - sExact) / tExact) + 1;
+      // Mirrors numbl's `makeRangeTensor` count formula. The naive
+      // `floor((e-s)/step) + 1` underflows by one for ranges like
+      // `0:0.1:0.3` because `(0.3-0)/0.1` evaluates to 2.99999...; the
+      // `+ 1e-10` cushion absorbs that ulp without affecting genuinely
+      // non-integer quotients. Must match `mtoc2_loop_count` so the
+      // statically-known shape and the runtime-allocated buffer agree.
+      const raw = Math.floor((eExact - sExact) / tExact + 1 + 1e-10);
       const n = raw > 0 ? raw : 0;
       resultTy = tensorDouble([1, n]);
     } else {
@@ -2668,13 +2685,16 @@ function collectAssignedNames(stmts: Stmt[]): Set<string> {
           out.add(s.name);
           break;
         case "AssignLValue": {
-          // `s.f.g = rhs` inside a loop body still mutates `s` — so
-          // the loop entry needs to strip exact from `s` (and its
-          // recursive struct/class field types) just like a plain
-          // `s = ...` reassignment would. Walk the Member chain to
-          // find the root Ident.
+          // `s.f.g = rhs` and `s(i) = rhs` inside a loop body both
+          // mutate `s` — so the loop entry needs to strip exact from
+          // `s` (and its recursive struct/class field types) just
+          // like a plain `s = ...` reassignment would. Walk the
+          // Member / Index chain to find the root Ident; either form
+          // is rooted at one (the lvalue lowerers reject anything
+          // else).
           let cur: Expr | null = null;
           if (s.lvalue.type === "Member") cur = s.lvalue.base;
+          else if (s.lvalue.type === "Index") cur = s.lvalue.base;
           while (cur !== null && cur.type === "Member") cur = cur.base;
           if (cur !== null && cur.type === "Ident") out.add(cur.name);
           break;

@@ -108,6 +108,38 @@ the loop count at compile time; the value-form `MakeRange` accepts
 any scalar real `step` and routes through `mtoc2_loop_count` at
 runtime.
 
+The count formula matches numbl byte-for-byte:
+`floor((end - start) / step + 1 + 1e-10)`. The `+ 1e-10` cushion
+absorbs float-imprecision cases like `(0.3 - 0) / 0.1 = 2.999...`,
+which the naive `floor(...) + 1` would round down to 3 instead of 4
+(numbl produces 4). Generated values pass through `mtoc2_range_value`
+which snaps the last element exactly to `end` when its computed value
+is within `|step| * 1e-10` — without the snap, `0.1:0.1:0.3` produces
+a last element of `0.30000000000000004` and `v(end) == 0.3` is false.
+
+**For-loop emission** snapshots `start`, `end`, and the iteration
+count once at loop entry (block-scoped `_mtoc2_for_start`,
+`_mtoc2_for_end`, `_mtoc2_for_n` locals) and iterates by integer
+count, computing the loop variable per iteration via
+`mtoc2_range_value`. This matches MATLAB / numbl-interpreter
+semantics — a body that mutates `n` does NOT extend a `for k = 1:n`
+loop, and a side-effecting `f()` in the bound is called once. The
+snap also applies on the final iteration so `for k = 0:0.1:1` ends
+with `k == 1.0` exactly, not 0.9999...
+
+**Bounds checks** wrap every scalar IndexLoad / IndexStore axis
+index in a `mtoc2_idx_axis` (per-axis) or `mtoc2_idx_lin` (1-arg
+linear) call that aborts on out-of-range with a numbl-style "Index
+exceeds array bounds" message and `exit(1)`. Slice-slot setup
+calls `mtoc2_check_axis_range` (multi-slot) or
+`mtoc2_check_linear_range` (single-slot) once per slot to validate
+the `[first, last]` interval against the relevant dim/numel. The
+empty-range case (`v(5:4)`) skips the check, matching MATLAB. The
+runtime helper file is `runtime/oob.h` (`mtoc2_oob_abort` plus
+the four check entry points). Cross-runner can't compare stdouts
+when both runners error, so OOB regression coverage lives in
+`tests/oob.test.ts` (vitest).
+
 **Structs and class instances** lower through three IR nodes:
 
 - `StructLit { fields, ty }` — produced by `struct('f', v, ...)` and
@@ -399,7 +431,11 @@ Concretely the emit pass:
    intersects across arms, loops intersect (entry, body-end). The
    scope-exit free walk skips proven-NULL names — so simple
    straight-line code emits exactly one free per variable, at its
-   last touch.
+   last touch. **Owned params are NOT seeded into the dataflow's
+   entry set** — they arrive freshly-owned from the caller's
+   `_copy`, not NULL, and seeding them as null-at-entry would let
+   a body that never reassigns the param skip its scope-exit free
+   and leak the caller's allocation.
 
 ### A-normalization (ANF) pass
 

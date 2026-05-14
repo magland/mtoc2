@@ -156,12 +156,20 @@ const REGISTRY: ReadonlyMap<string, RuntimeSnippet> = new Map<
   // (single-slot slice reads/writes, multi-slot per-axis setup, and the
   // MakeRange value-form helper).
   ["mtoc2_loop_count", loadSnippet("loop_count.h")],
+  ["mtoc2_range_value", loadSnippet("range_value.h")],
+  // OOB family — `mtoc2_idx_axis`, `mtoc2_idx_lin`, and
+  // `mtoc2_check_axis_range` share `mtoc2_oob_abort`; activated as
+  // one snippet so any IndexLoad/IndexStore/IndexSlice site that
+  // pulls in one bounds-check fn pulls in the others' definitions
+  // for free.
+  ["mtoc2_oob_abort", loadSnippet("oob.h", ["mtoc2_tensor_t"])],
   [
     "mtoc2_tensor_make_range",
     loadSnippet("tensor_make_range.h", [
       "mtoc2_tensor_t",
       "mtoc2_tensor_alloc_nd",
       "mtoc2_loop_count",
+      "mtoc2_range_value",
     ]),
   ],
 ]);
