@@ -1,4 +1,4 @@
-import { TypeError, UnsupportedConstruct } from "../../errors.js";
+import { TypeError } from "../../errors.js";
 import {
   scalarDouble,
   signFromNumber,
@@ -16,10 +16,9 @@ export const numel: Builtin = {
       throw new TypeError(`'numel' arg must be numeric (got ${t.kind})`, span);
     }
     if (t.shape === undefined) {
-      throw new UnsupportedConstruct(
-        `'numel' on a tensor of unknown shape not yet supported`,
-        span
-      );
+      // Shape unknown at compile time (e.g. a tensor stored on a
+      // struct/class field). The runtime helper handles it.
+      return scalarDouble("nonneg");
     }
     const v = t.shape.reduce((a, b) => a * b, 1);
     return scalarDouble(signFromNumber(v), v);

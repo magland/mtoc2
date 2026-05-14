@@ -51,6 +51,12 @@ The Type lattice is written from scratch for mtoc2 — see
   `EXACT_ARRAY_MAX_ELEMENTS`).
 - `StringType { exact? }`.
 - `UnknownType` for joins that can't be reconciled and for `void` returns.
+- `HandleType { targetName, ast, captures }` for function handles.
+- `StructType { fields }` for `struct(...)`-produced values; field
+  list is canonical (sorted by name). Owned.
+- `ClassType { className, properties }` for class instances; property
+  list is canonical and pre-computed once from the `classdef`'s
+  declared defaults. Owned.
 - `canonicalizeType` + FNV-1a hash drive function specialization keys.
   Crucially, the canonical form **includes `exact`**, so each distinct
   exact-value input produces its own specialization.
@@ -58,11 +64,24 @@ The Type lattice is written from scratch for mtoc2 — see
 ### IR (`ir.ts`)
 
 A small typed tree: `NumLit`, `TensorBuild`, `Var`, `Binary`, `Unary`,
-`Call`, `HandleLit`, `HandleCaptureLoad` for expressions; `ExprStmt`,
-`Assign`, `If`, `While`, `For`, `ReturnFromFunction`, `Break`,
-`Continue` for statements. `IRFunc` captures a single specialization
-(params, types, body, output type). `IRProgram` is top-level
-statements plus a map of specializations.
+`Call`, `HandleLit`, `HandleCaptureLoad`, `StructLit`, `MemberLoad`
+for expressions; `ExprStmt`, `Assign`, `If`, `While`, `For`,
+`ReturnFromFunction`, `Break`, `Continue`, `TypeComment`,
+`MemberStore` for statements. `IRFunc` captures a single
+specialization (params, types, body, output type). `IRProgram` is
+top-level statements plus a map of specializations.
+
+**Structs and class instances** lower through three IR nodes:
+
+- `StructLit { fields, ty }` — produced by `struct('f', v, ...)` and
+  by the synthesized initial receiver of a class constructor call.
+- `MemberLoad { base, field, ty }` — one node per field access; a
+  chain like `s.inner.f` nests them. Owned-typed reads in an
+  owned-consuming context wrap in the field's `_copy` helper at
+  codegen.
+- `MemberStore { base, fieldPath, leafTy, rhs }` — one statement per
+  `s.f1.f2 = rhs`. Codegen emits a plain assignment for scalar leaves
+  and the leaf's `_assign` helper for owned leaves.
 
 **`TensorBuild`** is the only tensor-construction IR node: every
 source-level tensor literal lowers through it (the all-literal case
@@ -118,9 +137,11 @@ Today's builtins:
   multiplication and right-division are not yet implemented).
 - **Comparisons** (return scalar logical): `eq`, `ne`, `lt`, `le`,
   `gt`, `ge`. Inline `((a cOp b) ? 1.0 : 0.0)` in C.
-- **I/O**: `disp` — two paths picked by argument shape:
+- **I/O**: `disp` — three paths picked by argument type:
   scalar real → `mtoc2_disp_double(x)`; multi-element tensor →
-  `mtoc2_disp_tensor(t)`.
+  `mtoc2_disp_tensor(t)`; struct → the program-emitted
+  `<struct-typedef>_disp(s)` helper (one per canonical shape).
+  Class instance `disp` is not supported in v1.
 - **Introspection / reduction**: `length`, `numel` — runtime
   `mtoc2_length` / `mtoc2_numel` on tensors; literal `1.0` for scalar
   args (the C arg type is `double`, not `mtoc2_tensor_t`). `sum` →
@@ -169,42 +190,126 @@ mtoc2 doesn't try to support owned-typed captures, multi-output
 handle calls, or handle-shape unification beyond exact-match. See
 `docs/type_system.md` for the type-level story.
 
+### Structs and class instances
+
+Structs (`struct('f', v, ...)`) and class instances (`Foo(args)`)
+share most of their machinery — both are owned, both program-emit
+one typedef per canonical shape, both use the same IR nodes
+(`StructLit`, `MemberLoad`, `MemberStore`).
+
+**Structs.** The lowerer recognizes a bare `struct(...)` FuncCall
+and builds a `StructLit` whose `ty` is a fresh `StructType`. Each
+field value's type is normalized through `widenForStorage` (drop
+exact, drop sign) before being recorded so different exact-value
+writes don't shard the typedef. v1 requires the `struct(...)`
+literal to introduce a struct — a bare `s.x = v` on an undefined
+`s` is rejected with a clear span-carrying error. Field reads
+(`s.f`) lower to `MemberLoad`; field writes including chained
+paths (`s.inner.f = v`) lower to a single `MemberStore` with the
+field path baked in. The path's leaf type must be
+`storageEquivalent` to the rhs (scalar-vs-multi-element distinction
+is enforced, but `sign`/`exact`/specific shape differences are
+fine).
+
+**Classes.** `Stmt.ClassDef` is collected up front by
+`collectClassDefs` (`src/lowering/classDefs.ts`) into a registry
+keyed by class name. Each registration carries:
+
+- a `ClassType` whose properties come from the `properties` block
+  defaults (each typed by a shallow inference accepting numeric
+  literals, signed numerics, and tensor literals);
+- the property-default expressions, used to synthesize the
+  initial receiver at every constructor call site;
+- the constructor (a method named after the class) and the other
+  methods, each kept as the original `FuncStmt` for specialization
+  on demand.
+
+Constructor specialization pre-seeds the receiver `obj` in the
+spec's env via a `preSeedOutput` parameter to
+`specializeUserFunction`. A synthetic Assign of the default-valued
+`StructLit` is prepended to the lowered body so `obj.x = ...`
+writes against an already-initialized slot from the first user
+statement. Method dispatch (`obj.method(args)`) routes through
+`specializeUserFunction` with a custom source-name half
+(`<className>__<methodName>`) for the spec key, so two methods of
+the same source name on different classes get distinct mangled C
+names.
+
+v1 caveats — all surface at registration time with span-carrying
+errors:
+
+- No inheritance, no handle classes, no class attributes.
+- No `Events` / `Enumeration` / `Arguments` blocks.
+- No `get.` / `set.` accessor methods.
+- Properties must declare a default-value expression.
+- Methods must declare 0 or 1 outputs.
+- `method(obj, ...)` function-call dispatch form is not supported
+  (use `obj.method(...)`).
+- `disp(classInstance)` is rejected.
+
+**Codegen.** `src/codegen/emitNamedTypedef.ts` renders one block of
+C per shape — the `typedef struct ... { ... }`, then `_empty`,
+`_free`, `_copy`, `_assign`, and (structs only) `_disp` helpers.
+The emitter collects every distinct `StructType`/`ClassType` shape
+in the program (`collectNamedTypedefs` in `emit.ts`), topologically
+sorts them so a typedef whose fields reference another typedef
+appears after its dependency, and writes them ahead of the user
+forward declarations.
+
 ## Owned-value codegen
 
-Scalars stay in C automatic storage as `double`. Multi-element
-tensors compile to `mtoc2_tensor_t` (a struct of two heap pointers
-plus an inline shape array). Memory model is mtoc's: always-copy on
-manipulation, free at scope exit. No refcount, no COW.
+Scalars stay in C automatic storage as `double`. Owned kinds compile
+to per-kind C representations sharing one four-helper contract:
+
+- Multi-element tensors → `mtoc2_tensor_t` with helpers loaded from
+  the runtime-snippet registry (`mtoc2_tensor_empty`/`_assign`/
+  `_copy`/`_free`).
+- Structs → `mtoc2_struct__<8hex>` typedef, helpers program-emitted
+  per canonical shape.
+- Class instances → `mtoc2_class_<safeName>__<8hex>` typedef,
+  helpers program-emitted per shape.
+
+`ownedHelpersFor(ty)` in `emit.ts` is the single dispatch point —
+returns the helper-name family + a flag noting whether the helpers
+come from the runtime-snippet registry (tensor) or from the
+program-emitted typedef block (struct/class). Memory model is
+mtoc's: always-copy on manipulation, free at scope exit. No
+refcount, no COW.
 
 Concretely the emit pass:
 
-1. Walks the function body to collect names of owned locals — any
-   variable that has at least one Assign with `materialize=true &&
-isOwned(ty)`. `If`/`While`/`For` bodies are walked too, so inner
-   declarations surface to the function-level free list.
-2. Emits a pre-declaration `mtoc2_tensor_t v = mtoc2_tensor_empty();`
-   at function top for each owned local. The empty tensor has NULL
-   buffers; the first `mtoc2_tensor_assign` does a no-op free of NULL
-   and installs the value.
-3. For each owned Assign, emits
-   `mtoc2_tensor_assign(&v, <rhs-expr>);`. The RHS must be a freshly-
-   owned tensor — TensorBuild produces one via the alloc helper;
-   `Var(otherVar)` wraps in `mtoc2_tensor_copy(otherVar)`. Other
-   tensor-producing expressions follow the same invariant.
+1. Walks the function body to collect names + types of owned locals
+   — any variable that has at least one Assign whose LHS satisfies
+   `isOwned(ty)`. `If`/`While`/`For` bodies are walked too, so inner
+   declarations surface to the function-level free list. Owned-typed
+   params count too: the caller wrapped them in `_copy`, so the
+   callee owns its arg and must free it at scope exit.
+2. Emits a pre-declaration `<cType> v = <typedef>_empty();` at
+   function top for each owned local (skipped for owned params,
+   which the function signature already declared). The empty value
+   has zeroed owned fields/buffers; the first `_assign` does a
+   no-op free and installs the value.
+3. For each owned Assign or `MemberStore` with an owned leaf, emits
+   `<typedef>_assign(&slot, <rhs>)`. The RHS must be a freshly-owned
+   value — `TensorBuild` / `StructLit` / tensor-op calls produce one
+   via their alloc helper; `Var(otherVar)` wraps in
+   `<typedef>_copy(otherVar)`; a `MemberLoad` of an owned-typed
+   field in a consuming context wraps in the field's `_copy`.
 4. Walks the body and emits early-frees: after each stmt, every
    owned name in `(uses ∪ defs)(s) − futureTouchOut(s)` gets a
-   `mtoc2_tensor_free(&v)`. The future-touch sets come from a
+   `<typedef>_free(&v)` call. The future-touch sets come from a
    backward dataflow in `src/codegen/liveness.ts` (port of mtoc's
    liveness analyzer, adapted for mtoc2's simpler IR). Reassignment
    counts as a future touch, so reassigns suppress redundant early-
    frees (the assign helper handles the prior buffer).
 5. At end-of-body / before each `mtoc2_return:` label, emits
-   `mtoc2_tensor_free(&v)` for every owned local **that
-   `nullAtScopeExit` can't prove is already NULL**. The
-   `nullAtScopeExit` forward dataflow walks the body computing per-
-   variable "guaranteed NULL" sets: Assign clears, early-free sets,
-   If intersects across arms, loops intersect (entry, body-end).
-   The scope-exit free walk skips proven-NULL names — so simple
+   `<typedef>_free(&v)` for every owned local + owned param **that
+   `nullAtScopeExit` can't prove is already NULL** (and isn't the
+   output the function is about to return). The `nullAtScopeExit`
+   forward dataflow walks the body computing per-variable
+   "guaranteed NULL" sets: Assign clears, early-free sets, If
+   intersects across arms, loops intersect (entry, body-end). The
+   scope-exit free walk skips proven-NULL names — so simple
    straight-line code emits exactly one free per variable, at its
    last touch.
 

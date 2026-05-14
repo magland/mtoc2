@@ -38,13 +38,20 @@ import {
   isNumeric,
   isVoid,
   isHandle,
+  isOwned,
+  isClass,
+  fieldType,
   handleType,
+  structType,
   typeToString,
   VOID,
   unify,
+  storageEquivalent,
   stripExactFromEnv,
   specializationKey,
+  classMethodSpecSource,
 } from "./types.js";
+import { collectClassDefs, type ClassRegistration } from "./classDefs.js";
 
 /** Hook for the `%!numbl:printtype` directive's compile-time output.
  *  Defaults to `console.error` (so emitted lines go to stderr and
@@ -74,6 +81,7 @@ type FuncStmt = Extract<Stmt, { type: "Function" }>;
 export class Lowerer {
   private env: Map<string, EnvEntry> = new Map();
   private functionDefs: Map<string, FuncStmt> = new Map();
+  private classDefs: Map<string, ClassRegistration> = new Map();
   private specializations: Map<string, IRFunc> = new Map();
   /** Per-scope set: names introduced (first-assignment) in current
    *  function body. Used to decide `declare: true` on Assign. Reset
@@ -104,6 +112,21 @@ export class Lowerer {
           );
         }
         this.functionDefs.set(s.name, s);
+      }
+    }
+    // Pre-scan: validate every classdef and build the registry.
+    // Property types are inferred from declared defaults here so the
+    // class instance typedef is known to the lowerer before any
+    // constructor / method specialization runs.
+    this.classDefs = collectClassDefs(ast.body);
+    // Reject classes that shadow a top-level function name (call-site
+    // dispatch routes by name, so disambiguation would be ambiguous).
+    for (const cName of this.classDefs.keys()) {
+      if (this.functionDefs.has(cName)) {
+        throw new UnsupportedConstruct(
+          `class '${cName}' shadows a top-level function with the same name`,
+          this.classDefs.get(cName)!.constructor?.span ?? ast.body[0].span
+        );
       }
     }
     // Lower top-level statements (functions filter to null).
@@ -137,10 +160,14 @@ export class Lowerer {
     switch (s.type) {
       case "Function":
         return null; // pre-scanned, specialized on demand at call sites
+      case "ClassDef":
+        return null; // pre-scanned into classDefs registry
       case "ExprStmt":
         return this.lowerExprStmt(s);
       case "Assign":
         return this.lowerAssign(s);
+      case "AssignLValue":
+        return this.lowerAssignLValue(s);
       case "If":
         return this.lowerIf(s);
       case "While":
@@ -329,6 +356,26 @@ export class Lowerer {
           ...e,
           args: e.args.map(a => this.anfRequireScalarOrVar(a, hoists)),
         };
+      case "StructLit":
+        return {
+          ...e,
+          fields: e.fields.map(f => ({
+            name: f.name,
+            value: isOwned(f.value.ty)
+              ? // Owned field values land inside a designated initializer
+                // — they must be fresh producers. Recurse through ANF on
+                // their children but leave the top-level producer in
+                // place (it's at a direct consume site, just like an
+                // owned Assign RHS).
+                this.anfChildren(f.value, hoists)
+              : this.anfRequireScalarOrVar(f.value, hoists),
+          })),
+        };
+      case "MemberLoad":
+        return {
+          ...e,
+          base: this.anfRequireScalarOrVar(e.base, hoists),
+        };
     }
   }
 
@@ -387,6 +434,143 @@ export class Lowerer {
     const main = this.recordAssignment(s.name, newExpr, s.span);
     if (hoists.length === 0) return main;
     return [...hoists, main];
+  }
+
+  /** `s.f = rhs` or chained `s.inner.f = rhs`. Lowers to a single
+   *  `MemberStore` IR node with the root `Var` as `base` and the
+   *  field chain in `fieldPath`. v1 requires the root variable to be
+   *  already in env (no implicit struct introduction — use
+   *  `s = struct('f', v, ...)` or a class constructor). Every step
+   *  of the chain must already exist on the corresponding nested
+   *  struct/class type.
+   *
+   *  Type discipline: the rhs and the field must occupy the same
+   *  C-level slot — checked by `storageEquivalent`, which calls
+   *  `cFieldTypeStr` on both. Scalar↔tensor, different elem, or
+   *  different struct/class typedef name → rejected. Otherwise the
+   *  write is accepted and env is updated so subsequent reads of
+   *  the field report the rhs's full internal type (the C typedef
+   *  is unaffected — the typedef hash sees only the C-level type
+   *  via `cFieldTypeStr`, not the internal lattice precision). */
+  private lowerAssignLValue(
+    s: Extract<Stmt, { type: "AssignLValue" }>
+  ): IRStmt | IRStmt[] {
+    const lv = s.lvalue;
+    if (lv.type !== "Member") {
+      throw new UnsupportedConstruct(
+        `assignment lvalue '${lv.type}' is not supported`,
+        s.span
+      );
+    }
+
+    // Walk the Member chain to find the root Ident and the field
+    // path (outermost → innermost). Reject any non-Ident root or
+    // `MemberDynamic` step.
+    const fieldPath: string[] = [];
+    let cur: Expr = lv.base;
+    fieldPath.unshift(lv.name);
+    while (cur.type === "Member") {
+      fieldPath.unshift(cur.name);
+      cur = cur.base;
+    }
+    if (cur.type !== "Ident") {
+      throw new UnsupportedConstruct(
+        `assignment lvalue must be rooted at a named variable`,
+        s.span
+      );
+    }
+    const rootName = cur.name;
+    const rootEntry = this.env.get(rootName);
+    if (rootEntry === undefined) {
+      throw new UnsupportedConstruct(
+        `assignment to '${rootName}.${fieldPath.join(".")}' but '${rootName}' is not yet defined ` +
+          `(struct variables must first be introduced via 'struct(...)' or a class constructor call)`,
+        s.span
+      );
+    }
+
+    // Walk the field path, checking that each step exists. Track the
+    // leaf type the rhs is going to overwrite.
+    let stepTy: Type = rootEntry.ty;
+    for (let i = 0; i < fieldPath.length; i++) {
+      const fname = fieldPath[i];
+      const ft = fieldType(stepTy, fname);
+      if (ft === undefined) {
+        throw new TypeError(
+          `'${rootName}.${fieldPath.slice(0, i + 1).join(".")}': no such ` +
+            `field on type ${typeToString(stepTy)}`,
+          s.span
+        );
+      }
+      stepTy = ft;
+    }
+    const leafTy = stepTy;
+
+    // Lower the rhs. Then ANF the rhs the same way Assign does — owned
+    // direct producers can stay; everything else hoists to a temp.
+    const rhsRaw = this.lowerExpr(s.expr);
+    this.requireValueType(
+      rhsRaw,
+      `assignment to '${rootName}.${fieldPath.join(".")}'`
+    );
+
+    // Storage compatibility: the rhs and leaf must occupy the same
+    // C-level slot. `storageEquivalent` reduces both sides via
+    // `cFieldTypeStr` — so all `mtoc2_tensor_t` slots accept any
+    // multi-element tensor, all `double` slots accept any scalar
+    // real numeric, and struct/class slots only accept values with
+    // the same typedef name. Internal lattice precision (sign,
+    // exact, tensor shape) is preserved on the field afterward —
+    // the typedef hash already ignores it.
+    if (!storageEquivalent(rhsRaw.ty, leafTy)) {
+      throw new TypeError(
+        `assignment to '${rootName}.${fieldPath.join(".")}': field has ` +
+          `C type ${typeToString(leafTy)} but rhs has ` +
+          `type ${typeToString(rhsRaw.ty)}`,
+        s.span
+      );
+    }
+
+    // ANF the rhs.
+    const hoists: IRStmt[] = [];
+    const leafOwned = isOwned(leafTy);
+    const rhsOwnedDirectProducer = leafOwned && rhsRaw.kind !== "Var";
+    const rhs = rhsOwnedDirectProducer
+      ? this.anfChildren(rhsRaw, hoists)
+      : this.anfRequireScalarOrVar(rhsRaw, hoists);
+
+    const baseVar: Extract<IRExpr, { kind: "Var" }> = {
+      kind: "Var",
+      name: rootName,
+      cName: rootEntry.cName,
+      ty: rootEntry.ty,
+      span: s.span,
+    };
+    const store: IRStmt = {
+      kind: "MemberStore",
+      base: baseVar,
+      fieldPath,
+      leafTy: rhsRaw.ty,
+      rhs,
+      span: s.span,
+    };
+
+    // Update env so subsequent reads of the touched field see the
+    // post-write rhs type — not the construction-site type. The
+    // typedef hash uses `cFieldTypeStr` (one C-type string per
+    // field), so the C typedef name stays the same regardless of
+    // how the field's internal precision evolves through writes.
+    // CFG-join `unify` widens further when different branches
+    // assign different types to the same path.
+    const updatedRootTy = withPathTypeUpdated(
+      rootEntry.ty,
+      fieldPath,
+      rhsRaw.ty
+    );
+    this.env.set(rootName, { cName: rootEntry.cName, ty: updatedRootTy });
+
+    if (hoists.length === 0) return store;
+    return [...hoists, store];
   }
 
   private recordAssignment(name: string, expr: IRExpr, span: Span): IRStmt {
@@ -637,12 +821,94 @@ export class Lowerer {
         return this.lowerFuncHandle(e);
       case "AnonFunc":
         return this.lowerAnonFunc(e);
+      case "Member":
+        return this.lowerMember(e);
+      case "MethodCall":
+        return this.lowerMethodCall(e);
       default:
         throw new UnsupportedConstruct(
           `expression type '${e.type}' not supported`,
           e.span
         );
     }
+  }
+
+  /** `s.f` or chained `s.inner.f`. Lowers each nesting level into a
+   *  fresh `MemberLoad` whose `base` is the inner load. The leaf
+   *  type is the field's static type on the immediate container. */
+  private lowerMember(e: Extract<Expr, { type: "Member" }>): IRExpr {
+    const base = this.lowerExpr(e.base);
+    this.requireValueType(base, `field access '.${e.name}'`);
+    const ft = fieldType(base.ty, e.name);
+    if (ft === undefined) {
+      throw new TypeError(
+        `no field '${e.name}' on type ${typeToString(base.ty)}`,
+        e.span
+      );
+    }
+    return {
+      kind: "MemberLoad",
+      base,
+      field: e.name,
+      ty: ft,
+      span: e.span,
+    };
+  }
+
+  /** `obj.method(args)` — class instance method dispatch. The base
+   *  must be a class instance value; `method` must exist on the
+   *  class. The receiver is passed as the first arg of the
+   *  specialized method's mangled name. v1 only supports methods
+   *  with 0 or 1 outputs. */
+  private lowerMethodCall(e: Extract<Expr, { type: "MethodCall" }>): IRExpr {
+    const base = this.lowerExpr(e.base);
+    this.requireValueType(base, `method call '.${e.name}'`);
+    if (!isClass(base.ty)) {
+      throw new UnsupportedConstruct(
+        `method call '.${e.name}' on a value of type ` +
+          `${typeToString(base.ty)} is not supported (v1: classes only)`,
+        e.span
+      );
+    }
+    const reg = this.classDefs.get(base.ty.className);
+    if (reg === undefined) {
+      // Shouldn't be reachable — the ClassType comes from our own
+      // registry.
+      throw new UnsupportedConstruct(
+        `internal: class '${base.ty.className}' missing from registry`,
+        e.span
+      );
+    }
+    const method = reg.methods.get(e.name);
+    if (method === undefined) {
+      throw new TypeError(
+        `class '${base.ty.className}' has no method '${e.name}'`,
+        e.span
+      );
+    }
+    const args = e.args.map(a => this.lowerExpr(a));
+    for (const a of args) {
+      this.requireValueType(a, `argument to method '${e.name}'`);
+    }
+    const allArgs: IRExpr[] = [base, ...args];
+    const argTypes = allArgs.map(a => a.ty);
+    const spec = this.specializeUserFunction(
+      method,
+      argTypes,
+      classMethodSpecSource(base.ty.className, e.name)
+    );
+    const ty: Type =
+      method.outputs.length === 0
+        ? VOID
+        : (spec.outputTypes[0] ?? { kind: "Unknown" });
+    return {
+      kind: "Call",
+      cName: spec.cName,
+      name: `${base.ty.className}.${e.name}`,
+      args: allArgs,
+      ty,
+      span: e.span,
+    };
   }
 
   private lowerIdent(e: Extract<Expr, { type: "Ident" }>): IRExpr {
@@ -772,19 +1038,34 @@ export class Lowerer {
   }
 
   private lowerFuncCall(e: Extract<Expr, { type: "FuncCall" }>): IRExpr {
-    // Resolve the name. Three cases, in priority order:
+    // Resolve the name. Cases, in priority order:
+    //   0. The literal name `struct` — produce a `StructLit` from
+    //      the (name, value, name, value, ...) arg list.
     //   1. A bound variable whose type is `HandleType` — dispatch
     //      through the handle to the underlying user function.
-    //   2. A registered builtin (`disp`, `sum`, ...).
-    //   3. A top-level user function definition.
+    //   2. The name matches a registered class — dispatch to the
+    //      class constructor (or synthesize a default-valued
+    //      receiver when the class has no constructor).
+    //   3. A registered builtin (`disp`, `sum`, ...).
+    //   4. A top-level user function definition.
     //
     // Note: an in-scope variable of a non-handle type at a call site
     // means the user wrote `name(args)` expecting indexing/call, which
     // mtoc2 doesn't support yet — fall through to the unknown-function
     // error.
+    if (e.name === "struct") {
+      return this.lowerStructConstructor(e);
+    }
     const envEntry = this.env.get(e.name);
     if (envEntry !== undefined && isHandle(envEntry.ty)) {
       return this.dispatchHandleCall(e.name, envEntry, e.args, e.span);
+    }
+    if (envEntry === undefined && this.classDefs.has(e.name)) {
+      return this.lowerClassConstructorCall(
+        this.classDefs.get(e.name)!,
+        e.args,
+        e.span
+      );
     }
     if (envEntry !== undefined) {
       // The name is bound in env (so it's not a free function reference)
@@ -846,6 +1127,161 @@ export class Lowerer {
       args,
       ty,
       span: e.span,
+    };
+  }
+
+  /** `struct('f1', v1, 'f2', v2, ...)`. Validates that args come in
+   *  (string-literal-name, value) pairs and that no field is
+   *  duplicated. Each value's storage type drives the field's
+   *  recorded type — typedef shape is stable across writes because
+   *  storage types are widened (no `exact`, no `sign`). */
+  private lowerStructConstructor(
+    e: Extract<Expr, { type: "FuncCall" }>
+  ): IRExpr {
+    if (e.args.length % 2 !== 0) {
+      throw new TypeError(
+        `'struct' expects an even number of args (name, value, name, value, ...)`,
+        e.span
+      );
+    }
+    const fields: { name: string; value: IRExpr }[] = [];
+    const seen = new Set<string>();
+    for (let i = 0; i < e.args.length; i += 2) {
+      const nameExpr = e.args[i];
+      if (nameExpr.type !== "String" && nameExpr.type !== "Char") {
+        throw new TypeError(
+          `'struct' field name (arg ${i + 1}) must be a string or char literal`,
+          nameExpr.span
+        );
+      }
+      // numbl's parser stores the literal's source text (including the
+      // surrounding `'`/`"` quotes) in `value`. Strip them so the
+      // recorded field name matches the user-visible name. Also
+      // require a non-empty, identifier-shaped field name (no
+      // embedded quotes/escapes etc).
+      const fname = stripQuotes(nameExpr.value);
+      if (!/^[A-Za-z][A-Za-z0-9_]*$/.test(fname)) {
+        throw new TypeError(
+          `'struct' field name '${fname}' is not a valid identifier`,
+          nameExpr.span
+        );
+      }
+      if (seen.has(fname)) {
+        throw new TypeError(
+          `'struct': duplicate field '${fname}'`,
+          nameExpr.span
+        );
+      }
+      seen.add(fname);
+      const v = this.lowerExpr(e.args[i + 1]);
+      this.requireValueType(v, `value for field '${fname}'`);
+      // Only types that have a stable owned-or-POD C representation
+      // are allowed as struct field values. Reject handles (POD but
+      // their typedef matrix gets messy), void, and Unknown.
+      if (v.ty.kind === "Void" || v.ty.kind === "Unknown") {
+        throw new TypeError(
+          `value for field '${fname}': type ${typeToString(v.ty)} is not a valid struct field type`,
+          e.args[i + 1].span
+        );
+      }
+      fields.push({ name: fname, value: v });
+    }
+    // Build the StructType from each value's precise type. The typedef
+    // hash uses `cFieldTypeStr` (one C-type string per field), so
+    // different `exact` / `sign` / tensor-shape values across
+    // constructions still share one C typedef. Carrying the precise
+    // type through the IR lets a subsequent `aa = s.x` read return e.g.
+    // `double[1×1]:positive=1` instead of a sign-stripped form.
+    const tyFields = fields.map(f => ({
+      name: f.name,
+      ty: f.value.ty,
+    }));
+    const ty = structType(tyFields);
+    // Re-order the values to match the canonical (sorted) field list
+    // so the IR's `StructLit.fields` lines up with `ty.fields`.
+    const sortedValues = fields
+      .slice()
+      .sort((a, b) => (a.name < b.name ? -1 : 1));
+    return {
+      kind: "StructLit",
+      fields: sortedValues,
+      ty,
+      span: e.span,
+    };
+  }
+
+  /** `ClassName(args)` — class constructor call. Synthesizes a
+   *  default-valued receiver (a `StructLit` whose `ty` is the
+   *  class's declared `ClassType`) and routes it as the first arg of
+   *  the specialized constructor. */
+  private lowerClassConstructorCall(
+    reg: ClassRegistration,
+    args: Expr[],
+    span: Span
+  ): IRExpr {
+    if (reg.constructor === null) {
+      // No constructor declared: only a zero-arg call is valid; the
+      // value IS the default-valued receiver.
+      if (args.length !== 0) {
+        throw new TypeError(
+          `class '${reg.className}' has no constructor; cannot pass arguments`,
+          span
+        );
+      }
+      return this.makeInitialClassReceiver(reg, span);
+    }
+    const userArgs = args.map(a => this.lowerExpr(a));
+    for (const a of userArgs) {
+      this.requireValueType(a, `argument to constructor '${reg.className}'`);
+    }
+    const argTypes = userArgs.map(a => a.ty);
+    const initialReceiver = this.makeInitialClassReceiver(reg, span);
+    const outName = reg.constructor.outputs[0];
+    const spec = this.specializeUserFunction(
+      reg.constructor,
+      argTypes,
+      reg.className,
+      { name: outName, ty: reg.ty, initExpr: initialReceiver }
+    );
+    // Constructor must return one output (validated at registration).
+    const ty: Type = spec.outputTypes[0] ?? reg.ty;
+    return {
+      kind: "Call",
+      cName: spec.cName,
+      name: reg.className,
+      args: userArgs,
+      ty,
+      span,
+    };
+  }
+
+  /** Synthesize a `StructLit` whose ty is `reg.ty` and whose field
+   *  values are the property defaults from `reg.defaults`. Each
+   *  default expression is lowered once per call site (cheap —
+   *  defaults are restricted to literals at registration). */
+  private makeInitialClassReceiver(reg: ClassRegistration, span: Span): IRExpr {
+    const fields: { name: string; value: IRExpr }[] = [];
+    for (const p of reg.ty.properties) {
+      const defExpr = reg.defaults.get(p.name);
+      if (defExpr === undefined) {
+        throw new Error(
+          `internal: class '${reg.className}' property '${p.name}' has no default`
+        );
+      }
+      // Lower in a child env so the default's lowering can't see the
+      // outer scope. Default expressions are restricted to literals
+      // at registration, so an empty env is sufficient.
+      const savedEnv = this.env;
+      this.env = new Map();
+      const value = this.lowerExpr(defExpr);
+      this.env = savedEnv;
+      fields.push({ name: p.name, value });
+    }
+    return {
+      kind: "StructLit",
+      fields,
+      ty: reg.ty,
+      span,
     };
   }
 
@@ -1021,7 +1457,23 @@ export class Lowerer {
 
   // ── Function specialization ───────────────────────────────────────────
 
-  private specializeUserFunction(decl: FuncStmt, argTypes: Type[]): IRFunc {
+  /** Options for the specialization process. v1 only uses these for
+   *  class constructors, which need their (output) receiver pre-
+   *  seeded with the class defaults before the body executes. */
+  private specializeUserFunction(
+    decl: FuncStmt,
+    argTypes: Type[],
+    /** Optional override for the specialization-key source-name half.
+     *  Class methods pass `<className>__<methodName>` so the mangled
+     *  C name disambiguates two methods of the same source-level name
+     *  on different classes. Defaults to `decl.name`. */
+    specSource?: string,
+    /** When set, the named output gets a synthetic first assignment
+     *  to `initExpr` (an already-lowered IR expression) prepended to
+     *  the body. The user's constructor body then sees the receiver
+     *  initialized with the class defaults. */
+    preSeedOutput?: { name: string; ty: Type; initExpr: IRExpr }
+  ): IRFunc {
     if (argTypes.length !== decl.params.length) {
       throw new TypeError(
         `function '${decl.name}' expects ${decl.params.length} arg(s), got ${argTypes.length}`,
@@ -1034,7 +1486,8 @@ export class Lowerer {
         decl.span
       );
     }
-    const key = `${decl.name}__${specializationKey(argTypes)}`;
+    const source = specSource ?? decl.name;
+    const key = `${source}__${specializationKey(argTypes)}`;
     const cached = this.specializations.get(key);
     if (cached) return cached;
 
@@ -1068,12 +1521,29 @@ export class Lowerer {
       this.env.set(pName, { cName: pName, ty: argTypes[i] });
       this.declared.add(pName);
     }
-    // Outputs are declared but not yet assigned.
+    // Outputs are declared but not yet assigned (the normal path).
+    // Class constructors pre-seed their output (the receiver) with
+    // the default-valued class instance via an injected first stmt,
+    // so the body can read `obj.x` / write `obj.x = ...` against an
+    // initialized slot from the very first source statement.
+    let initStmts: IRStmt[] = [];
     for (const o of decl.outputs) {
       this.declared.add(o);
     }
+    if (preSeedOutput !== undefined) {
+      this.requireValueType(
+        preSeedOutput.initExpr,
+        `constructor init for '${preSeedOutput.name}'`
+      );
+      const initStmt = this.recordAssignment(
+        preSeedOutput.name,
+        preSeedOutput.initExpr,
+        decl.span
+      );
+      initStmts = [initStmt];
+    }
 
-    const body = this.lowerStmts(decl.body);
+    const body = [...initStmts, ...this.lowerStmts(decl.body)];
 
     // Output types come from the final env value of each output name.
     const outputTypes: Type[] = decl.outputs.map(o => {
@@ -1242,6 +1712,58 @@ function collectAnonCaptures(
   }
 }
 
+/** Return a copy of `t` with the type at `fieldPath` replaced by
+ *  `newLeafTy`. Walks struct/class types; if the path can't be
+ *  resolved (shouldn't happen — the caller already validated), the
+ *  original type is returned unchanged. Other type kinds at a path
+ *  step are returned as-is.
+ *
+ *  Used by `lowerAssignLValue` to refresh env after a MemberStore so
+ *  subsequent reads of the touched field/property report the post-
+ *  write rhs type rather than the construction-site default. */
+function withPathTypeUpdated(
+  t: Type,
+  fieldPath: ReadonlyArray<string>,
+  newLeafTy: Type
+): Type {
+  if (fieldPath.length === 0) return newLeafTy;
+  const [head, ...rest] = fieldPath;
+  if (t.kind === "Struct") {
+    return structType(
+      t.fields.map(f =>
+        f.name === head
+          ? { name: f.name, ty: withPathTypeUpdated(f.ty, rest, newLeafTy) }
+          : f
+      )
+    );
+  }
+  if (t.kind === "Class") {
+    return {
+      kind: "Class",
+      className: t.className,
+      properties: t.properties.map(p =>
+        p.name === head
+          ? { name: p.name, ty: withPathTypeUpdated(p.ty, rest, newLeafTy) }
+          : p
+      ),
+    };
+  }
+  return t;
+}
+
+/** Strip the surrounding `'` or `"` quotes the numbl parser stores as
+ *  part of a `Char`/`String` literal's lexeme. */
+function stripQuotes(s: string): string {
+  if (s.length >= 2) {
+    const first = s[0];
+    const last = s[s.length - 1];
+    if ((first === "'" && last === "'") || (first === '"' && last === '"')) {
+      return s.slice(1, -1);
+    }
+  }
+  return s;
+}
+
 /** Walk a stmt-tree and collect names of LHS targets (Assign, MultiAssign,
  *  For loop vars). Used to widen loop-body-mutated env entries to non-exact. */
 function collectAssignedNames(stmts: Stmt[]): Set<string> {
@@ -1252,6 +1774,18 @@ function collectAssignedNames(stmts: Stmt[]): Set<string> {
         case "Assign":
           out.add(s.name);
           break;
+        case "AssignLValue": {
+          // `s.f.g = rhs` inside a loop body still mutates `s` — so
+          // the loop entry needs to strip exact from `s` (and its
+          // recursive struct/class field types) just like a plain
+          // `s = ...` reassignment would. Walk the Member chain to
+          // find the root Ident.
+          let cur: Expr | null = null;
+          if (s.lvalue.type === "Member") cur = s.lvalue.base;
+          while (cur !== null && cur.type === "Member") cur = cur.base;
+          if (cur !== null && cur.type === "Ident") out.add(cur.name);
+          break;
+        }
         case "MultiAssign":
           for (const lv of s.lvalues) {
             if (lv.type === "Var") out.add(lv.name);

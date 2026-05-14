@@ -36,6 +36,12 @@ export function forEachSubExpr(e: IRExpr, visit: (sub: IRExpr) => void): void {
     case "HandleCaptureLoad":
       forEachSubExpr(e.base, visit);
       return;
+    case "StructLit":
+      for (const f of e.fields) forEachSubExpr(f.value, visit);
+      return;
+    case "MemberLoad":
+      forEachSubExpr(e.base, visit);
+      return;
   }
 }
 
@@ -68,6 +74,13 @@ export function forEachTopLevelExpr(
     case "Break":
     case "Continue":
     case "TypeComment":
+      return;
+    case "MemberStore":
+      // The `base` is always a `Var` already, but visiting it through
+      // the same callback keeps owned-use detection uniform with
+      // every other statement kind.
+      visit(s.base);
+      visit(s.rhs);
       return;
   }
 }

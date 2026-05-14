@@ -161,12 +161,36 @@ export interface VoidType {
   kind: "Void";
 }
 
+/** A struct value. Field order is canonical (sorted by name) so two
+ *  StructType values with the same shape are structurally identical
+ *  regardless of source-level field-write order. Construct via
+ *  `structType()` rather than the raw interface so the sort is
+ *  applied. */
+export interface StructType {
+  kind: "Struct";
+  fields: ReadonlyArray<{ name: string; ty: Type }>;
+}
+
+/** A class instance value. The `className` is the source-level class
+ *  name (the `classdef Foo` identifier); `properties` is the full
+ *  flattened-and-sorted property list with each property's type
+ *  derived from its `properties` block default expression. v1
+ *  forbids inheritance, so the property list is always exactly the
+ *  one declared in the class body. */
+export interface ClassType {
+  kind: "Class";
+  className: string;
+  properties: ReadonlyArray<{ name: string; ty: Type }>;
+}
+
 export type Type =
   | NumericType
   | StringType
   | UnknownType
   | VoidType
-  | HandleType;
+  | HandleType
+  | StructType
+  | ClassType;
 
 export const VOID: VoidType = { kind: "Void" };
 
@@ -244,6 +268,26 @@ export function handleType(
   return { kind: "Handle", targetName, ast, captures };
 }
 
+/** Construct a `StructType` with canonical (sorted-by-name) field
+ *  order. Two structs built from the same fields end up structurally
+ *  equal regardless of the order their fields were specified. */
+export function structType(
+  fields: ReadonlyArray<{ name: string; ty: Type }>
+): StructType {
+  const sorted = fields.slice().sort((a, b) => (a.name < b.name ? -1 : 1));
+  return { kind: "Struct", fields: sorted };
+}
+
+/** Construct a `ClassType` with canonical (sorted-by-name) property
+ *  order. */
+export function classType(
+  className: string,
+  properties: ReadonlyArray<{ name: string; ty: Type }>
+): ClassType {
+  const sorted = properties.slice().sort((a, b) => (a.name < b.name ? -1 : 1));
+  return { kind: "Class", className, properties: sorted };
+}
+
 // ── Predicates ──────────────────────────────────────────────────────────
 
 export function isNumeric(t: Type): t is NumericType {
@@ -256,6 +300,29 @@ export function isVoid(t: Type): t is VoidType {
 
 export function isHandle(t: Type): t is HandleType {
   return t.kind === "Handle";
+}
+
+export function isStruct(t: Type): t is StructType {
+  return t.kind === "Struct";
+}
+
+export function isClass(t: Type): t is ClassType {
+  return t.kind === "Class";
+}
+
+/** Find a field on a struct/class by name. Returns the field's type
+ *  or undefined if the type isn't a struct/class or no such field
+ *  exists. */
+export function fieldType(t: Type, name: string): Type | undefined {
+  if (t.kind === "Struct") {
+    const f = t.fields.find(f => f.name === name);
+    return f?.ty;
+  }
+  if (t.kind === "Class") {
+    const p = t.properties.find(p => p.name === name);
+    return p?.ty;
+  }
+  return undefined;
 }
 
 export function isScalar(t: Type): boolean {
@@ -286,11 +353,18 @@ export function isMultiElement(t: Type): boolean {
 }
 
 /** Owned-heap-value types — i.e. types whose C representation holds a
- *  heap pointer the codegen must `free` at scope exit. Today this is
- *  only the multi-element tensor; future kinds (strings, structs,
- *  class instances, ...) will join. */
+ *  heap pointer the codegen must `free` at scope exit. Multi-element
+ *  tensors are the original owned kind. Structs and class instances
+ *  also count as owned because their per-shape generated typedef
+ *  carries the same `_empty()`/`_assign()`/`_copy()`/`_free()`
+ *  lifecycle — a struct with all-scalar fields would technically be
+ *  POD, but tracking ownership uniformly keeps the codegen pipeline
+ *  simple and lets struct fields hold tensors transparently. */
 export function isOwned(t: Type): boolean {
-  return isMultiElement(t);
+  if (isMultiElement(t)) return true;
+  if (t.kind === "Struct") return true;
+  if (t.kind === "Class") return true;
+  return false;
 }
 
 export function signIsNonneg(s: Sign): boolean {
@@ -329,7 +403,11 @@ export function numericExactsEqual(
 }
 
 /** Strip `exact` from every entry in `env` whose name is in `names`.
- *  Used by loop bodies — see lower.ts for rationale. */
+ *  Used by loop bodies — see lower.ts for rationale. For struct /
+ *  class env entries we recurse via `withoutExact` so any precise
+ *  field/property exact values introduced by a `struct(...)` literal
+ *  or a constructor preSeed don't leak from iteration 1 into the rest
+ *  of the loop's body. */
 export function stripExactFromEnv(
   env: Map<string, { cName: string; ty: Type }>,
   names: Iterable<string>
@@ -344,6 +422,8 @@ export function stripExactFromEnv(
       });
     } else if (e.ty.kind === "String" && e.ty.exact !== undefined) {
       env.set(n, { cName: e.cName, ty: { kind: "String" } });
+    } else if (e.ty.kind === "Struct" || e.ty.kind === "Class") {
+      env.set(n, { cName: e.cName, ty: withoutExact(e.ty) });
     }
   }
 }
@@ -356,6 +436,22 @@ export function withoutExact(t: Type): Type {
   }
   if (t.kind === "String" && t.exact !== undefined) {
     return { kind: "String" };
+  }
+  if (t.kind === "Struct") {
+    return {
+      kind: "Struct",
+      fields: t.fields.map(f => ({ name: f.name, ty: withoutExact(f.ty) })),
+    };
+  }
+  if (t.kind === "Class") {
+    return {
+      kind: "Class",
+      className: t.className,
+      properties: t.properties.map(p => ({
+        name: p.name,
+        ty: withoutExact(p.ty),
+      })),
+    };
   }
   return t;
 }
@@ -409,6 +505,36 @@ export function unify(a: Type, b: Type): Type {
     if (canonicalizeType(a) === canonicalizeType(b)) return a;
     return UNKNOWN;
   }
+  if (a.kind === "Struct" && b.kind === "Struct") {
+    // Union of field names; per shared field, unify the types. Fields
+    // present only on one side carry through unchanged — useful when a
+    // conditional branch only writes a subset of the eventual fields.
+    const names = new Set<string>();
+    for (const f of a.fields) names.add(f.name);
+    for (const f of b.fields) names.add(f.name);
+    const out: { name: string; ty: Type }[] = [];
+    for (const name of names) {
+      const fa = a.fields.find(f => f.name === name);
+      const fb = b.fields.find(f => f.name === name);
+      if (fa && fb) out.push({ name, ty: unify(fa.ty, fb.ty) });
+      else if (fa) out.push({ name, ty: fa.ty });
+      else if (fb) out.push({ name, ty: fb.ty });
+    }
+    return structType(out);
+  }
+  if (a.kind === "Class" && b.kind === "Class") {
+    if (a.className !== b.className) return UNKNOWN;
+    // Same class: per-property unify. Property sets must already
+    // match (defined by the classdef body, which is global).
+    if (a.properties.length !== b.properties.length) return UNKNOWN;
+    const props: { name: string; ty: Type }[] = [];
+    for (const pa of a.properties) {
+      const pb = b.properties.find(p => p.name === pa.name);
+      if (!pb) return UNKNOWN;
+      props.push({ name: pa.name, ty: unify(pa.ty, pb.ty) });
+    }
+    return classType(a.className, props);
+  }
   return UNKNOWN;
 }
 
@@ -450,6 +576,18 @@ export function typeToString(t: Type): string {
           : `{${t.captures.map(c => `${c.name}:${typeToString(c.ty)}`).join(",")}}`;
       return `@${t.targetName}${caps}`;
     }
+    case "Struct": {
+      const inner = t.fields
+        .map(f => `${f.name}:${typeToString(f.ty)}`)
+        .join(", ");
+      return `struct{${inner}}`;
+    }
+    case "Class": {
+      const inner = t.properties
+        .map(p => `${p.name}:${typeToString(p.ty)}`)
+        .join(", ");
+      return `class ${t.className}{${inner}}`;
+    }
   }
 }
 
@@ -470,6 +608,38 @@ function formatExactForType(e: NumericExact): string {
  *  exact when set, so each unique exact-value gets its own spec. */
 export function canonicalizeType(t: Type): string {
   return JSON.stringify(canon(t));
+}
+
+/** True iff two types have the same canonical form. Convenience
+ *  wrapper around `canonicalizeType` for callers that don't need the
+ *  string key. */
+export function canonicalEq(a: Type, b: Type): boolean {
+  return canonicalizeType(a) === canonicalizeType(b);
+}
+
+/** Storage compatibility: do two types occupy the same C-level slot?
+ *  This is COARSER than canonical equality — every multi-element
+ *  tensor shares the same `mtoc2_tensor_t` storage regardless of
+ *  shape, every scalar real numeric maps to `double`, and every
+ *  struct/class needs its canonical typedef to match.
+ *
+ *  Used by `MemberStore` to validate that a write doesn't try to
+ *  cram a tensor into a scalar slot (or vice versa) — the typedef
+ *  hash is built from storage shapes, so changing the underlying
+ *  representation would break the C side. Shape, sign, and exact
+ *  differences are fine: the slot still holds an `mtoc2_tensor_t`. */
+export function storageEquivalent(a: Type, b: Type): boolean {
+  // Two types occupy the same C slot iff they reduce to the same
+  // C-type string. `cFieldTypeStr` already collapses everything that
+  // doesn't matter at the C level (sign, exact, tensor shape, the
+  // distinction between same-class instances), so this is one line.
+  try {
+    return cFieldTypeStr(a) === cFieldTypeStr(b);
+  } catch {
+    // One side is a String/Void/Unknown (or similar non-field-typed
+    // value). Those never share a slot with anything legitimate.
+    return false;
+  }
 }
 
 function canon(t: Type): unknown {
@@ -508,6 +678,17 @@ function canon(t: Type): unknown {
         n: t.targetName,
         c: t.captures.map(c => [c.name, canon(c.ty)]),
       };
+    case "Struct":
+      return {
+        k: "St",
+        f: t.fields.map(f => [f.name, canon(f.ty)]),
+      };
+    case "Class":
+      return {
+        k: "C",
+        n: t.className,
+        p: t.properties.map(p => [p.name, canon(p.ty)]),
+      };
   }
 }
 
@@ -535,6 +716,79 @@ export function handleTypedefName(t: HandleType): string {
   if (t.captures.length === 0) return "mtoc2_handle_empty_t";
   const canonical = JSON.stringify(t.captures.map(c => [c.name, canon(c.ty)]));
   return `mtoc2_handle__${hashType(canonical)}`;
+}
+
+/** C-level type string for a struct/class field or function-handle
+ *  capture. This is the load-bearing identity for typedef hashing:
+ *  the typedef hash depends only on `cFieldTypeStr` per field, so
+ *  two structs whose internal field types differ only in lattice
+ *  precision (sign, exact, tensor shape) collapse to the SAME C
+ *  typedef. The internal `StructType.fields[*].ty` is free to keep
+ *  full precision — that precision drives function specialization
+ *  keys and builtin transfer functions but does NOT shard the C
+ *  typedef.
+ *
+ *  - Scalar real numeric (any sign/exact)   → "double"
+ *  - Multi-element tensor (any shape/exact) → "mtoc2_tensor_t"
+ *  - Handle                                  → handleTypedefName(t)
+ *  - Struct (recurse on fields)              → structTypedefName(t)
+ *  - Class (recurse on properties)           → classTypedefName(t)
+ *
+ *  String / Void / Unknown are not valid struct/class field types
+ *  in v1 — the lowerer rejects them at construction sites. */
+export function cFieldTypeStr(t: Type): string {
+  if (t.kind === "Numeric") {
+    if (isMultiElement(t)) return "mtoc2_tensor_t";
+    return "double";
+  }
+  if (t.kind === "Handle") return handleTypedefName(t);
+  if (t.kind === "Struct") return structTypedefName(t);
+  if (t.kind === "Class") return classTypedefName(t);
+  throw new Error(
+    `cFieldTypeStr: type '${t.kind}' is not a valid struct/class field type`
+  );
+}
+
+/** Mangled C typedef name for a struct's shape. Keyed only on the
+ *  C-level type of each field (`cFieldTypeStr`), so two struct
+ *  values whose fields' internal types differ only in lattice
+ *  precision share one typedef. The internal `StructType.fields[*].ty`
+ *  is still carried at full precision for spec keying + transfer-fn
+ *  use — but it's separate from the typedef identity. */
+export function structTypedefName(t: StructType): string {
+  const canonical = JSON.stringify(
+    t.fields.map(f => [f.name, cFieldTypeStr(f.ty)])
+  );
+  return `mtoc2_struct__${hashType(canonical)}`;
+}
+
+/** Sanitize a class name to a C-identifier-safe form (replace any
+ *  non-`[A-Za-z0-9_]` char with `_`). v1 only accepts unqualified
+ *  class names so this is a passthrough for typical inputs. */
+function safeClassNameForC(name: string): string {
+  return name.replace(/[^A-Za-z0-9_]/g, "_");
+}
+
+/** Mangled C typedef name for a class instance. Same C-level
+ *  contract as `structTypedefName` — the hash sees only the C-level
+ *  type of each property — but salted with `className` so two
+ *  distinct classes with the same C-level property shape still pick
+ *  distinct typedefs. */
+export function classTypedefName(t: ClassType): string {
+  const canonical = JSON.stringify({
+    n: t.className,
+    p: t.properties.map(p => [p.name, cFieldTypeStr(p.ty)]),
+  });
+  return `mtoc2_class_${safeClassNameForC(t.className)}__${hashType(canonical)}`;
+}
+
+/** Class-method specialization-name source. Becomes the input to
+ *  `mangleClassMethodName` along with arg-type canonicalization. */
+export function classMethodSpecSource(
+  className: string,
+  methodName: string
+): string {
+  return `${className}__${methodName}`;
 }
 
 // ── Span re-export for convenience ──────────────────────────────────────

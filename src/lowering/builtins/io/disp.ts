@@ -1,5 +1,9 @@
 import { TypeError } from "../../errors.js";
-import { isScalarRealNumeric, isNumeric } from "../../types.js";
+import {
+  isScalarRealNumeric,
+  isNumeric,
+  structTypedefName,
+} from "../../types.js";
 import type { Builtin } from "../registry.js";
 
 export const disp: Builtin = {
@@ -20,13 +24,23 @@ export const disp: Builtin = {
       // tensor with statically-known shape (mtoc2_disp_tensor call).
       return { kind: "Unknown" };
     }
+    if (t.kind === "Struct") {
+      // Per-shape `<typedef>_disp` is program-emitted; routing
+      // happens in codegenC.
+      return { kind: "Unknown" };
+    }
     throw new TypeError(
-      `'disp' arg must be a scalar real or a real tensor (got ${t.kind})`,
+      `'disp' arg must be a scalar real, a real tensor, or a struct ` +
+        `(got ${t.kind})`,
       span
     );
   },
   codegenC(argsC, argTypes) {
     const t = argTypes[0];
+    if (t.kind === "Struct") {
+      // Program-emitted helper; no runtime-snippet dep needed.
+      return `${structTypedefName(t)}_disp(${argsC[0]})`;
+    }
     if (isNumeric(t) && !isScalarRealNumeric(t)) {
       // Runtime tensor — call the runtime disp helper. The arg is
       // passed by value (struct copy of the pointers); disp_tensor

@@ -113,6 +113,36 @@ export interface HandleCaptureLoad {
   span: Span;
 }
 
+/** Struct/class construction. Produced by `struct('f1', v1, ...)`
+ *  literals and by the synthesized initial-receiver of a class
+ *  constructor call (a StructLit whose `ty` is the constructor's
+ *  initial `ClassType`). The fields list is in canonical (sorted-by-
+ *  name) order to match the typedef-shape hash.
+ *
+ *  Codegen emits a C99 designated initializer like
+ *  `(<typedef>){.f1 = <v1>, .f2 = <v2>}`. Owned-typed field values
+ *  must be fresh producers (ANF in the lowerer guarantees this). */
+export interface StructLit {
+  kind: "StructLit";
+  fields: ReadonlyArray<{ name: string; value: IRExpr }>;
+  ty: Type;
+  span: Span;
+}
+
+/** Field/property read: `s.f` (struct) or `obj.prop` (class instance),
+ *  one level. Chained reads like `s.inner.f` are nested
+ *  MemberLoads. `ty` is the field/property's static type. In an
+ *  owned-consuming context (Assign RHS, Call arg of owned param) the
+ *  codegen wraps the read in the field helper's `_copy` so the
+ *  consumer receives a freshly-owned value. */
+export interface MemberLoad {
+  kind: "MemberLoad";
+  base: IRExpr;
+  field: string;
+  ty: Type;
+  span: Span;
+}
+
 export type IRExpr =
   | NumLit
   | TensorBuild
@@ -121,7 +151,9 @@ export type IRExpr =
   | Unary
   | Call
   | HandleLit
-  | HandleCaptureLoad;
+  | HandleCaptureLoad
+  | StructLit
+  | MemberLoad;
 
 // ── Statements ──────────────────────────────────────────────────────────
 
@@ -192,6 +224,23 @@ export interface Continue {
   span: Span;
 }
 
+/** Field/property write: `s.f = rhs` or chained `s.inner.f = rhs`.
+ *  The `base` is always the root variable (a `Var`); `fieldPath`
+ *  walks from the outermost field inward (e.g. `["inner", "f"]`).
+ *  `leafTy` is the type of the leaf slot (the field actually being
+ *  written). For scalar leaves codegen emits a plain
+ *  `<base.cName>.<f1>...<fn> = <rhs>;`; for owned leaves it emits
+ *  `<typedef>_assign(&<base.cName>.<f1>...<fn>, <rhs>);` where the
+ *  typedef matches the leaf's owned-kind. */
+export interface MemberStore {
+  kind: "MemberStore";
+  base: Var;
+  fieldPath: ReadonlyArray<string>;
+  leafTy: Type;
+  rhs: IRExpr;
+  span: Span;
+}
+
 /** Pure annotation node produced by the `%!numbl:showtype` directive.
  *  Carries a snapshot of `{name, cName, ty}` for each named variable
  *  at the directive's source position. Walk / liveness / dataflow
@@ -212,7 +261,8 @@ export type IRStmt =
   | ReturnFromFunction
   | Break
   | Continue
-  | TypeComment;
+  | TypeComment
+  | MemberStore;
 
 // ── Functions ───────────────────────────────────────────────────────────
 

@@ -25,13 +25,17 @@
 import type { IRExpr, IRStmt, IRFunc, IRProgram } from "../lowering/ir.js";
 import { getBuiltin } from "../lowering/builtins/index.js";
 import {
+  classTypedefName,
   handleTypedefName,
   isHandle,
   isMultiElement,
   isNumeric,
   isOwned,
+  structTypedefName,
   typeToString,
+  type ClassType,
   type HandleType,
+  type StructType,
   type Type,
 } from "../lowering/types.js";
 import { forEachSubExpr, forEachTopLevelExpr } from "../lowering/walk.js";
@@ -50,6 +54,11 @@ import {
   type FutureTouchMap,
 } from "./liveness.js";
 import { irFuncDocComment, irStmtHeader } from "./prettyIR.js";
+import {
+  emitNamedTypedef,
+  specForClass,
+  specForStruct,
+} from "./emitNamedTypedef.js";
 
 export interface EmitOptions {
   /** Include the activated runtime helper bodies in the output.
@@ -78,6 +87,17 @@ export function emitProgram(prog: IRProgram, opts: EmitOptions = {}): string {
     userParts.push("");
   }
 
+  // Struct/class typedefs — one per distinct shape. Emitted in
+  // topological order so a nested-struct field's typedef appears
+  // before its container's. Each typedef ships with its four
+  // owned-kind helpers (and a _disp helper for structs).
+  const namedTypedefs = collectNamedTypedefs(prog);
+  for (const t of namedTypedefs) {
+    const spec = t.kind === "Struct" ? specForStruct(t) : specForClass(t);
+    userParts.push(emitNamedTypedef(spec, state));
+  }
+  if (namedTypedefs.length > 0) userParts.push("");
+
   // Forward declarations.
   for (const fn of prog.functions.values()) {
     userParts.push(`static ${fnRetType(fn)} ${fn.cName}(${fnParamList(fn)});`);
@@ -94,11 +114,21 @@ export function emitProgram(prog: IRProgram, opts: EmitOptions = {}): string {
   userParts.push("int main(void) {");
   const mainOwned = collectOwnedLocals(prog.topLevelStmts);
   for (const o of mainOwned) {
-    useRuntimeByName(state, "mtoc2_tensor_empty");
-    userParts.push(`  mtoc2_tensor_t ${o} = mtoc2_tensor_empty();`);
+    activateOwnedRuntime(o.ty, state);
+    const h = ownedHelpersFor(o.ty);
+    userParts.push(`  ${cTypeFor(o.ty)} ${o.cName} = ${h.empty}();`);
   }
   const mainFutureTouches = computeFutureTouches(prog.topLevelStmts, null);
-  const mainBody = emitBody(prog.topLevelStmts, "  ", state, mainFutureTouches);
+  const mainOwnedTypes = new Map<string, Type>(
+    mainOwned.map(o => [o.cName, o.ty])
+  );
+  const mainBody = emitBody(
+    prog.topLevelStmts,
+    "  ",
+    state,
+    mainFutureTouches,
+    mainOwnedTypes
+  );
   if (mainBody.length > 0) userParts.push(mainBody);
   const mainHasRet = bodyHasReturn(prog.topLevelStmts);
   if (mainHasRet) userParts.push(`mtoc2_return:`);
@@ -107,13 +137,14 @@ export function emitProgram(prog: IRProgram, opts: EmitOptions = {}): string {
   // already been released by an early-free along every reaching path.
   const mainNullAtExit = nullAtScopeExit(
     prog.topLevelStmts,
-    new Set(mainOwned),
+    new Set(mainOwned.map(o => o.cName)),
     mainFutureTouches
   );
   for (const o of mainOwned) {
-    if (mainNullAtExit.has(o)) continue;
-    useRuntimeByName(state, "mtoc2_tensor_free");
-    userParts.push(`  mtoc2_tensor_free(&${o});`);
+    if (mainNullAtExit.has(o.cName)) continue;
+    activateOwnedRuntime(o.ty, state);
+    const h = ownedHelpersFor(o.ty);
+    userParts.push(`  ${h.free}(&${o.cName});`);
   }
   userParts.push("  return 0;");
   userParts.push("}");
@@ -209,6 +240,98 @@ function collectHandleTypedefs(prog: IRProgram): HandleType[] {
   return topoSortHandleTypedefs(Array.from(seen.values()));
 }
 
+/** Walk the program and collect every distinct `StructType` and
+ *  `ClassType` shape, returning them in dependency-topological order
+ *  (a typedef whose fields reference another typedef is emitted
+ *  after that other typedef). Recurses into struct/class field types
+ *  so a transitively-used inner shape gets included even if the
+ *  outer shape is the only thing the IR mentions directly. */
+function collectNamedTypedefs(prog: IRProgram): Array<StructType | ClassType> {
+  const seen = new Map<string, StructType | ClassType>();
+
+  const considerNamed = (t: Type | undefined): void => {
+    if (t === undefined) return;
+    if (t.kind === "Struct") {
+      const key = structTypedefName(t);
+      if (!seen.has(key)) {
+        seen.set(key, t);
+        for (const f of t.fields) considerNamed(f.ty);
+      }
+    } else if (t.kind === "Class") {
+      const key = classTypedefName(t);
+      if (!seen.has(key)) {
+        seen.set(key, t);
+        for (const p of t.properties) considerNamed(p.ty);
+      }
+    }
+  };
+
+  const visitExpr = (e: IRExpr): void => {
+    forEachSubExpr(e, sub => considerNamed(sub.ty));
+  };
+  const visitStmts = (stmts: ReadonlyArray<IRStmt>): void => {
+    for (const s of stmts) {
+      forEachTopLevelExpr(s, visitExpr);
+      if (s.kind === "Assign") considerNamed(s.ty);
+      if (s.kind === "MemberStore") {
+        considerNamed(s.base.ty);
+        considerNamed(s.leafTy);
+      }
+      switch (s.kind) {
+        case "If":
+          visitStmts(s.thenBody);
+          visitStmts(s.elseBody);
+          break;
+        case "While":
+        case "For":
+          visitStmts(s.body);
+          break;
+      }
+    }
+  };
+  for (const fn of prog.functions.values()) {
+    for (const ty of fn.paramTypes) considerNamed(ty);
+    for (const ty of fn.outputTypes) considerNamed(ty);
+    visitStmts(fn.body);
+  }
+  visitStmts(prog.topLevelStmts);
+
+  // Topological sort: a struct/class whose fields reference another
+  // struct/class must come after its dependency's typedef.
+  return topoSortNamedTypedefs(Array.from(seen.values()));
+}
+
+function namedTypedefKey(t: StructType | ClassType): string {
+  return t.kind === "Struct" ? structTypedefName(t) : classTypedefName(t);
+}
+
+function topoSortNamedTypedefs(
+  ts: Array<StructType | ClassType>
+): Array<StructType | ClassType> {
+  const byName = new Map<string, StructType | ClassType>();
+  for (const t of ts) byName.set(namedTypedefKey(t), t);
+  const visited = new Set<string>();
+  const out: Array<StructType | ClassType> = [];
+  const visit = (t: StructType | ClassType): void => {
+    const name = namedTypedefKey(t);
+    if (visited.has(name)) return;
+    visited.add(name);
+    const inner =
+      t.kind === "Struct"
+        ? t.fields.map(f => f.ty)
+        : t.properties.map(p => p.ty);
+    for (const ity of inner) {
+      if (ity.kind === "Struct" || ity.kind === "Class") {
+        const dep = byName.get(namedTypedefKey(ity));
+        if (dep) visit(dep);
+      }
+    }
+    out.push(t);
+  };
+  for (const t of ts) visit(t);
+  return out;
+}
+
 function topoSortHandleTypedefs(ts: HandleType[]): HandleType[] {
   const byName = new Map<string, HandleType>();
   for (const t of ts) byName.set(handleTypedefName(t), t);
@@ -247,6 +370,8 @@ function renderHandleTypedef(t: HandleType): string {
 function cTypeFor(t: Type): string {
   if (isMultiElement(t)) return "mtoc2_tensor_t";
   if (isHandle(t)) return handleTypedefName(t);
+  if (t.kind === "Struct") return structTypedefName(t);
+  if (t.kind === "Class") return classTypedefName(t);
   return "double";
 }
 
@@ -255,6 +380,65 @@ function cTypeFor(t: Type): string {
 function defaultInitFor(ty: Type): string {
   if (isHandle(ty)) return `(${handleTypedefName(ty)}){0}`;
   return "0.0";
+}
+
+/** Per-owned-kind helper-name family. Tensors use the global
+ *  `mtoc2_tensor_*` runtime snippet names; structs and classes use
+ *  their program-emitted `<typedef>_*` family. Pure POD owned isn't
+ *  a thing — every owned type has all four helpers. */
+interface OwnedHelpers {
+  empty: string;
+  assign: string;
+  copy: string;
+  free: string;
+  /** When true, `assign`/`copy`/`free` are loaded from the runtime
+   *  snippet registry. When false, they're emitted directly into the
+   *  generated C by `emitNamedTypedef` and need no `useRuntimeByName`
+   *  activation. */
+  isRuntime: boolean;
+}
+
+function ownedHelpersFor(t: Type): OwnedHelpers {
+  if (isMultiElement(t)) {
+    return {
+      empty: "mtoc2_tensor_empty",
+      assign: "mtoc2_tensor_assign",
+      copy: "mtoc2_tensor_copy",
+      free: "mtoc2_tensor_free",
+      isRuntime: true,
+    };
+  }
+  if (t.kind === "Struct") {
+    const name = structTypedefName(t);
+    return {
+      empty: `${name}_empty`,
+      assign: `${name}_assign`,
+      copy: `${name}_copy`,
+      free: `${name}_free`,
+      isRuntime: false,
+    };
+  }
+  if (t.kind === "Class") {
+    const name = classTypedefName(t);
+    return {
+      empty: `${name}_empty`,
+      assign: `${name}_assign`,
+      copy: `${name}_copy`,
+      free: `${name}_free`,
+      isRuntime: false,
+    };
+  }
+  throw new Error(`ownedHelpersFor: non-owned type ${typeToString(t)}`);
+}
+
+function activateOwnedRuntime(t: Type, state: RuntimeState): void {
+  const h = ownedHelpersFor(t);
+  if (h.isRuntime) {
+    useRuntimeByName(state, h.empty);
+    useRuntimeByName(state, h.assign);
+    useRuntimeByName(state, h.copy);
+    useRuntimeByName(state, h.free);
+  }
 }
 
 function fnRetType(fn: IRFunc): string {
@@ -271,21 +455,23 @@ function fnParamList(fn: IRFunc): string {
     .join(", ");
 }
 
-/** Walk the body and collect cNames of locals that need a tensor
- *  declaration at function top. Any Assign whose LHS is `isOwned(ty)`
- *  marks the name. Walks through If / While / For bodies — owned
- *  locals declared inside a block still live in the surrounding
- *  function's stack frame (every local declaration is hoisted to
- *  function top to keep the free-on-exit walk simple). */
-function collectOwnedLocals(stmts: IRStmt[]): string[] {
-  const seen = new Set<string>();
+/** Walk the body and collect every owned local that needs a top-of-
+ *  function predeclaration. Any Assign whose LHS is `isOwned(ty)`
+ *  marks the name with its type (the type drives which helper family
+ *  to use for `_empty()` / `_free()`). Walks through If / While /
+ *  For bodies — owned locals declared inside a block still live in
+ *  the surrounding function's stack frame (every local declaration
+ *  is hoisted to function top to keep the free-on-exit walk
+ *  simple). */
+function collectOwnedLocals(stmts: IRStmt[]): { cName: string; ty: Type }[] {
+  const seen = new Map<string, Type>();
   const order: string[] = [];
   const visit = (ss: IRStmt[]): void => {
     for (const s of ss) {
       switch (s.kind) {
         case "Assign":
           if (isOwned(s.ty) && !seen.has(s.cName)) {
-            seen.add(s.cName);
+            seen.set(s.cName, s.ty);
             order.push(s.cName);
           }
           break;
@@ -303,7 +489,7 @@ function collectOwnedLocals(stmts: IRStmt[]): string[] {
     }
   };
   visit(stmts);
-  return order;
+  return order.map(cName => ({ cName, ty: seen.get(cName)! }));
 }
 
 function emitFunction(fn: IRFunc, state: RuntimeState): string {
@@ -318,8 +504,9 @@ function emitFunction(fn: IRFunc, state: RuntimeState): string {
   const paramNames = new Set(fn.cParams);
   if (cOut !== null && !paramNames.has(cOut)) {
     if (outTy && isOwned(outTy)) {
-      useRuntimeByName(state, "mtoc2_tensor_empty");
-      lines.push(`  mtoc2_tensor_t ${cOut} = mtoc2_tensor_empty();`);
+      activateOwnedRuntime(outTy, state);
+      const h = ownedHelpersFor(outTy);
+      lines.push(`  ${cTypeFor(outTy)} ${cOut} = ${h.empty}();`);
     } else if (outTy !== null) {
       lines.push(`  ${cTypeFor(outTy)} ${cOut} = ${defaultInitFor(outTy)};`);
     } else {
@@ -328,27 +515,53 @@ function emitFunction(fn: IRFunc, state: RuntimeState): string {
   }
   // Pre-declare owned locals (excluding the output, which we already
   // handled above).
-  const owned = collectOwnedLocals(fn.body).filter(n => n !== cOut);
+  const owned = collectOwnedLocals(fn.body).filter(o => o.cName !== cOut);
   for (const o of owned) {
-    useRuntimeByName(state, "mtoc2_tensor_empty");
-    lines.push(`  mtoc2_tensor_t ${o} = mtoc2_tensor_empty();`);
+    activateOwnedRuntime(o.ty, state);
+    const h = ownedHelpersFor(o.ty);
+    lines.push(`  ${cTypeFor(o.ty)} ${o.cName} = ${h.empty}();`);
   }
   const ownedOutput =
     cOut !== null && outTy && isOwned(outTy)
       ? { cName: cOut, ty: outTy }
       : null;
   const futureTouches = computeFutureTouches(fn.body, ownedOutput);
-  const bodyText = emitBody(fn.body, "  ", state, futureTouches);
+  const fnOwnedTypes = new Map<string, Type>();
+  for (const o of owned) fnOwnedTypes.set(o.cName, o.ty);
+  if (cOut !== null && outTy && isOwned(outTy)) {
+    fnOwnedTypes.set(cOut, outTy);
+  }
+  // Owned-typed params: the caller wrapped them in `_copy` so the
+  // callee owns its arg. Track them so early-free / scope-exit free
+  // can pick the right helper. They're NOT pre-declared (the
+  // function signature already declared them) but they ARE freed at
+  // scope exit.
+  const ownedParams: { cName: string; ty: Type }[] = [];
+  for (let i = 0; i < fn.cParams.length; i++) {
+    const pTy = fn.paramTypes[i];
+    if (isOwned(pTy)) {
+      ownedParams.push({ cName: fn.cParams[i], ty: pTy });
+      fnOwnedTypes.set(fn.cParams[i], pTy);
+    }
+  }
+  const bodyText = emitBody(fn.body, "  ", state, futureTouches, fnOwnedTypes);
   if (bodyText.length > 0) lines.push(bodyText);
   const hasRet = bodyHasReturn(fn.body);
   if (hasRet) lines.push(`mtoc2_return:`);
   // Scope-exit frees: skip owned locals that nullAtScopeExit proves
   // are NULL on every reaching path (already early-freed).
-  const fnNullAtExit = nullAtScopeExit(fn.body, new Set(owned), futureTouches);
-  for (const o of owned) {
-    if (fnNullAtExit.has(o)) continue;
-    useRuntimeByName(state, "mtoc2_tensor_free");
-    lines.push(`  mtoc2_tensor_free(&${o});`);
+  const scopeExitNames = new Set<string>([
+    ...owned.map(o => o.cName),
+    ...ownedParams.map(p => p.cName),
+  ]);
+  const fnNullAtExit = nullAtScopeExit(fn.body, scopeExitNames, futureTouches);
+  for (const o of [...owned, ...ownedParams]) {
+    if (fnNullAtExit.has(o.cName)) continue;
+    // Skip freeing the output — it's the value we're returning.
+    if (o.cName === cOut) continue;
+    activateOwnedRuntime(o.ty, state);
+    const h = ownedHelpersFor(o.ty);
+    lines.push(`  ${h.free}(&${o.cName});`);
   }
   if (isVoidFn) {
     // `return;` is implicit at function end, but emit it when there's a
@@ -377,14 +590,15 @@ function bodyHasReturn(body: IRStmt[]): boolean {
 /** Emit a sequence of statements with their per-stmt early-frees.
  *  After each stmt, owned C-names that aren't in the stmt's
  *  futureTouchOut (i.e. their last use was at this stmt) get a
- *  `mtoc2_tensor_free(&v);` call. Scope-exit frees still emit
- *  unconditionally — they're no-ops for buffers already nulled by
- *  the early-free. */
+ *  `<owned-kind>_free(&v);` call dispatched on the variable's
+ *  recorded owned type. Scope-exit frees still emit unconditionally
+ *  — they're no-ops for buffers already nulled by the early-free. */
 function emitBody(
   stmts: IRStmt[],
   indent: string,
   state: RuntimeState,
-  futureTouches: FutureTouchMap
+  futureTouches: FutureTouchMap,
+  ownedTypes: ReadonlyMap<string, Type>
 ): string {
   const out: string[] = [];
   for (const s of stmts) {
@@ -392,14 +606,19 @@ function emitBody(
     if (header !== null) {
       out.push(`${indent}/* ${header} */`);
     }
-    const line = emitStmt(s, indent, state, futureTouches);
+    const line = emitStmt(s, indent, state, futureTouches, ownedTypes);
     if (line !== null) out.push(line);
     const freeNames = earlyFreeCandidates(s, futureTouches);
-    if (freeNames.size > 0) {
-      useRuntimeByName(state, "mtoc2_tensor_free");
-      for (const v of freeNames) {
-        out.push(`${indent}mtoc2_tensor_free(&${v});`);
+    for (const v of freeNames) {
+      const ty = ownedTypes.get(v);
+      if (ty === undefined) {
+        throw new Error(
+          `emit: early-free of '${v}' but no owned type recorded`
+        );
       }
+      activateOwnedRuntime(ty, state);
+      const h = ownedHelpersFor(ty);
+      out.push(`${indent}${h.free}(&${v});`);
     }
   }
   return out.join("\n");
@@ -409,22 +628,35 @@ function emitStmt(
   s: IRStmt,
   indent: string,
   state: RuntimeState,
-  futureTouches: FutureTouchMap
+  futureTouches: FutureTouchMap,
+  ownedTypes: ReadonlyMap<string, Type>
 ): string | null {
   switch (s.kind) {
     case "ExprStmt":
       return `${indent}${emitExpr(s.expr, state)};`;
     case "Assign": {
       if (isOwned(s.ty)) {
-        useRuntimeByName(state, "mtoc2_tensor_assign");
-        const rhs = emitTensorRhs(s.expr, state);
-        return `${indent}mtoc2_tensor_assign(&${s.cName}, ${rhs});`;
+        activateOwnedRuntime(s.ty, state);
+        const h = ownedHelpersFor(s.ty);
+        const rhs = emitOwnedRhs(s.expr, state);
+        return `${indent}${h.assign}(&${s.cName}, ${rhs});`;
       }
       const rhs = emitExpr(s.expr, state);
       if (s.declare) {
         return `${indent}${cTypeFor(s.ty)} ${s.cName} = ${rhs};`;
       }
       return `${indent}${s.cName} = ${rhs};`;
+    }
+    case "MemberStore": {
+      const slot = [s.base.cName, ...s.fieldPath].join(".");
+      if (isOwned(s.leafTy)) {
+        activateOwnedRuntime(s.leafTy, state);
+        const h = ownedHelpersFor(s.leafTy);
+        const rhs = emitOwnedRhs(s.rhs, state);
+        return `${indent}${h.assign}(&${slot}, ${rhs});`;
+      }
+      const rhs = emitExpr(s.rhs, state);
+      return `${indent}${slot} = ${rhs};`;
     }
     case "If": {
       const lines: string[] = [];
@@ -433,12 +665,19 @@ function emitStmt(
         s.thenBody,
         indent + "  ",
         state,
-        futureTouches
+        futureTouches,
+        ownedTypes
       );
       if (thenText.length > 0) lines.push(thenText);
       if (s.elseBody.length > 0) {
         if (s.elseBody.length === 1 && s.elseBody[0].kind === "If") {
-          const inner = emitStmt(s.elseBody[0], indent, state, futureTouches);
+          const inner = emitStmt(
+            s.elseBody[0],
+            indent,
+            state,
+            futureTouches,
+            ownedTypes
+          );
           if (inner !== null)
             lines.push(`${indent}} else ${inner.trimStart()}`);
           else lines.push(`${indent}}`);
@@ -448,7 +687,8 @@ function emitStmt(
             s.elseBody,
             indent + "  ",
             state,
-            futureTouches
+            futureTouches,
+            ownedTypes
           );
           if (elseText.length > 0) lines.push(elseText);
           lines.push(`${indent}}`);
@@ -461,7 +701,13 @@ function emitStmt(
     case "While": {
       const lines: string[] = [];
       lines.push(`${indent}while (${emitExpr(s.cond, state)} != 0.0) {`);
-      const bodyText = emitBody(s.body, indent + "  ", state, futureTouches);
+      const bodyText = emitBody(
+        s.body,
+        indent + "  ",
+        state,
+        futureTouches,
+        ownedTypes
+      );
       if (bodyText.length > 0) lines.push(bodyText);
       lines.push(`${indent}}`);
       return lines.join("\n");
@@ -476,7 +722,13 @@ function emitStmt(
       lines.push(
         `${indent}for (double ${s.cVar} = ${startC}; ${s.cVar} ${cmp} ${endC}; ${s.cVar} ${upd}) {`
       );
-      const bodyText = emitBody(s.body, indent + "  ", state, futureTouches);
+      const bodyText = emitBody(
+        s.body,
+        indent + "  ",
+        state,
+        futureTouches,
+        ownedTypes
+      );
       if (bodyText.length > 0) lines.push(bodyText);
       lines.push(`${indent}}`);
       return lines.join("\n");
@@ -497,17 +749,44 @@ function emitStmt(
   }
 }
 
-/** Tensor-typed RHS for an Assign. Each kind produces a freshly-owned
- *  tensor that `mtoc2_tensor_assign` consumes:
- *  - `Var`           → `mtoc2_tensor_copy(name)` (deep copy)
- *  - everything else → `emitExpr` (TensorBuild + Binary/Unary/Call
- *                      already emit fresh-allocating helpers) */
-function emitTensorRhs(e: IRExpr, state: RuntimeState): string {
+/** Owned-typed RHS for an Assign or MemberStore (or a Call arg that
+ *  binds to an owned callee param). Every owned C value produced
+ *  here is freshly-owned; the consumer's `_assign` helper releases
+ *  the prior slot and consumes the rhs.
+ *
+ *  - `Var`        → `<type>_copy(name)` (deep copy)
+ *  - `MemberLoad` → `<type>_copy(<base>.<field>)` (the load itself is
+ *                   a struct-by-value read; we wrap it in copy so
+ *                   the consumer gets a freshly-owned buffer)
+ *  - anything else → `emitExpr` (TensorBuild / StructLit / Binary /
+ *                    Call etc. already emit fresh-allocating
+ *                    helpers) */
+function emitOwnedRhs(e: IRExpr, state: RuntimeState): string {
   if (e.kind === "Var") {
-    useRuntimeByName(state, "mtoc2_tensor_copy");
-    return `mtoc2_tensor_copy(${e.cName})`;
+    activateOwnedRuntime(e.ty, state);
+    const h = ownedHelpersFor(e.ty);
+    return `${h.copy}(${e.cName})`;
+  }
+  if (e.kind === "MemberLoad" && isOwned(e.ty)) {
+    activateOwnedRuntime(e.ty, state);
+    const h = ownedHelpersFor(e.ty);
+    return `${h.copy}(${emitMemberLoadBare(e, state)})`;
   }
   return emitExpr(e, state);
+}
+
+/** Render a `MemberLoad` chain as a bare C field-access string, no
+ *  copy wrapping. Used by `emitOwnedRhs` and inside `emitExpr` for
+ *  non-owning contexts. */
+function emitMemberLoadBare(
+  e: Extract<IRExpr, { kind: "MemberLoad" }>,
+  state: RuntimeState
+): string {
+  const baseStr =
+    e.base.kind === "MemberLoad"
+      ? emitMemberLoadBare(e.base, state)
+      : emitExpr(e.base, state);
+  return `${baseStr}.${e.field}`;
 }
 
 function emitExpr(e: IRExpr, state: RuntimeState): string {
@@ -556,11 +835,9 @@ function emitExpr(e: IRExpr, state: RuntimeState): string {
           e.args.map(a => a.ty)
         );
       }
-      // User function call: tensor args wrap in copy (callee owns).
+      // User function call: owned args wrap in copy (callee owns).
       const args = e.args
-        .map(a =>
-          isOwned(a.ty) ? emitTensorRhs(a, state) : emitExpr(a, state)
-        )
+        .map(a => (isOwned(a.ty) ? emitOwnedRhs(a, state) : emitExpr(a, state)))
         .join(", ");
       return `${e.cName}(${args})`;
     }
@@ -581,6 +858,35 @@ function emitExpr(e: IRExpr, state: RuntimeState): string {
     }
     case "HandleCaptureLoad":
       return `${e.base.cName}.cap_${e.captureName}`;
+    case "StructLit": {
+      if (e.ty.kind !== "Struct" && e.ty.kind !== "Class") {
+        throw new Error(
+          `emit: StructLit ty is ${e.ty.kind}, expected Struct or Class`
+        );
+      }
+      const typedef =
+        e.ty.kind === "Struct"
+          ? structTypedefName(e.ty)
+          : classTypedefName(e.ty);
+      // Each field value is consumed by the freshly-allocated struct
+      // — owned values must already be fresh producers (ANF
+      // guarantees this for any non-Var owned RHS; a `Var` is wrapped
+      // in copy here so the struct owns its own buffer copy).
+      const parts = e.fields.map(f => {
+        const v = isOwned(f.value.ty)
+          ? emitOwnedRhs(f.value, state)
+          : emitExpr(f.value, state);
+        return `.${f.name} = ${v}`;
+      });
+      return `(${typedef}){${parts.join(", ")}}`;
+    }
+    case "MemberLoad":
+      // Bare field-access read; the load passes the field by value.
+      // Owned-typed reads at owned-consuming sites are wrapped in
+      // `_copy` by emitOwnedRhs, not here. (Non-owning sites — e.g.
+      // a tensor field passed to `disp` — pass the struct by value
+      // and don't take ownership.)
+      return emitMemberLoadBare(e, state);
   }
 }
 

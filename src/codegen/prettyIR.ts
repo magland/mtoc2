@@ -122,6 +122,14 @@ export function irExprToString(e: IRExpr): string {
       return `@?`;
     case "HandleCaptureLoad":
       return `${e.base.name}.${e.captureName}`;
+    case "StructLit": {
+      const parts = e.fields.map(
+        f => `'${f.name}', ${irExprToString(f.value)}`
+      );
+      return `struct(${parts.join(", ")})`;
+    }
+    case "MemberLoad":
+      return `${irExprToString(e.base)}.${e.field}`;
   }
 }
 
@@ -153,6 +161,10 @@ export function irStmtHeader(s: IRStmt): string | null {
       // lines; suppress the wrapper-comment-above-stmt that emitBody
       // would otherwise add for every IR stmt.
       return null;
+    case "MemberStore": {
+      const lhs = [s.base.name, ...s.fieldPath].join(".");
+      return `${lhs} = ${irExprToString(s.rhs)}`;
+    }
   }
 }
 

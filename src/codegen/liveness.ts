@@ -118,7 +118,8 @@ function touchStmt(
 ): Set<string> {
   switch (s.kind) {
     case "Assign":
-    case "ExprStmt": {
+    case "ExprStmt":
+    case "MemberStore": {
       const out = new Set(futureAfter);
       unionInto(out, topLevelOwnedUses(s));
       unionInto(out, topLevelOwnedDefs(s));

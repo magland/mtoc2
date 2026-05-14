@@ -46,7 +46,14 @@ enforces this byte-for-byte.
 ## Type variants
 
 ```ts
-type Type = NumericType | StringType | UnknownType;
+type Type =
+  | NumericType
+  | StringType
+  | UnknownType
+  | VoidType
+  | HandleType
+  | StructType
+  | ClassType;
 ```
 
 ### NumericType
@@ -116,6 +123,77 @@ when their canonical forms agree; otherwise the join drops to
 other handles so the C-side struct stays POD. See
 [architecture.md](architecture.md) (§ Function handles) for the
 lowering and codegen rules.
+
+### StructType
+
+```ts
+interface StructType {
+  kind: "Struct";
+  fields: ReadonlyArray<{ name: string; ty: Type }>;
+}
+```
+
+A struct value. Construct via `structType(fields)` so the field list
+is sorted by name — two StructTypes with the same shape are
+structurally identical regardless of source-level field-write
+order. Each field type is normalized through `widenForStorage`
+before being recorded, so per-field `sign` / `exact` differences
+don't shard the typedef hash.
+
+Structs are introduced by the `struct('f1', v1, ...)` literal — v1
+does not auto-create a struct from a bare `s.x = v` assignment.
+Once introduced, `s.f = rhs` writes to existing fields are accepted
+as long as the rhs occupies the same C-level slot as the field
+(`storageEquivalent`, which is `cFieldTypeStr(a) === cFieldTypeStr(b)`).
+That accepts any tensor → tensor field, any scalar → scalar field,
+or a matching struct/class typedef → its slot. The post-write internal
+field type is the rhs's full internal type — env updates so subsequent
+reads of `s.f` see the latest precision (sign, exact, tensor shape).
+
+The typedef hash is keyed only on each field's `cFieldTypeStr`, so
+writes that change a field's internal type (e.g. exact value, sign,
+tensor shape) do NOT shard the typedef. C-type-stable / internal-type-
+evolving is the contract: the C side stays uniform, the lattice keeps
+threading precision through reads, transfer functions, and function
+specialization keys.
+
+Structs are owned. They participate in the predeclare-at-top /
+scope-exit-free / early-free / ANF pipeline; the codegen emits one
+program-level typedef per canonical shape, shipping the four
+owned-kind helpers (`_empty`/`_assign`/`_copy`/`_free`) plus a
+`_disp` helper for `disp(s)`.
+
+### ClassType
+
+```ts
+interface ClassType {
+  kind: "Class";
+  className: string;
+  properties: ReadonlyArray<{ name: string; ty: Type }>;
+}
+```
+
+A class instance value. The `className` is the source-level
+identifier from `classdef Foo`; `properties` is the canonical
+(sorted-by-name) list of declared properties, each carrying the
+precise type of its `properties` block default expression. The C
+typedef hash uses `cFieldTypeStr` per property (one C-type string),
+so the typedef stays stable as constructor / method writes refine
+the internal property types through `unify`.
+
+v1 forbids inheritance, handle classes, operator overloads,
+`get.`/`set.` accessors, `Events`/`Enumeration`/`Arguments` blocks,
+and class attributes — any of these surface at registration time
+with `UnsupportedConstruct`. Methods must declare 0 or 1 outputs
+(same as user functions). Constructor specialization pre-seeds
+the receiver `obj` with the default-valued class instance before
+the body lowers, so `obj.x = ...` writes into an already-initialized
+slot.
+
+Like structs, class instances are owned and program-emit one
+typedef per shape with the four owned-kind helpers. `_disp` is
+NOT generated for classes in v1; `disp(classInstance)` is
+rejected at lowering.
 
 ## The exact field
 
@@ -214,10 +292,17 @@ body. Arithmetic still emits as runtime C.
   `ExprStmt` expression — see [architecture.md](architecture.md) for
   the lowering rule). The lattice would extend trivially with a tuple
   variant for multi-output.
-- **Struct fields, class instances, cells, sparse, dictionaries** —
-  all live in numbl's RuntimeValue model but mtoc2 hasn't grown the
-  corresponding type-system entries yet. Add them when the lowering
-  scope reaches them.
+- **Structs and class instances** ARE in the lattice now
+  (`StructType` / `ClassType`) — both owned, both program-emit one
+  typedef per canonical shape. v1 caveats: structs must be introduced
+  via the `struct(...)` literal (no auto-create from `s.x = v`),
+  class properties must declare a default-value expression, and
+  classes have no inheritance / no operator overloads / no
+  `get.`/`set.` accessors. See the `StructType` / `ClassType`
+  sections above.
+- **Cells, sparse, dictionaries** — all live in numbl's RuntimeValue
+  model but mtoc2 hasn't grown the corresponding type-system entries
+  yet. Add them when the lowering scope reaches them.
 - **Function handles** ARE in the lattice (`HandleType`) — but only
   user-function targets with scalar-real-numeric captures so far. See
   [architecture.md](architecture.md) for the static-dispatch model and

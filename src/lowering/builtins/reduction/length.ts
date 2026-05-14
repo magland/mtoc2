@@ -1,4 +1,4 @@
-import { TypeError, UnsupportedConstruct } from "../../errors.js";
+import { TypeError } from "../../errors.js";
 import {
   scalarDouble,
   signFromNumber,
@@ -16,10 +16,9 @@ export const length: Builtin = {
       throw new TypeError(`'length' arg must be numeric (got ${t.kind})`, span);
     }
     if (t.shape === undefined) {
-      throw new UnsupportedConstruct(
-        `'length' on a tensor of unknown shape not yet supported`,
-        span
-      );
+      // Shape unknown at compile time (e.g. a tensor stored on a
+      // struct/class field). The runtime helper handles it.
+      return scalarDouble("nonneg");
     }
     // MATLAB's `length`: max of the dim sizes, or 0 if any axis is 0.
     let v = 0;
