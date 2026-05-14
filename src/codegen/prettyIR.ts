@@ -130,6 +130,29 @@ export function irExprToString(e: IRExpr): string {
     }
     case "MemberLoad":
       return `${irExprToString(e.base)}.${e.field}`;
+    case "IndexLoad":
+      return `${e.base.name}(${e.indices.map(irExprToString).join(", ")})`;
+    case "IndexSlice": {
+      const slotStrs = e.index.map(slot => {
+        if (slot.kind === "Colon") return ":";
+        if (slot.kind === "Scalar") return irExprToString(slot.expr);
+        const stepPart =
+          slot.step.kind === "NumLit" && slot.step.value === 1
+            ? ""
+            : `${irExprToString(slot.step)}:`;
+        return `${irExprToString(slot.start)}:${stepPart}${irExprToString(slot.end)}`;
+      });
+      return `${e.base.name}(${slotStrs.join(", ")})`;
+    }
+    case "EndRef":
+      return "end";
+    case "MakeRange": {
+      const stepPart =
+        e.step.kind === "NumLit" && e.step.value === 1
+          ? ""
+          : `${irExprToString(e.step)}:`;
+      return `${irExprToString(e.start)}:${stepPart}${irExprToString(e.end)}`;
+    }
   }
 }
 
@@ -171,6 +194,20 @@ export function irStmtHeader(s: IRStmt): string | null {
         .join(", ");
       const argsTxt = s.args.map(irExprToString).join(", ");
       return `[${slotsTxt}] = ${s.name}(${argsTxt})`;
+    }
+    case "IndexStore":
+      return `${s.base.name}(${s.indices.map(irExprToString).join(", ")}) = ${irExprToString(s.rhs)}`;
+    case "IndexSliceStore": {
+      const slotStrs = s.index.map(slot => {
+        if (slot.kind === "Colon") return ":";
+        if (slot.kind === "Scalar") return irExprToString(slot.expr);
+        const stepPart =
+          slot.step.kind === "NumLit" && slot.step.value === 1
+            ? ""
+            : `${irExprToString(slot.step)}:`;
+        return `${irExprToString(slot.start)}:${stepPart}${irExprToString(slot.end)}`;
+      });
+      return `${s.base.name}(${slotStrs.join(", ")}) = ${irExprToString(s.rhs)}`;
     }
   }
 }

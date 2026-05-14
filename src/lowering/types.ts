@@ -225,6 +225,29 @@ export function scalarLogical(exact?: boolean): NumericType {
   return t;
 }
 
+/** Real-double tensor built from a per-axis `dims` lattice. Used by
+ *  slice-read result typing when the slot pattern leaves at least one
+ *  axis with a runtime-only length (a `Range` slot whose count isn't a
+ *  static literal). When every dim is statically known to be `1` or
+ *  `>1`, callers should prefer `tensorDouble(shape)` (concrete shape)
+ *  so downstream elementwise ops can use static shape matching.
+ *
+ *  Trailing singletons in `dims` are stripped subject to a 2-axis
+ *  minimum, matching numbl's tensor shape-normalization rule. */
+export function tensorDoubleFromDims(dims: DimInfo[]): NumericType {
+  const trimmed = dims.slice();
+  while (trimmed.length > 2 && trimmed[trimmed.length - 1].kind === "one") {
+    trimmed.pop();
+  }
+  return {
+    kind: "Numeric",
+    elem: "double",
+    isComplex: false,
+    dims: trimmed,
+    sign: "unknown",
+  };
+}
+
 /** Real-double tensor with statically-known shape. `dims` is derived
  *  from `shape` (axis of length 1 → `{kind:"one"}`, else
  *  `{kind:"notOne"}`). When `exact` is provided, its length must equal

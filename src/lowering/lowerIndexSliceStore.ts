@@ -1,0 +1,102 @@
+/**
+ * Range / colon / scalar-mix indexed-write lowering: `v(:) = w`,
+ * `v(a:b) = w`, `M(:, j) = w`, `T(:, :, i) = w`, … .
+ *
+ * Companion to `lowerIndexSlice` for slice writes. RHS shape:
+ *   - scalar real numeric → broadcast into every slot.
+ *   - named multi-element tensor (`Var`) → per-slot copy.
+ *
+ * Other RHS forms (a fresh `TensorBuild`, an `IndexSlice`, a tensor
+ * Binary, etc.) are rejected with a clear message — the user must
+ * assign the expression to a name first so the temporary lifetime is
+ * explicit.
+ */
+
+import type { Expr, LValue, Span } from "../parser/index.js";
+import { TypeError, UnsupportedConstruct } from "./errors.js";
+import type { IRStmt, IndexSliceArg } from "./ir.js";
+import {
+  isScalarRealNumeric,
+  isMultiElement,
+  isNumeric,
+  typeToString,
+} from "./types.js";
+import type { Lowerer } from "./lower.js";
+import { lowerSliceArg } from "./lowerIndexSlice.js";
+import { resolveIndexBase } from "./indexResolve.js";
+
+export function lowerIndexSliceStore(
+  this: Lowerer,
+  lvalue: Extract<LValue, { type: "Index" }>,
+  exprAst: Expr,
+  span: Span
+): IRStmt | IRStmt[] {
+  if (lvalue.base.type !== "Ident") {
+    throw new UnsupportedConstruct(
+      `indexed assignment requires a simple variable on the left ` +
+        `(got ${lvalue.base.type})`,
+      span
+    );
+  }
+  const name = lvalue.base.name;
+  const r = resolveIndexBase.call(this, name, lvalue.indices.length, span, {
+    baseSpan: lvalue.base.span,
+    notInScope: "user-facing",
+    operation: "sliceWrite",
+  });
+
+  const isSingleSlot = lvalue.indices.length === 1;
+  const slots: IndexSliceArg[] = [];
+  for (let i = 0; i < lvalue.indices.length; i++) {
+    const axis: number | "linear" = isSingleSlot ? "linear" : i;
+    slots.push(
+      lowerSliceArg.call(this, r.baseCName, r.baseTy, axis, lvalue.indices[i])
+    );
+  }
+
+  const rawRhs = this.lowerExpr(exprAst);
+  if (!isNumeric(rawRhs.ty)) {
+    throw new TypeError(
+      `right-hand side of an indexed assignment must be numeric ` +
+        `(got ${typeToString(rawRhs.ty)})`,
+      exprAst.span
+    );
+  }
+  if (rawRhs.ty.isComplex || rawRhs.ty.elem !== "double") {
+    throw new UnsupportedConstruct(
+      `right-hand side of a range/colon indexed write must be real ` +
+        `double (got ${typeToString(rawRhs.ty)})`,
+      exprAst.span
+    );
+  }
+
+  // Codegen accepts only a scalar (broadcast) or a Var (per-slot copy)
+  // as RHS. Scalars pass through; multi-element non-Var RHSs (a
+  // TensorBuild, an IndexSlice, a MakeRange, a tensor-returning Call,
+  // a tensor Binary) hoist to a fresh `_mtoc2_t<N>` temp Assign so the
+  // temporary's lifetime is named and the codegen pipeline stays
+  // uniform. Same ANF rule used by every other owned consume site.
+  const hoists: IRStmt[] = [];
+  let rhs: typeof rawRhs;
+  if (isScalarRealNumeric(rawRhs.ty)) {
+    rhs = rawRhs;
+  } else if (isMultiElement(rawRhs.ty)) {
+    rhs = this.anfRequireScalarOrVar(rawRhs, hoists);
+  } else {
+    throw new TypeError(
+      `right-hand side of a range/colon indexed write must be a scalar ` +
+        `or a tensor (got ${typeToString(rawRhs.ty)})`,
+      exprAst.span
+    );
+  }
+
+  const store: IRStmt = {
+    kind: "IndexSliceStore",
+    base: r.base,
+    index: slots,
+    rhs,
+    span,
+  };
+  if (hoists.length === 0) return store;
+  return [...hoists, store];
+}

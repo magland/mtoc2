@@ -150,6 +150,20 @@ const REGISTRY: ReadonlyMap<string, RuntimeSnippet> = new Map<
   // ── length / numel (tensor → scalar shape queries) ───────────────
   ["mtoc2_length", loadSnippet("length.h", ["mtoc2_tensor_t"])],
   ["mtoc2_numel", loadSnippet("numel.h", ["mtoc2_tensor_t"])],
+
+  // ── Indexing / slicing / range-as-value ──────────────────────────
+  // `mtoc2_loop_count` powers every `start:step:end` count computation
+  // (single-slot slice reads/writes, multi-slot per-axis setup, and the
+  // MakeRange value-form helper).
+  ["mtoc2_loop_count", loadSnippet("loop_count.h")],
+  [
+    "mtoc2_tensor_make_range",
+    loadSnippet("tensor_make_range.h", [
+      "mtoc2_tensor_t",
+      "mtoc2_tensor_alloc_nd",
+      "mtoc2_loop_count",
+    ]),
+  ],
 ]);
 
 export function getRuntimeSnippet(name: string): RuntimeSnippet {

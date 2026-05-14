@@ -76,6 +76,16 @@ mtoc2 is a _static_ translator. Anything outside the supported subset raises
   literal `1.0` directly since the C arg is a bare `double`).
 - **disp** routes on shape: scalar → `mtoc2_disp_double`,
   multi-element tensor → `mtoc2_disp_tensor`.
+- **Indexing & slicing** — scalar reads/writes (`v(i)`, `M(i,j)`,
+  `T(i,j,k)`, `v(end)`, `M(end,end-1)`), range/colon slice reads/writes
+  (`v(:)`, `v(a:b)`, `M(:, j)`, `T(:, :, i) = page`), and range-as-
+  value (`v = 1:n`, `(1:5)*2`, etc.). Scalar offsets are computed via
+  the shared column-major formula `emitNdScalarOffset`; slice reads
+  allocate a freshly-owned result via `mtoc2_tensor_alloc_nd` and
+  loop; slice writes mutate the base buffer in place with a runtime
+  count check on tensor RHS. Range-as-value lowers to a `MakeRange`
+  IR node and emits via `mtoc2_tensor_make_range`. Logical/vector-of-
+  indices indexing (`a(mask)`, `a(idx_vec)`) is not yet supported.
 - **Function handles** — `@user_func` (named) and `@(...) <body>`
   (anonymous). Dispatch is static: every `h(args)` call site reads
   the handle variable's `HandleType`, builds capture-args via
@@ -94,12 +104,14 @@ mtoc2 is a _static_ translator. Anything outside the supported subset raises
   file names. MATLAB precedence rules (local-to-main beats workspace
   beats builtin) are inherited from numbl rather than reimplemented.
 
-Not yet supported: matrix multiplication / division, indexing
-(`a(k)`), unknown-shape constructors (`zeros(n)` where `n` is a
-runtime-only scalar), general broadcast (non-scalar mismatched
-shapes), complex, strings, chars, builtin handles, tensor captures
-on anonymous functions, `private/` directories, `+pkg/` namespaces,
-`@Class/` folders, `import` statements, `.numbl.js` user functions.
+Not yet supported: matrix multiplication / division, logical / vector-
+of-indices indexing (`a(mask)`, `a(idx_vec)`), member-rooted indexing
+(`obj.r(1, :, :)`, `obj.f(i) = rhs`), indexed-delete (`a(2:5) = []`),
+unknown-shape constructors (`zeros(n)` where `n` is a runtime-only
+scalar), general broadcast (non-scalar mismatched shapes), complex,
+strings, chars, builtin handles, tensor captures on anonymous
+functions, `private/` directories, `+pkg/` namespaces, `@Class/`
+folders, `import` statements, `.numbl.js` user functions.
 Expanding scope is gated by the cross-runner.
 
 ## Docs are part of the change

@@ -92,6 +92,11 @@ import {
   unaryOpBuiltin,
 } from "./builtins/index.js";
 import { arityAccepts, arityDescribe } from "./builtins/registry.js";
+import { isSliceArg } from "./indexResolve.js";
+import { lowerIndexLoad } from "./lowerIndexLoad.js";
+import { lowerIndexStore } from "./lowerIndexStore.js";
+import { lowerIndexSlice } from "./lowerIndexSlice.js";
+import { lowerIndexSliceStore } from "./lowerIndexSliceStore.js";
 
 interface EnvEntry {
   cName: string;
@@ -103,6 +108,18 @@ type FuncStmt = Extract<Stmt, { type: "Function" }>;
 export class Lowerer {
   private env: Map<string, EnvEntry> = new Map();
   private specializations: Map<string, IRFunc> = new Map();
+  /** Stack of contexts for resolving the `end` keyword inside an
+   *  index slot. Pushed by the index-lowering helpers (lowerIndexLoad
+   *  / lowerIndexStore / lowerIndexSlice / lowerIndexSliceStore)
+   *  around each slot they lower; consumed by the `EndKeyword` arm of
+   *  `lowerExpr`. `axis === "linear"` flags the single-slot form
+   *  whose `end` resolves to `numel(base)`. Outside an index slot the
+   *  stack is empty and `end` raises `UnsupportedConstruct`. */
+  endStack: Array<{
+    baseCName: string;
+    baseTy: NumericType;
+    axis: number | "linear";
+  }> = [];
   /** Per-scope set: names introduced (first-assignment) in current
    *  function body. Used to decide `declare: true` on Assign. Reset
    *  when entering a function specialization. */
@@ -129,6 +146,13 @@ export class Lowerer {
    *  ...) only need to be threaded here. */
   private callSite(): CallSite {
     return { file: this.currentFile };
+  }
+
+  /** Public env lookup used by the index-lowering helpers. Returns
+   *  the env entry (cName + ty) if a binding exists in the current
+   *  scope, or undefined otherwise. */
+  envLookup(name: string): EnvEntry | undefined {
+    return this.env.get(name);
   }
 
   /** Look up a registered class (workspace or local) by name. */
@@ -380,6 +404,7 @@ export class Lowerer {
       case "Var":
       case "HandleLit":
       case "HandleCaptureLoad":
+      case "EndRef":
         return e;
       case "TensorBuild":
         return {
@@ -424,13 +449,52 @@ export class Lowerer {
           ...e,
           base: this.anfRequireScalarOrVar(e.base, hoists),
         };
+      case "IndexLoad":
+        // The base is already a `Var` by construction (resolveIndexBase
+        // returns one). Each scalar index slot ANFs as a scalar/Var.
+        return {
+          ...e,
+          indices: e.indices.map(i => this.anfRequireScalarOrVar(i, hoists)),
+        };
+      case "IndexSlice":
+        // Slice slots' sub-expressions are scalar (start/step/end of a
+        // Range, or the Scalar slot's expr). Run them through scalar-
+        // or-Var ANF to keep them simple — they evaluate per loop
+        // iteration in codegen.
+        return {
+          ...e,
+          index: e.index.map(slot => {
+            if (slot.kind === "Range") {
+              return {
+                ...slot,
+                start: this.anfRequireScalarOrVar(slot.start, hoists),
+                step: this.anfRequireScalarOrVar(slot.step, hoists),
+                end: this.anfRequireScalarOrVar(slot.end, hoists),
+              };
+            }
+            if (slot.kind === "Scalar") {
+              return {
+                ...slot,
+                expr: this.anfRequireScalarOrVar(slot.expr, hoists),
+              };
+            }
+            return slot;
+          }),
+        };
+      case "MakeRange":
+        return {
+          ...e,
+          start: this.anfRequireScalarOrVar(e.start, hoists),
+          step: this.anfRequireScalarOrVar(e.step, hoists),
+          end: this.anfRequireScalarOrVar(e.end, hoists),
+        };
     }
   }
 
   /** Walk `e` and ensure the returned expression is either scalar or a
    *  Var. Recursively ANFs children; if `e` itself is owned-producing
    *  (multi-element non-Var), hoist it. */
-  private anfRequireScalarOrVar(e: IRExpr, hoists: IRStmt[]): IRExpr {
+  anfRequireScalarOrVar(e: IRExpr, hoists: IRStmt[]): IRExpr {
     const rewritten = this.anfChildren(e, hoists);
     if (isMultiElement(rewritten.ty) && rewritten.kind !== "Var") {
       return this.hoistToTemp(rewritten, hoists);
@@ -504,6 +568,12 @@ export class Lowerer {
     s: Extract<Stmt, { type: "AssignLValue" }>
   ): IRStmt | IRStmt[] {
     const lv = s.lvalue;
+    if (lv.type === "Index") {
+      if (lv.indices.some(isSliceArg)) {
+        return lowerIndexSliceStore.call(this, lv, s.expr, s.span);
+      }
+      return lowerIndexStore.call(this, lv, s.expr, s.span);
+    }
     if (lv.type !== "Member") {
       throw new UnsupportedConstruct(
         `assignment lvalue '${lv.type}' is not supported`,
@@ -1031,7 +1101,7 @@ export class Lowerer {
 
   // ── Expression lowering ───────────────────────────────────────────────
 
-  private lowerExpr(e: Expr): IRExpr {
+  lowerExpr(e: Expr): IRExpr {
     switch (e.type) {
       case "Number": {
         const v = Number(e.value);
@@ -1066,12 +1136,137 @@ export class Lowerer {
         return this.lowerMember(e);
       case "MethodCall":
         return this.lowerMethodCall(e);
+      case "EndKeyword":
+        return this.lowerEndKeyword(e);
+      case "Range":
+        return this.lowerRangeAsValue(e);
+      case "Colon":
+        throw new UnsupportedConstruct(
+          `bare ':' is only valid inside an index expression`,
+          e.span
+        );
       default:
         throw new UnsupportedConstruct(
           `expression type '${e.type}' not supported`,
           e.span
         );
     }
+  }
+
+  /** `end` keyword inside an index slot — resolves through the top of
+   *  `endStack`. Outside an index slot it raises with a span. When the
+   *  axis size is statically known, emit a `NumLit`; otherwise emit
+   *  an `EndRef` IR node and let codegen render the runtime axis-size
+   *  read. */
+  private lowerEndKeyword(e: Extract<Expr, { type: "EndKeyword" }>): IRExpr {
+    if (this.endStack.length === 0) {
+      throw new UnsupportedConstruct(
+        `'end' is only valid inside an index expression`,
+        e.span
+      );
+    }
+    const top = this.endStack[this.endStack.length - 1];
+    // Try a static value first.
+    if (top.axis === "linear") {
+      if (top.baseTy.shape !== undefined) {
+        const n = top.baseTy.shape.reduce((a, b) => a * b, 1);
+        return {
+          kind: "NumLit",
+          value: n,
+          ty: scalarDouble(n > 0 ? "positive" : "nonneg", n),
+          span: e.span,
+        };
+      }
+    } else {
+      const axis = top.axis;
+      if (top.baseTy.shape !== undefined && axis < top.baseTy.shape.length) {
+        const n = top.baseTy.shape[axis];
+        return {
+          kind: "NumLit",
+          value: n,
+          ty: scalarDouble(n > 0 ? "positive" : "nonneg", n),
+          span: e.span,
+        };
+      }
+    }
+    return {
+      kind: "EndRef",
+      baseCName: top.baseCName,
+      baseTy: top.baseTy,
+      axis: top.axis,
+      ty: scalarDouble("nonneg"),
+      span: e.span,
+    };
+  }
+
+  /** `a : b` or `a : s : b` used as a value (outside an index slot
+   *  and outside a for-loop iterable). Emits a `MakeRange` IR node
+   *  whose result is a freshly-allocated row vector. */
+  private lowerRangeAsValue(e: Extract<Expr, { type: "Range" }>): IRExpr {
+    const start = this.lowerExpr(e.start);
+    const end = this.lowerExpr(e.end);
+    let step: IRExpr;
+    if (e.step === null) {
+      step = {
+        kind: "NumLit",
+        value: 1,
+        ty: scalarDouble("positive", 1),
+        span: e.span,
+      };
+    } else {
+      step = this.lowerExpr(e.step);
+    }
+    this.requireScalarReal(start.ty, "range start", e.start.span);
+    this.requireScalarReal(end.ty, "range end", e.end.span);
+    this.requireScalarReal(step.ty, "range step", e.step?.span ?? e.span);
+
+    // Static-shape detection: when start / step / end are all exact
+    // and step is finite-nonzero, compute the count at compile time.
+    let resultTy: Type;
+    const sExact =
+      isNumeric(start.ty) && typeof start.ty.exact === "number"
+        ? start.ty.exact
+        : undefined;
+    const tExact =
+      isNumeric(step.ty) && typeof step.ty.exact === "number"
+        ? step.ty.exact
+        : undefined;
+    const eExact =
+      isNumeric(end.ty) && typeof end.ty.exact === "number"
+        ? end.ty.exact
+        : undefined;
+    if (
+      sExact !== undefined &&
+      tExact !== undefined &&
+      eExact !== undefined &&
+      tExact !== 0 &&
+      Number.isFinite(sExact) &&
+      Number.isFinite(tExact) &&
+      Number.isFinite(eExact)
+    ) {
+      const raw = Math.floor((eExact - sExact) / tExact) + 1;
+      const n = raw > 0 ? raw : 0;
+      resultTy = tensorDouble([1, n]);
+    } else {
+      resultTy = tensorDouble([1, 1]); // placeholder; will be overridden
+      // Build a dim-only type when length is runtime.
+      resultTy = {
+        kind: "Numeric",
+        elem: "double",
+        isComplex: false,
+        dims: [{ kind: "one" }, { kind: "notOne" }],
+        sign: "unknown",
+      };
+    }
+
+    return {
+      kind: "MakeRange",
+      start,
+      step,
+      end,
+      ty: resultTy,
+      span: e.span,
+    };
   }
 
   /** `s.f` or chained `s.inner.f`. Lowers each nesting level into a
@@ -1436,10 +1631,22 @@ export class Lowerer {
       );
     }
     if (envEntry !== undefined) {
+      // MATLAB's "workspace shadows functions" rule: `v(i)` reads as
+      // an indexed access when `v` is in scope. Multi-element numeric
+      // bases route through the index helpers; scalar variables get a
+      // clearer error than "unknown function". Other types (handle is
+      // handled above, struct / class / string) keep the existing
+      // "cannot be called" error.
+      if (isNumeric(envEntry.ty) && isMultiElement(envEntry.ty)) {
+        if (e.args.some(isSliceArg)) {
+          return lowerIndexSlice.call(this, e.name, e.args, e.span);
+        }
+        return lowerIndexLoad.call(this, e.name, e.args, e.span);
+      }
       throw new UnsupportedConstruct(
         `'${e.name}' is an in-scope variable of type ` +
           `${typeToString(envEntry.ty)}; cannot be called as a function ` +
-          `(indexing and dynamically-typed handles are not supported)`,
+          `(scalar indexing and dynamically-typed handles are not supported)`,
         e.span
       );
     }

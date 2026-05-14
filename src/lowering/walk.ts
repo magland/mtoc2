@@ -42,6 +42,29 @@ export function forEachSubExpr(e: IRExpr, visit: (sub: IRExpr) => void): void {
     case "MemberLoad":
       forEachSubExpr(e.base, visit);
       return;
+    case "IndexLoad":
+      forEachSubExpr(e.base, visit);
+      for (const i of e.indices) forEachSubExpr(i, visit);
+      return;
+    case "IndexSlice":
+      forEachSubExpr(e.base, visit);
+      for (const slot of e.index) {
+        if (slot.kind === "Range") {
+          forEachSubExpr(slot.start, visit);
+          forEachSubExpr(slot.step, visit);
+          forEachSubExpr(slot.end, visit);
+        } else if (slot.kind === "Scalar") {
+          forEachSubExpr(slot.expr, visit);
+        }
+      }
+      return;
+    case "EndRef":
+      return;
+    case "MakeRange":
+      forEachSubExpr(e.start, visit);
+      forEachSubExpr(e.step, visit);
+      forEachSubExpr(e.end, visit);
+      return;
   }
 }
 
@@ -84,6 +107,24 @@ export function forEachTopLevelExpr(
       return;
     case "MultiAssignCall":
       for (const a of s.args) visit(a);
+      return;
+    case "IndexStore":
+      visit(s.base);
+      for (const i of s.indices) visit(i);
+      visit(s.rhs);
+      return;
+    case "IndexSliceStore":
+      visit(s.base);
+      for (const slot of s.index) {
+        if (slot.kind === "Range") {
+          visit(slot.start);
+          visit(slot.step);
+          visit(slot.end);
+        } else if (slot.kind === "Scalar") {
+          visit(slot.expr);
+        }
+      }
+      visit(s.rhs);
       return;
   }
 }

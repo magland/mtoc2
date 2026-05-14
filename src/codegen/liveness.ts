@@ -128,7 +128,9 @@ function touchStmt(
     case "Assign":
     case "ExprStmt":
     case "MemberStore":
-    case "MultiAssignCall": {
+    case "MultiAssignCall":
+    case "IndexStore":
+    case "IndexSliceStore": {
       const out = new Set(futureAfter);
       unionInto(out, topLevelOwnedUses(s));
       unionInto(out, topLevelOwnedDefs(s));
@@ -294,7 +296,11 @@ export function nullAtScopeExit(
         }
         break;
       }
-      case "MemberStore": {
+      case "MemberStore":
+      case "IndexStore":
+      case "IndexSliceStore": {
+        // The base buffer is mutated in place (still allocated post-
+        // store); only react to early-free candidates here.
         for (const v of earlyFreeCandidates(s, futureTouches)) {
           current.add(v);
         }

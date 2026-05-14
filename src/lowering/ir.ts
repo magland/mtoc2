@@ -143,6 +143,69 @@ export interface MemberLoad {
   span: Span;
 }
 
+/** Scalar element read of a multi-element tensor `base`. `indices` has
+ *  length 1 (linear addressing into the column-major buffer) or
+ *  `base.ty.dims.length` (full per-axis addressing). Each index lowers
+ *  to a scalar real IR expression; the result `ty` is the base's
+ *  element scalar type. Codegen emits `<base.cName>.real[<offset>]`. */
+export interface IndexLoad {
+  kind: "IndexLoad";
+  base: Var;
+  indices: IRExpr[];
+  ty: Type;
+  span: Span;
+}
+
+/** Slice arg shape for `IndexSlice` / `IndexSliceStore`. `Range`'s
+ *  `step` is always populated (defaults to scalar `1` when omitted in
+ *  the source); v1 requires `step` to be a `NumLit` so codegen can
+ *  derive the loop count and source-index arithmetic at compile time
+ *  for index-position ranges. */
+export type IndexSliceArg =
+  | { kind: "Range"; start: IRExpr; step: IRExpr; end: IRExpr; span: Span }
+  | { kind: "Colon"; span: Span }
+  | { kind: "Scalar"; expr: IRExpr; span: Span };
+
+/** Range / colon / scalar-mix slice read. `index.length` is 1
+ *  (linear) or `base.ty.dims.length` (per-axis). The result is a freshly-
+ *  allocated tensor; this IR node is an owned producer and ANFs like
+ *  every other tensor-producing expression. */
+export interface IndexSlice {
+  kind: "IndexSlice";
+  base: Var;
+  index: ReadonlyArray<IndexSliceArg>;
+  ty: Type;
+  span: Span;
+}
+
+/** Reference to the `end` keyword inside an index slot. Renders as an
+ *  axis size of the enclosing index's base — `numel(base)` for a
+ *  single-slot context (`axis === "linear"`) or `base.dims[axis]`
+ *  otherwise. */
+export interface EndRef {
+  kind: "EndRef";
+  baseCName: string;
+  baseTy: Type;
+  axis: number | "linear";
+  ty: Type;
+  span: Span;
+}
+
+/** Range used as a value (outside index slots and for-loop bounds).
+ *  Emits a freshly-allocated `1×N` row tensor at runtime via
+ *  `mtoc2_tensor_make_range`. Owned producer; ANFs. The `step` may
+ *  be any scalar real IR expression — unlike index-slot ranges,
+ *  codegen routes through the runtime helper which takes the step
+ *  at runtime. */
+export interface MakeRange {
+  kind: "MakeRange";
+  start: IRExpr;
+  step: IRExpr;
+  end: IRExpr;
+  ty: Type;
+  span: Span;
+}
+
 export type IRExpr =
   | NumLit
   | TensorBuild
@@ -153,7 +216,11 @@ export type IRExpr =
   | HandleLit
   | HandleCaptureLoad
   | StructLit
-  | MemberLoad;
+  | MemberLoad
+  | IndexLoad
+  | IndexSlice
+  | EndRef
+  | MakeRange;
 
 // ── Statements ──────────────────────────────────────────────────────────
 
@@ -291,6 +358,31 @@ export interface MultiAssignCall {
   span: Span;
 }
 
+/** Scalar element write into a multi-element tensor `base`. Mutates
+ *  the existing buffer in place — NOT an owned re-assignment (the
+ *  codegen emits `<base.cName>.real[<offset>] = <rhs>;`). The base
+ *  is recorded as both a use and a def by liveness so its buffer
+ *  stays live across the store. */
+export interface IndexStore {
+  kind: "IndexStore";
+  base: Var;
+  indices: IRExpr[];
+  rhs: IRExpr;
+  span: Span;
+}
+
+/** Range / colon / scalar-mix slice write. Same arity rules as
+ *  `IndexSlice`. RHS is either a scalar (broadcast into every slot)
+ *  or a `Var` reading a named tensor (per-slot copy). Mutates the
+ *  base buffer in place — not an owned re-assignment. */
+export interface IndexSliceStore {
+  kind: "IndexSliceStore";
+  base: Var;
+  index: ReadonlyArray<IndexSliceArg>;
+  rhs: IRExpr;
+  span: Span;
+}
+
 export type IRStmt =
   | ExprStmt
   | Assign
@@ -302,7 +394,9 @@ export type IRStmt =
   | Continue
   | TypeComment
   | MemberStore
-  | MultiAssignCall;
+  | MultiAssignCall
+  | IndexStore
+  | IndexSliceStore;
 
 // ── Functions ───────────────────────────────────────────────────────────
 

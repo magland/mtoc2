@@ -722,6 +722,13 @@ function emitStmt(
       const rhs = emitExpr(s.rhs, state);
       return `${indent}${slot} = ${rhs};`;
     }
+    case "IndexStore": {
+      const offset = emitNdScalarOffset(state, s.indices, s.base.cName);
+      const rhs = emitExpr(s.rhs, state);
+      return `${indent}${s.base.cName}.real[${offset}] = ${rhs};`;
+    }
+    case "IndexSliceStore":
+      return emitIndexSliceStore(s, indent, state);
     case "If": {
       const lines: string[] = [];
       lines.push(`${indent}if (${emitExpr(s.cond, state)} != 0.0) {`);
@@ -1020,6 +1027,34 @@ function emitExpr(e: IRExpr, state: RuntimeState): string {
       // a tensor field passed to `disp` — pass the struct by value
       // and don't take ownership.)
       return emitMemberLoadBare(e, state);
+    case "IndexLoad": {
+      const offset = emitNdScalarOffset(state, e.indices, e.base.cName);
+      return `${e.base.cName}.real[${offset}]`;
+    }
+    case "IndexSlice":
+      return emitIndexSliceProducer(e, state);
+    case "EndRef":
+      if (e.axis === "linear") {
+        if (e.baseTy.kind === "Numeric" && e.baseTy.shape !== undefined) {
+          const n = e.baseTy.shape.reduce((a, b) => a * b, 1);
+          return formatDouble(n);
+        }
+        if (e.baseTy.kind === "Numeric") {
+          const parts: string[] = [];
+          for (let i = 0; i < e.baseTy.dims.length; i++) {
+            parts.push(`${e.baseCName}.dims[${i}]`);
+          }
+          return `(double)(${parts.join(" * ")})`;
+        }
+        throw new Error("emit: EndRef with non-numeric baseTy");
+      }
+      // Per-axis form.
+      if (e.baseTy.kind === "Numeric" && e.baseTy.shape !== undefined) {
+        return formatDouble(e.baseTy.shape[e.axis]);
+      }
+      return `(double)${e.baseCName}.dims[${e.axis}]`;
+    case "MakeRange":
+      return emitMakeRange(e, state);
   }
 }
 
@@ -1041,6 +1076,401 @@ function formatDouble(v: number): string {
     return `${s}.0`;
   }
   return s;
+}
+
+/** Compute the column-major linear buffer offset for a scalar
+ *  IndexLoad / IndexStore: 1-arg linear, 2-arg row/col, or N-arg N-D.
+ *  Mirrors mtoc's `emitNdScalarOffset` — one source of truth for the
+ *  offset formula. */
+function emitNdScalarOffset(
+  state: RuntimeState,
+  indices: ReadonlyArray<IRExpr>,
+  baseCName: string
+): string {
+  if (indices.length === 1) {
+    return `(long)(${emitExpr(indices[0], state)}) - 1L`;
+  }
+  if (indices.length === 2) {
+    return (
+      `(long)(${emitExpr(indices[0], state)}) - 1L + ` +
+      `((long)(${emitExpr(indices[1], state)}) - 1L) * ` +
+      `${baseCName}.dims[0]`
+    );
+  }
+  const terms: string[] = [];
+  for (let i = 0; i < indices.length; i++) {
+    const idxStr = `((long)(${emitExpr(indices[i], state)}) - 1L)`;
+    if (i === 0) {
+      terms.push(idxStr);
+    } else {
+      const strideParts: string[] = [];
+      for (let j = 0; j < i; j++) strideParts.push(`${baseCName}.dims[${j}]`);
+      terms.push(`${idxStr} * ${strideParts.join(" * ")}`);
+    }
+  }
+  return terms.join(" + ");
+}
+
+/** Compute the column-major linear offset for an N-D access given
+ *  per-axis source terms and a stride source. */
+function formatNdOffset(
+  terms: ReadonlyArray<string>,
+  stride: (axisIndex: number) => string
+): string {
+  if (terms.length === 0) return "0";
+  const out: string[] = [];
+  for (let i = 0; i < terms.length; i++) {
+    if (i === 0) {
+      out.push(terms[i]);
+    } else {
+      const strideParts: string[] = [];
+      for (let j = 0; j < i; j++) strideParts.push(stride(j));
+      out.push(`${terms[i]} * ${strideParts.join(" * ")}`);
+    }
+  }
+  return out.join(" + ");
+}
+
+/** Emit per-slot setup for a multi-slot slice (read or write): pushes
+ *  `_mtoc2_n_<i>` (per-slot iteration count) and any Range / Scalar
+ *  locals into `lines`. Returns the per-slot source-index expression
+ *  (in terms of `_mtoc2_k_<i>` for Colon/Range, or the precomputed
+ *  `_mtoc2_src_<i>` local for Scalar slots). */
+function emitSliceSlotSetup(
+  state: RuntimeState,
+  lines: string[],
+  indent: string,
+  slots: ReadonlyArray<IRExpr extends never ? never : { kind: string }>,
+  slotsTyped: ReadonlyArray<import("../lowering/ir.js").IndexSliceArg>,
+  baseCName: string
+): string[] {
+  void slots;
+  const slotSrc: string[] = [];
+  for (let i = 0; i < slotsTyped.length; i++) {
+    const slot = slotsTyped[i];
+    const kVar = `_mtoc2_k_${i}`;
+    if (slot.kind === "Colon") {
+      lines.push(`${indent}long _mtoc2_n_${i} = ${baseCName}.dims[${i}];`);
+      slotSrc.push(kVar);
+    } else if (slot.kind === "Scalar") {
+      const scalarStr = emitExpr(slot.expr, state);
+      lines.push(`${indent}long _mtoc2_n_${i} = 1;`);
+      lines.push(`${indent}long _mtoc2_src_${i} = (long)(${scalarStr}) - 1L;`);
+      slotSrc.push(`_mtoc2_src_${i}`);
+    } else {
+      if (slot.step.kind !== "NumLit") {
+        throw new Error(
+          "emit internal: IndexSlice range step must be a NumLit; " +
+            "should have been caught at lowering"
+        );
+      }
+      useRuntimeByName(state, "mtoc2_loop_count");
+      const startStr = emitExpr(slot.start, state);
+      const endStr = emitExpr(slot.end, state);
+      const stepStr = formatDouble(slot.step.value);
+      lines.push(`${indent}double _mtoc2_start_${i} = ${startStr};`);
+      lines.push(`${indent}double _mtoc2_end_${i} = ${endStr};`);
+      lines.push(
+        `${indent}long _mtoc2_n_${i} = mtoc2_loop_count(_mtoc2_start_${i}, _mtoc2_end_${i}, ${stepStr});`
+      );
+      slotSrc.push(
+        `((long)(_mtoc2_start_${i} + ${stepStr} * (double)${kVar}) - 1L)`
+      );
+    }
+  }
+  return slotSrc;
+}
+
+/** Emit an `IndexSlice` as a C statement-expression-style block that
+ *  allocates the result tensor, fills it, and evaluates to the result
+ *  via a comma expression. The result is consumed at an owned consume
+ *  site (`mtoc2_tensor_assign(&v, <here>)`); ANF guarantees IndexSlice
+ *  appears only as the direct RHS of an Assign. */
+function emitIndexSliceProducer(
+  e: Extract<IRExpr, { kind: "IndexSlice" }>,
+  state: RuntimeState
+): string {
+  // Generate via a GCC/Clang statement-expression. This keeps the
+  // IndexSlice producer self-contained at the expression site without
+  // requiring out-of-line statements.
+  useRuntimeByName(state, "mtoc2_tensor_t");
+  useRuntimeByName(state, "mtoc2_tensor_alloc_nd");
+  const baseCName = e.base.cName;
+  const lines: string[] = [];
+
+  if (e.index.length === 1) {
+    // Single-slot linear form.
+    const slot = e.index[0];
+    let count: string;
+    let srcIndexFor: (kVar: string) => string;
+    let resultRows: string;
+    let resultCols: string;
+    if (slot.kind === "Colon") {
+      const parts: string[] = [];
+      if (e.base.ty.kind === "Numeric") {
+        for (let i = 0; i < e.base.ty.dims.length; i++) {
+          parts.push(`${baseCName}.dims[${i}]`);
+        }
+      }
+      lines.push(`long _mtoc2_n = ${parts.join(" * ")};`);
+      count = "_mtoc2_n";
+      srcIndexFor = k => k;
+      resultRows = "_mtoc2_n";
+      resultCols = "1";
+    } else if (slot.kind === "Range") {
+      if (slot.step.kind !== "NumLit") {
+        throw new Error("emit internal: index-slot Range step must be NumLit");
+      }
+      useRuntimeByName(state, "mtoc2_loop_count");
+      const startStr = emitExpr(slot.start, state);
+      const endStr = emitExpr(slot.end, state);
+      const stepStr = formatDouble(slot.step.value);
+      lines.push(`double _mtoc2_start = ${startStr};`);
+      lines.push(`double _mtoc2_end = ${endStr};`);
+      lines.push(
+        `long _mtoc2_n = mtoc2_loop_count(_mtoc2_start, _mtoc2_end, ${stepStr});`
+      );
+      count = "_mtoc2_n";
+      srcIndexFor = k =>
+        `(long)(_mtoc2_start + ${stepStr} * (double)${k}) - 1L`;
+      // Single-slot range: row-vec → row, col-vec → col, matrix/N-D → row.
+      const isColVec =
+        e.base.ty.kind === "Numeric" &&
+        e.base.ty.dims.length === 2 &&
+        e.base.ty.dims[0].kind === "notOne" &&
+        e.base.ty.dims[1].kind === "one";
+      if (isColVec) {
+        resultRows = "_mtoc2_n";
+        resultCols = "1";
+      } else {
+        resultRows = "1";
+        resultCols = "_mtoc2_n";
+      }
+    } else {
+      throw new Error(
+        "emit internal: single-slot Scalar IndexSlice should have routed to IndexLoad"
+      );
+    }
+    lines.push(
+      `mtoc2_tensor_t _mtoc2_t = mtoc2_tensor_alloc_nd(2, (long[]){${resultRows}, ${resultCols}});`
+    );
+    lines.push(`for (long _mtoc2_k = 0; _mtoc2_k < ${count}; _mtoc2_k++) {`);
+    lines.push(
+      `  _mtoc2_t.real[_mtoc2_k] = ${baseCName}.real[${srcIndexFor("_mtoc2_k")}];`
+    );
+    lines.push(`}`);
+    lines.push(`_mtoc2_t;`);
+    return `({ ${lines.join(" ")} })`;
+  }
+
+  // Multi-slot per-axis form.
+  const ndim = e.index.length;
+  const slotSrc = emitSliceSlotSetup(state, lines, "", [], e.index, baseCName);
+  const resultRank =
+    e.ty.kind === "Numeric" ? Math.max(2, e.ty.dims.length) : 2;
+  const dimsList: string[] = [];
+  for (let i = 0; i < resultRank; i++) {
+    dimsList.push(i < ndim ? `_mtoc2_n_${i}` : `1L`);
+  }
+  lines.push(
+    `mtoc2_tensor_t _mtoc2_t = mtoc2_tensor_alloc_nd(${resultRank}, (long[]){${dimsList.join(", ")}});`
+  );
+  for (let i = ndim - 1; i >= 0; i--) {
+    lines.push(
+      `for (long _mtoc2_k_${i} = 0; _mtoc2_k_${i} < _mtoc2_n_${i}; _mtoc2_k_${i}++) {`
+    );
+  }
+  lines.push(
+    `long _mtoc2_src_off = ${formatNdOffset(slotSrc, j => `${baseCName}.dims[${j}]`)};`
+  );
+  lines.push(
+    `long _mtoc2_dst_off = ${formatNdOffset(
+      Array.from({ length: ndim }, (_, i) => `_mtoc2_k_${i}`),
+      j => `_mtoc2_n_${j}`
+    )};`
+  );
+  lines.push(
+    `_mtoc2_t.real[_mtoc2_dst_off] = ${baseCName}.real[_mtoc2_src_off];`
+  );
+  for (let i = ndim - 1; i >= 0; i--) {
+    lines.push(`}`);
+  }
+  lines.push(`_mtoc2_t;`);
+  return `({ ${lines.join(" ")} })`;
+}
+
+/** Emit an `IndexSliceStore` statement: mutate `base` in place. */
+function emitIndexSliceStore(
+  s: Extract<IRStmt, { kind: "IndexSliceStore" }>,
+  indent: string,
+  state: RuntimeState
+): string {
+  const baseCName = s.base.cName;
+  const rhsIsScalar =
+    s.rhs.ty.kind === "Numeric" && s.rhs.ty.dims.every(d => d.kind === "one");
+  const lines: string[] = [];
+  lines.push(`${indent}{`);
+
+  if (s.index.length === 1) {
+    const slot = s.index[0];
+    let dstOffsetFor: (kVar: string) => string;
+    if (slot.kind === "Colon") {
+      const parts: string[] = [];
+      if (s.base.ty.kind === "Numeric") {
+        for (let i = 0; i < s.base.ty.dims.length; i++) {
+          parts.push(`${baseCName}.dims[${i}]`);
+        }
+      }
+      lines.push(`${indent}  long _mtoc2_n = ${parts.join(" * ")};`);
+      dstOffsetFor = k => k;
+    } else if (slot.kind === "Range") {
+      if (slot.step.kind !== "NumLit") {
+        throw new Error("emit internal: index-slot Range step must be NumLit");
+      }
+      useRuntimeByName(state, "mtoc2_loop_count");
+      const startStr = emitExpr(slot.start, state);
+      const endStr = emitExpr(slot.end, state);
+      const stepStr = formatDouble(slot.step.value);
+      lines.push(`${indent}  double _mtoc2_start = ${startStr};`);
+      lines.push(`${indent}  double _mtoc2_end = ${endStr};`);
+      lines.push(
+        `${indent}  long _mtoc2_n = mtoc2_loop_count(_mtoc2_start, _mtoc2_end, ${stepStr});`
+      );
+      dstOffsetFor = k =>
+        `(long)(_mtoc2_start + ${stepStr} * (double)${k}) - 1L`;
+    } else {
+      throw new Error(
+        "emit internal: single-slot Scalar IndexSliceStore should have routed to IndexStore"
+      );
+    }
+
+    if (rhsIsScalar) {
+      const rhsExpr = emitExpr(s.rhs, state);
+      lines.push(`${indent}  double _mtoc2_rhs = ${rhsExpr};`);
+      lines.push(
+        `${indent}  for (long _mtoc2_k = 0; _mtoc2_k < _mtoc2_n; _mtoc2_k++) {`
+      );
+      lines.push(`${indent}    long _mtoc2_dst = ${dstOffsetFor("_mtoc2_k")};`);
+      lines.push(`${indent}    ${baseCName}.real[_mtoc2_dst] = _mtoc2_rhs;`);
+      lines.push(`${indent}  }`);
+    } else {
+      if (s.rhs.kind !== "Var") {
+        throw new Error(
+          `emit internal: IndexSliceStore tensor RHS must be a Var (got ${s.rhs.kind})`
+        );
+      }
+      const rhsCName = s.rhs.cName;
+      const rhsTy = s.rhs.ty;
+      const rhsParts: string[] = [];
+      if (rhsTy.kind === "Numeric") {
+        for (let i = 0; i < rhsTy.dims.length; i++) {
+          rhsParts.push(`${rhsCName}.dims[${i}]`);
+        }
+      }
+      lines.push(`${indent}  long _mtoc2_rhs_n = ${rhsParts.join(" * ")};`);
+      lines.push(`${indent}  if (_mtoc2_n != _mtoc2_rhs_n) {`);
+      lines.push(
+        `${indent}    fprintf(stderr, "mtoc2: range-write count mismatch: lhs slice has %ld elements, rhs has %ld\\n", _mtoc2_n, _mtoc2_rhs_n);`
+      );
+      lines.push(`${indent}    abort();`);
+      lines.push(`${indent}  }`);
+      lines.push(
+        `${indent}  for (long _mtoc2_k = 0; _mtoc2_k < _mtoc2_n; _mtoc2_k++) {`
+      );
+      lines.push(`${indent}    long _mtoc2_dst = ${dstOffsetFor("_mtoc2_k")};`);
+      lines.push(
+        `${indent}    ${baseCName}.real[_mtoc2_dst] = ${rhsCName}.real[_mtoc2_k];`
+      );
+      lines.push(`${indent}  }`);
+    }
+    lines.push(`${indent}}`);
+    return lines.join("\n");
+  }
+
+  // Multi-slot.
+  const ndim = s.index.length;
+  const slotDst = emitSliceSlotSetup(
+    state,
+    lines,
+    `${indent}  `,
+    [],
+    s.index,
+    baseCName
+  );
+  const totalParts: string[] = [];
+  for (let i = 0; i < ndim; i++) totalParts.push(`_mtoc2_n_${i}`);
+  lines.push(`${indent}  long _mtoc2_n = ${totalParts.join(" * ")};`);
+
+  if (rhsIsScalar) {
+    const rhsExpr = emitExpr(s.rhs, state);
+    lines.push(`${indent}  double _mtoc2_rhs = ${rhsExpr};`);
+  } else {
+    if (s.rhs.kind !== "Var") {
+      throw new Error(
+        `emit internal: IndexSliceStore tensor RHS must be a Var (got ${s.rhs.kind})`
+      );
+    }
+    const rhsCName = s.rhs.cName;
+    const rhsTy = s.rhs.ty;
+    const rhsParts: string[] = [];
+    if (rhsTy.kind === "Numeric") {
+      for (let i = 0; i < rhsTy.dims.length; i++) {
+        rhsParts.push(`${rhsCName}.dims[${i}]`);
+      }
+    }
+    lines.push(`${indent}  long _mtoc2_rhs_n = ${rhsParts.join(" * ")};`);
+    lines.push(`${indent}  if (_mtoc2_n != _mtoc2_rhs_n) {`);
+    lines.push(
+      `${indent}    fprintf(stderr, "mtoc2: range-write count mismatch: lhs slice has %ld elements, rhs has %ld\\n", _mtoc2_n, _mtoc2_rhs_n);`
+    );
+    lines.push(`${indent}    abort();`);
+    lines.push(`${indent}  }`);
+  }
+
+  for (let i = ndim - 1; i >= 0; i--) {
+    const ind = "  ".repeat(ndim - 1 - i);
+    lines.push(
+      `${indent}  ${ind}for (long _mtoc2_k_${i} = 0; _mtoc2_k_${i} < _mtoc2_n_${i}; _mtoc2_k_${i}++) {`
+    );
+  }
+  const innerInd = "  ".repeat(ndim);
+  lines.push(
+    `${indent}  ${innerInd}long _mtoc2_dst = ${formatNdOffset(slotDst, j => `${baseCName}.dims[${j}]`)};`
+  );
+  if (rhsIsScalar) {
+    lines.push(
+      `${indent}  ${innerInd}${baseCName}.real[_mtoc2_dst] = _mtoc2_rhs;`
+    );
+  } else {
+    const rhs = s.rhs as Extract<IRExpr, { kind: "Var" }>;
+    lines.push(
+      `${indent}  ${innerInd}long _mtoc2_k = ${formatNdOffset(
+        Array.from({ length: ndim }, (_, i) => `_mtoc2_k_${i}`),
+        j => `_mtoc2_n_${j}`
+      )};`
+    );
+    lines.push(
+      `${indent}  ${innerInd}${baseCName}.real[_mtoc2_dst] = ${rhs.cName}.real[_mtoc2_k];`
+    );
+  }
+  for (let i = ndim - 1; i >= 0; i--) {
+    const ind = "  ".repeat(ndim - 1 - i);
+    lines.push(`${indent}  ${ind}}`);
+  }
+  lines.push(`${indent}}`);
+  return lines.join("\n");
+}
+
+/** Emit a `MakeRange` expression. Activates the runtime helper. */
+function emitMakeRange(
+  e: Extract<IRExpr, { kind: "MakeRange" }>,
+  state: RuntimeState
+): string {
+  useRuntimeByName(state, "mtoc2_tensor_make_range");
+  const startStr = emitExpr(e.start, state);
+  const stepStr = emitExpr(e.step, state);
+  const endStr = emitExpr(e.end, state);
+  return `mtoc2_tensor_make_range(${startStr}, ${stepStr}, ${endStr})`;
 }
 
 // Suppress unused-import lints when narrower predicates aren't used.

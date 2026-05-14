@@ -70,12 +70,43 @@ The Type lattice is written from scratch for mtoc2 — see
 ### IR (`ir.ts`)
 
 A small typed tree: `NumLit`, `TensorBuild`, `Var`, `Binary`, `Unary`,
-`Call`, `HandleLit`, `HandleCaptureLoad`, `StructLit`, `MemberLoad`
-for expressions; `ExprStmt`, `Assign`, `If`, `While`, `For`,
-`ReturnFromFunction`, `Break`, `Continue`, `TypeComment`,
-`MemberStore` for statements. `IRFunc` captures a single
+`Call`, `HandleLit`, `HandleCaptureLoad`, `StructLit`, `MemberLoad`,
+`IndexLoad`, `IndexSlice`, `EndRef`, `MakeRange` for expressions;
+`ExprStmt`, `Assign`, `If`, `While`, `For`, `ReturnFromFunction`,
+`Break`, `Continue`, `TypeComment`, `MemberStore`, `IndexStore`,
+`IndexSliceStore` for statements. `IRFunc` captures a single
 specialization (params, types, body, output type). `IRProgram` is
 top-level statements plus a map of specializations.
+
+**Indexing and slicing** lower through four helpers in
+`src/lowering/`:
+
+- `lowerIndexLoad` — scalar reads (`v(i)`, `M(i, j)`, `T(i, j, k)`).
+- `lowerIndexStore` — scalar writes (`v(i) = x`, `M(i, j) = x`).
+- `lowerIndexSlice` — range / colon / scalar-mix reads
+  (`v(:)`, `v(a:b)`, `M(:, j)`, `T(:, :, k)`).
+- `lowerIndexSliceStore` — range / colon / scalar-mix writes
+  (`v(:) = w`, `M(:, j) = scalar`, `T(:, :, k) = page`).
+
+Dispatch is in `lowerFuncCall` / `lowerAssignLValue`: an `Ident`-rooted
+`v(args)` whose name resolves to an in-scope multi-element numeric
+variable routes to the slice helper when `args.some(isSliceArg)` is
+true (Range or Colon slot), otherwise to the scalar load. Similarly
+for AssignLValue with an Index lvalue. The shared predicate is
+`isSliceArg` in `src/lowering/indexResolve.ts`. `resolveIndexBase`
+(same file) factors the env lookup + numeric/multi-element/arity
+check used by all four. The `end` keyword inside an index slot
+resolves through the Lowerer's `endStack` to the appropriate axis
+size (statically when the base shape is known, runtime via
+`base.dims[k]` otherwise).
+
+**Range-as-value** (`v = 1:n`, `(1:5) * 2`) lowers to a `MakeRange`
+IR node and emits via the `mtoc2_tensor_make_range` runtime helper
+(allocated 1×N row tensor). Index-slot ranges (different IR shape —
+`IndexSliceArg.Range`) require a NumLit `step` so codegen can derive
+the loop count at compile time; the value-form `MakeRange` accepts
+any scalar real `step` and routes through `mtoc2_loop_count` at
+runtime.
 
 **Structs and class instances** lower through three IR nodes:
 
