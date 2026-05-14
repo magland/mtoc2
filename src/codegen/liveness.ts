@@ -240,13 +240,10 @@ export function computeFutureTouches(
 /** After emitting `s`, return the set of owned C-names that should
  *  be freed immediately (no future touch). Helper for emit.ts.
  *
- *  Note: the scope-exit free walk still emits frees for every owned
- *  local unconditionally. Early-frees null out the buffers, so the
- *  scope-exit free of an already-freed variable is a no-op
- *  (`free(NULL)` is well-defined). The redundancy is a small
- *  cosmetic cost in the generated C; a proper "guaranteed-freed on
- *  every path" analysis (so we can skip the scope-exit free) is a
- *  future optimization. */
+ *  The scope-exit free walk emits frees for every owned local
+ *  unconditionally — early-frees null out the buffer and every owned
+ *  `_free` helper is NULL-safe, so a scope-exit free of an already-
+ *  freed local is redundant but safe. */
 export function earlyFreeCandidates(
   s: IRStmt,
   futureTouches: FutureTouchMap
@@ -260,111 +257,4 @@ export function earlyFreeCandidates(
     if (!after.has(v)) candidates.add(v);
   }
   return candidates;
-}
-
-/** Forward dataflow: which owned C-names are guaranteed to be in the
- *  empty/NULL state at the end of `stmts`. Used to skip redundant
- *  scope-exit frees when every reaching path through the body has
- *  already early-freed (or never assigned) the variable.
- *
- *  Rules per stmt:
- *  - `Assign(v, ...)` where `isOwned(v.ty)`: `v` is now non-NULL.
- *    Remove from set.
- *  - Any stmt that triggers an early-free of `v`: `v` is now NULL.
- *    Add to set.
- *  - `If`: recurse into both arms; intersect end-sets.
- *  - `While` / `For`: recurse into body assuming it MAY run; intersect
- *    body-end with entry (since the loop may run 0 times).
- *  - `Break` / `Continue` / `ReturnFromFunction`: end-of-block-on-this-
- *    path; we approximate as "no effect on current" — sound because
- *    the only consumer of the result is the body's fall-through end. */
-export function nullAtScopeExit(
-  stmts: ReadonlyArray<IRStmt>,
-  entryNullAt: ReadonlySet<string>,
-  futureTouches: FutureTouchMap
-): Set<string> {
-  let current = new Set(entryNullAt);
-  for (const s of stmts) {
-    switch (s.kind) {
-      case "Assign": {
-        if (isOwned(s.ty)) current.delete(s.cName);
-        for (const v of earlyFreeCandidates(s, futureTouches)) {
-          current.add(v);
-        }
-        break;
-      }
-      case "ExprStmt": {
-        for (const v of earlyFreeCandidates(s, futureTouches)) {
-          current.add(v);
-        }
-        break;
-      }
-      case "MemberStore":
-      case "IndexStore":
-      case "IndexSliceStore": {
-        // The base buffer is mutated in place (still allocated post-
-        // store); only react to early-free candidates here.
-        for (const v of earlyFreeCandidates(s, futureTouches)) {
-          current.add(v);
-        }
-        break;
-      }
-      case "MultiAssignCall": {
-        // Each named owned slot is now non-NULL after the call (the
-        // callee wrote into it via the sret pointer). Ignored owned
-        // slots stay NULL because the discard temp is local to the
-        // call's `{}` block.
-        for (const slot of s.outputs) {
-          if (slot.binding !== null && isOwned(slot.ty)) {
-            current.delete(slot.binding.cName);
-          }
-        }
-        for (const v of earlyFreeCandidates(s, futureTouches)) {
-          current.add(v);
-        }
-        break;
-      }
-      case "If": {
-        const thenEnd = nullAtScopeExit(s.thenBody, current, futureTouches);
-        const elseEnd = nullAtScopeExit(s.elseBody, current, futureTouches);
-        current = intersect(thenEnd, elseEnd);
-        for (const v of earlyFreeCandidates(s, futureTouches)) {
-          current.add(v);
-        }
-        break;
-      }
-      case "While":
-      case "For": {
-        // Loop may run 0+ times. The "0 iter" path leaves nullAt as
-        // the entry state. The "1+ iter" path applies the body's
-        // effects to its own entry (= the current set at loop-header
-        // time). Intersect both to be safe.
-        const bodyEnd = nullAtScopeExit(s.body, current, futureTouches);
-        current = intersect(current, bodyEnd);
-        for (const v of earlyFreeCandidates(s, futureTouches)) {
-          current.add(v);
-        }
-        break;
-      }
-      case "Break":
-      case "Continue":
-      case "ReturnFromFunction":
-        // Control jumps elsewhere; doesn't influence the fall-through
-        // end-of-block. Leave `current` as-is.
-        break;
-      case "TypeComment":
-        // Pure annotation; no effect on null-at-exit dataflow.
-        break;
-    }
-  }
-  return current;
-}
-
-function intersect(
-  a: ReadonlySet<string>,
-  b: ReadonlySet<string>
-): Set<string> {
-  const out = new Set<string>();
-  for (const v of a) if (b.has(v)) out.add(v);
-  return out;
 }

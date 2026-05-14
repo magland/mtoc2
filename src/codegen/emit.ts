@@ -52,7 +52,6 @@ import {
 import {
   computeFutureTouches,
   earlyFreeCandidates,
-  nullAtScopeExit,
   type FutureTouchMap,
 } from "./liveness.js";
 import { irFuncDocComment, irStmtHeader } from "./prettyIR.js";
@@ -131,16 +130,15 @@ export function emitProgram(prog: IRProgram, opts: EmitOptions = {}): string {
   if (mainBody.length > 0) userParts.push(mainBody);
   const mainHasRet = bodyHasReturn(prog.topLevelStmts);
   if (mainHasRet) userParts.push(`mtoc2_return:`);
-  // Scope-exit free walk skips owned locals proven NULL at this point
-  // by the forward `nullAtScopeExit` dataflow — those buffers have
-  // already been released by an early-free along every reaching path.
-  const mainNullAtExit = nullAtScopeExit(
-    prog.topLevelStmts,
-    new Set(mainOwned.map(o => o.cName)),
-    mainFutureTouches
-  );
+  // Always emit scope-exit frees for every owned local. Early-frees
+  // null out the buffer, and every owned `_free` helper bottoms out at
+  // `free(NULL)` which is a no-op — so a scope-exit free of an already-
+  // freed local is redundant but safe. The previous `nullAtScopeExit`
+  // optimization tried to skip these frees, but it only modelled the
+  // fall-through path to the function end and treated `return;` as
+  // having no effect; that combination leaked owned locals along
+  // every early-return path.
   for (const o of mainOwned) {
-    if (mainNullAtExit.has(o.cName)) continue;
     activateOwnedRuntime(o.ty, state);
     const h = ownedHelpersFor(o.ty);
     userParts.push(`  ${h.free}(&${o.cName});`);
@@ -613,17 +611,13 @@ function emitFunction(fn: IRFunc, state: RuntimeState): string {
       }
     }
   }
-  // Scope-exit frees: skip owned locals that nullAtScopeExit proves
-  // are NULL on every reaching path (already early-freed). Owned
-  // params arrive freshly-owned from the caller — they are NOT null
-  // at entry, so they MUST NOT be seeded into nullAtScopeExit's
-  // entry set; doing so would let a body that never reassigns the
-  // param keep the param in the null-set and skip its scope-exit
-  // free, leaking the caller's `mtoc2_tensor_copy` allocation.
-  const scopeExitNames = new Set<string>(owned.map(o => o.cName));
-  const fnNullAtExit = nullAtScopeExit(fn.body, scopeExitNames, futureTouches);
+  // Always emit scope-exit frees for every owned local and owned
+  // param. Early-frees null out the buffer, and every owned `_free`
+  // helper is NULL-safe, so scope-exit frees of already-freed locals
+  // are redundant but safe. See the comment in the main-body walk
+  // for why the previous `nullAtScopeExit` optimization was unsound
+  // along early-return paths.
   for (const o of [...owned, ...ownedParams]) {
-    if (fnNullAtExit.has(o.cName)) continue;
     // Skip freeing the single-output return value — its buffer is
     // about to transfer to the caller via return-by-value.
     if (nOutputs === 1 && o.cName === fn.cOutputs[0]) continue;
