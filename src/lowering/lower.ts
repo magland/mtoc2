@@ -17,8 +17,9 @@
  * exact value is known.
  *
  * MVP scope: scalar real double + arithmetic + comparisons + disp +
- * if/while/for + user functions with single output. Anything outside
- * that throws `UnsupportedConstruct` with a span.
+ * if/while/for + user functions (0 or 1 outputs; 0-output calls return
+ * `Void` and are only valid as the expression of an `ExprStmt`).
+ * Anything outside that throws `UnsupportedConstruct` with a span.
  */
 
 import type { AbstractSyntaxTree, Expr, Stmt, Span } from "../parser/index.js";
@@ -32,12 +33,18 @@ import {
   isScalarRealNumeric,
   isMultiElement,
   isNumeric,
+  isVoid,
+  VOID,
   unify,
   stripExactFromEnv,
   specializationKey,
 } from "./types.js";
 import { type IRExpr, type IRStmt, type IRFunc, type IRProgram } from "./ir.js";
-import { getBuiltin, binaryOpBuiltin, unaryOpBuiltin } from "./builtins.js";
+import {
+  getBuiltin,
+  binaryOpBuiltin,
+  unaryOpBuiltin,
+} from "./builtins/index.js";
 
 interface EnvEntry {
   cName: string;
@@ -179,6 +186,11 @@ export class Lowerer {
     const expr = this.lowerExpr(s.expr);
     // If the expression is a folded literal with no side effect, drop it.
     if (expr.kind === "NumLit") return null;
+    // Void-typed call (zero-output user function): emit as-is. No ANF
+    // (Void can't be hoisted; it's only valid at this very position).
+    if (isVoid(expr.ty)) {
+      return { kind: "ExprStmt", expr, span: s.span };
+    }
     // A-normalize: hoist every owned-producing non-Var sub-expression
     // to a fresh temp Assign. After ANF, owned-producing expressions
     // appear only as Assign RHSs (so codegen has a single uniform
@@ -190,6 +202,19 @@ export class Lowerer {
       return [...hoists, { kind: "ExprStmt", expr: hoisted, span: s.span }];
     }
     return { kind: "ExprStmt", expr, span: s.span };
+  }
+
+  /** Reject Void in a value-consuming context with a clear span. The
+   *  Void type tags a call to a zero-output user function; it has no
+   *  representation as a value and is only valid as the direct
+   *  expression of an `ExprStmt`. */
+  private requireValueType(e: IRExpr, what: string): void {
+    if (isVoid(e.ty)) {
+      throw new UnsupportedConstruct(
+        `${what}: cannot use the result of a zero-output function as a value`,
+        e.span
+      );
+    }
   }
 
   // ── ANF (owned-producing-expression hoisting) ─────────────────────────
@@ -271,6 +296,7 @@ export class Lowerer {
 
   private lowerAssign(s: Extract<Stmt, { type: "Assign" }>): IRStmt | IRStmt[] {
     const expr = this.lowerExpr(s.expr);
+    this.requireValueType(expr, `assigning to '${s.name}'`);
     // ANF the RHS. When the RHS is itself owned-producing and the
     // LHS is also owned, the RHS is at a direct consume site — recurse
     // into its CHILDREN only (the top stays as the Assign's RHS).
@@ -620,7 +646,9 @@ export class Lowerer {
 
   private lowerBinary(e: Extract<Expr, { type: "Binary" }>): IRExpr {
     const left = this.lowerExpr(e.left);
+    this.requireValueType(left, "binary operator operand");
     const right = this.lowerExpr(e.right);
+    this.requireValueType(right, "binary operator operand");
     const name = binaryOpBuiltin(e.op);
     const b = getBuiltin(name);
     if (!b) {
@@ -643,6 +671,7 @@ export class Lowerer {
 
   private lowerUnary(e: Extract<Expr, { type: "Unary" }>): IRExpr {
     const operand = this.lowerExpr(e.operand);
+    this.requireValueType(operand, "unary operator operand");
     const name = unaryOpBuiltin(e.op);
     const b = getBuiltin(name);
     if (!b) {
@@ -664,6 +693,9 @@ export class Lowerer {
 
   private lowerFuncCall(e: Extract<Expr, { type: "FuncCall" }>): IRExpr {
     const args = e.args.map(a => this.lowerExpr(a));
+    for (const a of args) {
+      this.requireValueType(a, `argument to '${e.name}'`);
+    }
     const argTypes = args.map(a => a.ty);
 
     // Builtin path.
@@ -692,7 +724,12 @@ export class Lowerer {
       throw new UnsupportedConstruct(`unknown function '${e.name}'`, e.span);
     }
     const spec = this.specializeUserFunction(decl, argTypes);
-    const ty = spec.outputTypes[0] ?? { kind: "Unknown" };
+    // Zero-output user functions return Void; the call is only valid as
+    // an ExprStmt (checked by `requireValueType` at every other use site).
+    const ty: Type =
+      decl.outputs.length === 0
+        ? VOID
+        : (spec.outputTypes[0] ?? { kind: "Unknown" });
     return {
       kind: "Call",
       cName: spec.cName,
@@ -712,9 +749,9 @@ export class Lowerer {
         decl.span
       );
     }
-    if (decl.outputs.length !== 1) {
+    if (decl.outputs.length > 1) {
       throw new UnsupportedConstruct(
-        `function '${decl.name}' must have exactly 1 output (got ${decl.outputs.length})`,
+        `function '${decl.name}' has ${decl.outputs.length} outputs; only 0 or 1 are supported`,
         decl.span
       );
     }

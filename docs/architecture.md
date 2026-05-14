@@ -81,7 +81,7 @@ helper. The type system still tracks `exact` (so specialization keys
 distinguish `f(2)` from `f(3)`), but the lowerer doesn't fold it into
 the IR — see the "Folding only at if-cond" section below.
 
-### Builtins (`builtins.ts`)
+### Builtins (`builtins/`)
 
 Each builtin is a fused (transfer + codegenC) pair:
 
@@ -239,6 +239,16 @@ A user function call `sq(5)` triggers `specializeUserFunction(decl, argTypes)`:
 
 Recursion isn't supported yet — the placeholder pattern at the top of
 `specializeUserFunction` lets us produce a clean error if it happens.
+
+Functions may declare 0 or 1 outputs. A 0-output call's IR type is
+`Void`; the lowerer accepts it only as the direct expression of an
+`ExprStmt` (every other use site — Assign RHS, sub-expression of a
+Binary / Unary / Call, tensor-literal element — calls
+`requireValueType`, which rejects Void with a clear span). The
+emitter renders 0-output specializations as `static void <name>(...)
+{ ... }` with no output slot and a bare `return;` (only emitted when
+the body needs the `mtoc2_return:` label, since a label can't sit
+directly before the closing brace).
 
 ## Stage 3: emit
 

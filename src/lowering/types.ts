@@ -114,7 +114,18 @@ export interface UnknownType {
   kind: "Unknown";
 }
 
-export type Type = NumericType | StringType | UnknownType;
+/** "No value" — the type of a call to a user function with zero
+ *  outputs. Valid only as the expression type of an `ExprStmt`. Every
+ *  other lowering site (Assign RHS, sub-expression of a Binary / Unary
+ *  / Call, tensor-literal element, if/while cond, for bounds) rejects
+ *  Void with `UnsupportedConstruct`. */
+export interface VoidType {
+  kind: "Void";
+}
+
+export type Type = NumericType | StringType | UnknownType | VoidType;
+
+export const VOID: VoidType = { kind: "Void" };
 
 // ── Factories ───────────────────────────────────────────────────────────
 
@@ -185,6 +196,10 @@ export const UNKNOWN: UnknownType = { kind: "Unknown" };
 
 export function isNumeric(t: Type): t is NumericType {
   return t.kind === "Numeric";
+}
+
+export function isVoid(t: Type): t is VoidType {
+  return t.kind === "Void";
 }
 
 export function isScalar(t: Type): boolean {
@@ -296,6 +311,7 @@ export function withoutExact(t: Type): Type {
  *  double — mismatches return `UNKNOWN`. */
 export function unify(a: Type, b: Type): Type {
   if (a.kind === "Unknown" || b.kind === "Unknown") return UNKNOWN;
+  if (a.kind === "Void" || b.kind === "Void") return UNKNOWN;
   if (a.kind === "Numeric" && b.kind === "Numeric") {
     if (a.elem !== b.elem) return UNKNOWN;
     if (a.isComplex !== b.isComplex) return UNKNOWN;
@@ -347,6 +363,8 @@ export function typeToString(t: Type): string {
   switch (t.kind) {
     case "Unknown":
       return "unknown";
+    case "Void":
+      return "void";
     case "String":
       return t.exact !== undefined ? `string="${t.exact}"` : "string";
     case "Numeric": {
@@ -391,6 +409,8 @@ function canon(t: Type): unknown {
   switch (t.kind) {
     case "Unknown":
       return { k: "U" };
+    case "Void":
+      return { k: "V" };
     case "String":
       return t.exact !== undefined ? { k: "S", x: t.exact } : { k: "S" };
     case "Numeric": {

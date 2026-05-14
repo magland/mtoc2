@@ -184,8 +184,11 @@ body. Arithmetic still emits as runtime C.
 - **Logical as a distinct kind** — comparisons return `elem: "logical"`
   today, but in C they're still emitted as `double` (0.0 or 1.0). Once
   the codegen layer cares (e.g. for bit ops), this might split off.
-- **Multiple outputs**. Functions are restricted to one output for now;
-  the lattice would extend trivially with a tuple variant.
+- **Multiple outputs**. Functions are restricted to 0 or 1 outputs for
+  now (a 0-output call yields the `Void` type, valid only as an
+  `ExprStmt` expression — see [architecture.md](architecture.md) for
+  the lowering rule). The lattice would extend trivially with a tuple
+  variant for multi-output.
 - **Struct fields, class instances, cells, function handles, sparse,
   dictionaries** — all live in numbl's RuntimeValue model but mtoc2
   hasn't grown the corresponding type-system entries yet. Add them

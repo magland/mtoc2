@@ -23,7 +23,7 @@
  */
 
 import type { IRExpr, IRStmt, IRFunc, IRProgram } from "../lowering/ir.js";
-import { getBuiltin } from "../lowering/builtins.js";
+import { getBuiltin } from "../lowering/builtins/index.js";
 import {
   isMultiElement,
   isNumeric,
@@ -129,6 +129,7 @@ function cTypeFor(t: Type): string {
 }
 
 function fnRetType(fn: IRFunc): string {
+  if (fn.outputs.length === 0) return "void";
   const t = fn.outputTypes[0];
   if (!t) return "double";
   return cTypeFor(t);
@@ -179,13 +180,14 @@ function collectOwnedLocals(stmts: IRStmt[]): string[] {
 function emitFunction(fn: IRFunc, state: RuntimeState): string {
   const lines: string[] = [];
   const retType = fnRetType(fn);
+  const isVoidFn = fn.outputs.length === 0;
   lines.push(irFuncDocComment(fn));
   lines.push(`static ${retType} ${fn.cName}(${fnParamList(fn)}) {`);
-  // Pre-declare the scalar/tensor output slot.
-  const cOut = fn.cOutputs[0];
-  const outTy = fn.outputTypes[0];
+  // Pre-declare the scalar/tensor output slot (skip for void functions).
+  const cOut = isVoidFn ? null : fn.cOutputs[0];
+  const outTy = isVoidFn ? null : fn.outputTypes[0];
   const paramNames = new Set(fn.cParams);
-  if (!paramNames.has(cOut)) {
+  if (cOut !== null && !paramNames.has(cOut)) {
     if (outTy && isOwned(outTy)) {
       useRuntimeByName(state, "mtoc2_tensor_empty");
       lines.push(`  mtoc2_tensor_t ${cOut} = mtoc2_tensor_empty();`);
@@ -201,7 +203,9 @@ function emitFunction(fn: IRFunc, state: RuntimeState): string {
     lines.push(`  mtoc2_tensor_t ${o} = mtoc2_tensor_empty();`);
   }
   const ownedOutput =
-    outTy && isOwned(outTy) ? { cName: cOut, ty: outTy } : null;
+    cOut !== null && outTy && isOwned(outTy)
+      ? { cName: cOut, ty: outTy }
+      : null;
   const futureTouches = computeFutureTouches(fn.body, ownedOutput);
   const bodyText = emitBody(fn.body, "  ", state, futureTouches);
   if (bodyText.length > 0) lines.push(bodyText);
@@ -215,7 +219,14 @@ function emitFunction(fn: IRFunc, state: RuntimeState): string {
     useRuntimeByName(state, "mtoc2_tensor_free");
     lines.push(`  mtoc2_tensor_free(&${o});`);
   }
-  lines.push(`  return ${cOut};`);
+  if (isVoidFn) {
+    // `return;` is implicit at function end, but emit it when there's a
+    // `goto mtoc2_return;` label so the label can't sit at the close
+    // brace (which would be a syntax error in C).
+    if (hasRet) lines.push(`  return;`);
+  } else {
+    lines.push(`  return ${cOut};`);
+  }
   lines.push(`}`);
   return lines.join("\n");
 }
