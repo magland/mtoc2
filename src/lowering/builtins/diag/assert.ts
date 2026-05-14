@@ -56,9 +56,9 @@ export const assert: Builtin = {
 
     if (argTypes.length === 2) {
       const m = argTypes[1];
-      if (m.kind !== "String") {
+      if (m.kind !== "String" && m.kind !== "Char") {
         throw new UnsupportedConstruct(
-          `'assert' message must be a string literal in v1 ` +
+          `'assert' message must be a string or char literal in v1 ` +
             `(got ${typeToString(m)}); printf-style \`assert(cond, fmt, ...)\` is a followup`,
           span
         );
@@ -70,9 +70,10 @@ export const assert: Builtin = {
     if (v !== undefined) {
       const truthy = v !== 0 && !Number.isNaN(v);
       if (!truthy) {
+        const m = argTypes.length === 2 ? argTypes[1] : undefined;
         const msgPart =
-          argTypes.length === 2 && argTypes[1].kind === "String"
-            ? `: ${argTypes[1].exact ?? "(empty)"}`
+          m && (m.kind === "String" || m.kind === "Char")
+            ? `: ${m.exact ?? "(empty)"}`
             : "";
         throw new TypeError(`'assert' is statically false${msgPart}`, span);
       }
@@ -91,9 +92,10 @@ export const assert: Builtin = {
       // reaches us — emit a no-op.
       return `((void)0)`;
     }
+    const m = argTypes.length === 2 ? argTypes[1] : undefined;
     const msgArg =
-      argTypes.length === 2 && argTypes[1].kind === "String"
-        ? JSON.stringify(argTypes[1].exact ?? "")
+      m && (m.kind === "String" || m.kind === "Char")
+        ? JSON.stringify(m.exact ?? "")
         : `(const char *)0`;
     return `mtoc2_assert_scalar((double)(${argsC[0]}), ${msgArg})`;
   },

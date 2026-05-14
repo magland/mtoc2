@@ -88,6 +88,56 @@ const REGISTRY: ReadonlyMap<string, RuntimeSnippet> = new Map<
   ["mtoc2_format_double", loadSnippet("format_double.h")],
   ["mtoc2_disp_double", loadSnippet("disp_double.h", ["mtoc2_format_double"])],
 
+  // ── Text (string + char tensor) ───────────────────────────────────
+  // Two distinct owned kinds: `mtoc2_string_t` (scalar handle,
+  // double-quoted) and `mtoc2_char_tensor_t` (1×N row-vector of bytes,
+  // single-quoted). Each ships the four owned-value helpers
+  // (empty/assign/copy/free) plus a literal builder that points at
+  // a `.rodata` C string (no allocation). The non-owning
+  // `mtoc2_text_view_t` adapter lets read-only helpers (disp, future
+  // error/strcmp/fprintf) walk either source uniformly.
+  ["mtoc2_string_t", loadSnippet("string.h")],
+  ["mtoc2_string_empty", loadSnippet("string_empty.h", ["mtoc2_string_t"])],
+  ["mtoc2_string_free", loadSnippet("string_free.h", ["mtoc2_string_t"])],
+  [
+    "mtoc2_string_assign",
+    loadSnippet("string_assign.h", ["mtoc2_string_t", "mtoc2_string_free"]),
+  ],
+  ["mtoc2_string_copy", loadSnippet("string_copy.h", ["mtoc2_string_t"])],
+  [
+    "mtoc2_string_from_literal",
+    loadSnippet("string_from_literal.h", ["mtoc2_string_t"]),
+  ],
+  ["mtoc2_char_tensor_t", loadSnippet("char_tensor.h")],
+  [
+    "mtoc2_char_tensor_empty",
+    loadSnippet("char_tensor_empty.h", ["mtoc2_char_tensor_t"]),
+  ],
+  [
+    "mtoc2_char_tensor_free",
+    loadSnippet("char_tensor_free.h", ["mtoc2_char_tensor_t"]),
+  ],
+  [
+    "mtoc2_char_tensor_assign",
+    loadSnippet("char_tensor_assign.h", [
+      "mtoc2_char_tensor_t",
+      "mtoc2_char_tensor_free",
+    ]),
+  ],
+  [
+    "mtoc2_char_tensor_copy",
+    loadSnippet("char_tensor_copy.h", ["mtoc2_char_tensor_t"]),
+  ],
+  [
+    "mtoc2_char_tensor_from_literal",
+    loadSnippet("char_tensor_from_literal.h", ["mtoc2_char_tensor_t"]),
+  ],
+  [
+    "mtoc2_text_view_t",
+    loadSnippet("text_view.h", ["mtoc2_string_t", "mtoc2_char_tensor_t"]),
+  ],
+  ["mtoc2_disp_text", loadSnippet("disp_text.h", ["mtoc2_text_view_t"])],
+
   // ── Tensor (real, multi-element) ──────────────────────────────────
   // Storage shape + alloc + the four "owned value" helpers (copy,
   // assign, free, plus the `from_row`/`from_matrix` literal builders).

@@ -102,17 +102,17 @@ function classifyDimArg(
   span: Span
 ): AxisChoice {
   if (dimType === undefined) return { kind: "default" };
-  if (dimType.kind === "String") {
+  if (dimType.kind === "String" || dimType.kind === "Char") {
     const v = dimType.exact;
     if (v === "all") return { kind: "all" };
     if (v === undefined) {
       throw new UnsupportedConstruct(
-        `'${name}' dim arg: opaque string (only the literal 'all' is supported)`,
+        `'${name}' dim arg: opaque text (only the literal 'all' is supported)`,
         span
       );
     }
     throw new UnsupportedConstruct(
-      `'${name}' dim arg: string literal must be 'all' (got '${v}')`,
+      `'${name}' dim arg: text literal must be 'all' (got '${v}')`,
       span
     );
   }
@@ -650,7 +650,10 @@ export function reductionCodegen(spec: {
         end: 0,
       });
       axis = a;
-    } else if (dimType.kind === "String" && dimType.exact === "all") {
+    } else if (
+      (dimType.kind === "String" || dimType.kind === "Char") &&
+      dimType.exact === "all"
+    ) {
       axis = { kind: "all" };
     } else if (isNumeric(dimType)) {
       const v = exactDouble(dimType);

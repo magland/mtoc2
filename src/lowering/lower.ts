@@ -1301,13 +1301,15 @@ export class Lowerer {
         return {
           kind: "StringLit",
           value: inner,
-          ty: { kind: "String", exact: inner },
+          ty: { kind: "Char", exact: inner },
           span: e.span,
         };
       }
       case "String": {
-        // Double-quoted MATLAB string literal — same stripping rule
-        // as `Char` but with `""` as the escape sequence.
+        // Double-quoted MATLAB string literal — scalar string handle
+        // (`length("hi") == 1`); codegen emits via
+        // `mtoc2_string_from_literal`. Same stripping rule as Char but
+        // with `""` as the in-literal escape.
         const raw = e.value;
         const inner = raw.slice(1, raw.length - 1).replaceAll('""', '"');
         return {
