@@ -71,6 +71,7 @@ import {
   canonicalizeType,
   classMethodSpecSource,
 } from "./types.js";
+import { exactDouble } from "./builtins/_shared.js";
 import type { ClassRegistration } from "./classDefs.js";
 import type { Workspace } from "../workspace/workspace.js";
 import type { CallSite } from "../../../numbl/src/numbl-core/runtime/runtimeHelpers.js";
@@ -1707,28 +1708,32 @@ export class Lowerer {
     }
 
     // Propagate `exact` when every element has a known scalar number
-    // value AND the total fits the exact-array cap. This is the same
-    // discipline as `zeros`/`ones`: the runtime helper still
-    // materializes the tensor, but downstream type-system consumers
-    // (e.g. `reshape`'s Form B dim-vector path, `sum` of a literal)
-    // can fold against the static data.
-    let ty: NumericType = tensorDouble([rows, cols]);
+    // value AND the total fits the exact-array cap. The runtime
+    // helper still materializes the tensor (per the always-
+    // materialize invariant), but downstream type-system consumers
+    // can fold against the static data:
+    //   - `reshape`'s Form B dim-vector path reads the literal's
+    //     exact data to compute the static result shape.
+    //   - `sqrt([0 1 4 9])` passes its domain check because
+    //     `tensorDouble(shape, exact)` derives `sign:"nonneg"` from
+    //     the exact data.
+    //   - `sum` of a literal can fold to a constant.
+    let exactData: Float64Array | undefined;
     if (total <= EXACT_ARRAY_MAX_ELEMENTS) {
+      const data = new Float64Array(total);
       let allExact = true;
-      for (const el of loweredFlat) {
-        if (!(el.ty.kind === "Numeric" && typeof el.ty.exact === "number")) {
+      for (let i = 0; i < total; i++) {
+        const v = exactDouble(loweredFlat[i].ty);
+        if (v === undefined) {
           allExact = false;
           break;
         }
+        data[i] = v;
       }
-      if (allExact) {
-        const data = new Float64Array(total);
-        for (let i = 0; i < total; i++) {
-          data[i] = (loweredFlat[i].ty as NumericType).exact as number;
-        }
-        ty = tensorDouble([rows, cols], data);
-      }
+      if (allExact) exactData = data;
     }
+
+    const ty = tensorDouble([rows, cols], exactData);
     return {
       kind: "TensorBuild",
       elements: loweredFlat,
@@ -1852,6 +1857,30 @@ export class Lowerer {
       this.requireValueType(a, `argument to '${e.name}'`);
     }
     const argTypes = args.map(a => a.ty);
+
+    // Zero-arity mtoc2 builtins like `pi()` / `Inf()` / `NaN()`.
+    // Numbl resolves these through a separate constants table
+    // (`BUILTIN_CONSTANTS`) not in `index.builtins`, so
+    // `workspace.resolve` returns null. The bare-name read path in
+    // `lowerIdent` already handles `pi` (no parens); this branch
+    // handles the paren-form. `e.args.length === 0` is the gate so
+    // we don't accidentally claim a 1-arg call like `pi(2,3)` (which
+    // numbl/MATLAB treat as a fill constructor — out of scope for
+    // mtoc2 v1).
+    if (args.length === 0) {
+      const b = getBuiltin(e.name);
+      if (b !== undefined && b.arity === 0) {
+        const ty = b.transfer([], e.span);
+        return {
+          kind: "Call",
+          cName: e.name,
+          name: e.name,
+          args: [],
+          ty,
+          span: e.span,
+        };
+      }
+    }
 
     const target = this.workspace.resolve(
       e.name,

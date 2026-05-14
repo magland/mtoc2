@@ -80,8 +80,10 @@ describe("%!numbl:showtype", () => {
     ].join("\n");
     const c = translate(src);
     // The snapshotted type is rendered with the runtime shape and
-    // (with exact stripped by opaque) no `=...` payload.
-    expect(c).toMatch(/\/\* type a \([^)]+\) :: double\[1×3\] \*\//);
+    // (with exact stripped by opaque) no `=...` payload. Sign was
+    // derived from the literal's exact data (all positives), so
+    // `:positive` survives the opaque strip.
+    expect(c).toMatch(/\/\* type a \([^)]+\) :: double\[1×3\]:positive \*\//);
   });
 });
 
