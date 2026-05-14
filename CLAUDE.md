@@ -90,10 +90,13 @@ mtoc2 is a _static_ translator. Anything outside the supported subset raises
   (anonymous). Dispatch is static: every `h(args)` call site reads
   the handle variable's `HandleType`, builds capture-args via
   `HandleCaptureLoad`, and routes through `specializeUserFunction`.
-  v1 restricts captures to scalar real numeric and other handles so
-  the handle's C representation stays POD (no copy / free / assign
-  helpers). `@builtin`, tensor captures, and `~` params are
-  rejected with a span.
+  Captures may be scalar real numeric, tensor, struct, class
+  instance, or another handle; handles are owned and ship per-shape
+  `_empty/_copy/_assign/_free` helpers, so owned-typed captures
+  participate in the standard scope-exit-free / early-free lifecycle.
+  Captures are deep-copied into the handle struct at the `@(...)`
+  site (MATLAB by-value snapshot semantics). `@builtin`, String /
+  Void / Unknown captures, and `~` params are rejected with a span.
 - **Workspace files** — every `.m` file in the project (active file
   plus siblings on the search path) is registered with a `Workspace`
   at translate time. Cross-file calls (a sibling's filename used as
@@ -109,10 +112,9 @@ of-indices indexing (`a(mask)`, `a(idx_vec)`), member-rooted indexing
 (`obj.r(1, :, :)`, `obj.f(i) = rhs`), indexed-delete (`a(2:5) = []`),
 unknown-shape constructors (`zeros(n)` where `n` is a runtime-only
 scalar), general broadcast (non-scalar mismatched shapes), complex,
-strings, chars, builtin handles, tensor captures on anonymous
-functions, `private/` directories, `+pkg/` namespaces, `@Class/`
-folders, `import` statements, `.numbl.js` user functions.
-Expanding scope is gated by the cross-runner.
+strings, chars, builtin handles, `private/` directories, `+pkg/`
+namespaces, `@Class/` folders, `import` statements, `.numbl.js` user
+functions. Expanding scope is gated by the cross-runner.
 
 ## Docs are part of the change
 

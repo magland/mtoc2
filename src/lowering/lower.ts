@@ -2101,10 +2101,12 @@ export class Lowerer {
    *  site routes through the same specialization cache used for
    *  user-declared functions.
    *
-   *  v1 restricts capture types to scalar real numeric — tensor /
-   *  string / handle captures are rejected with `UnsupportedConstruct`
-   *  so the handle struct stays plain-old-data (no per-capture
-   *  copy/free helpers needed). */
+   *  Captures may be scalar real numeric, tensor, struct, class
+   *  instance, or another handle — the handle's C struct ships with
+   *  per-shape `_empty/_copy/_assign/_free` helpers (just like
+   *  structs/classes), so owned-typed fields participate in the
+   *  standard scope-exit-free / early-free lifecycle. String / Void /
+   *  Unknown captures are rejected with `UnsupportedConstruct`. */
   private lowerAnonFunc(e: Extract<Expr, { type: "AnonFunc" }>): IRExpr {
     const paramSet = new Set(e.params);
     const captureNames: string[] = [];
@@ -2128,10 +2130,16 @@ export class Lowerer {
           e.span
         );
       }
-      if (!isScalarRealNumeric(entry.ty) && !isHandle(entry.ty)) {
+      if (
+        entry.ty.kind !== "Numeric" &&
+        entry.ty.kind !== "Struct" &&
+        entry.ty.kind !== "Class" &&
+        entry.ty.kind !== "Handle"
+      ) {
         throw new UnsupportedConstruct(
           `anonymous function captures '${cname}' of unsupported type ` +
-            `(only scalar real numeric and function-handle captures are supported)`,
+            `${typeToString(entry.ty)} (string / void / unknown captures ` +
+            `are not supported)`,
           e.span
         );
       }
@@ -2580,11 +2588,19 @@ function collectAnonCaptures(
       // `@name` resolves to a function reference at body-lowering
       // time — not a capture of the outer scope.
       return;
+    case "Member":
+      collectAnonCaptures(outerEnv, e.base, params, names, seen);
+      return;
+    case "Index":
+      collectAnonCaptures(outerEnv, e.base, params, names, seen);
+      for (const idx of e.indices) {
+        collectAnonCaptures(outerEnv, idx, params, names, seen);
+      }
+      return;
     default:
-      // Other expression kinds (Index, Member, ...) are unsupported in
-      // mtoc2 v1; if they appear inside an anonymous-function body,
-      // the body's own lowering will reject them with a span. Skip
-      // capture detection here.
+      // Other expression kinds remaining (literals, etc.) carry no
+      // captures; any unsupported expression in the body fails when
+      // the body itself is lowered.
       return;
   }
 }

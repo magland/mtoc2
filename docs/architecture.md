@@ -203,9 +203,16 @@ Operator-to-builtin maps live alongside the registry.
 `@user_func` (named) and `@(p1, ..., pN) <body>` (anonymous) lower to a
 `HandleLit` IR node carrying a `HandleType`. The type carries the
 target's AST (a synthesized `FunctionStmt` for anonymous forms) plus a
-list of captured variables. v1 restricts captures to scalar real
-numeric and other handles — both POD on the C side, so the handle
-struct needs no copy / free / assign helpers.
+list of captured variables. Captures may be scalar real numeric,
+tensor, struct, class instance, or another handle. Handles are owned
+on the C side — every per-shape typedef ships with the same
+`_empty / _copy / _assign / _free` family that structs and class
+instances use, so owned-typed captures (tensors and nested
+struct/class/handle values) participate transparently in the standard
+scope-exit / early-free lifecycle. Captures are deep-copied into the
+handle struct at the `@(...)` site, matching MATLAB's by-value capture
+semantics: a later rebinding of the captured name in the enclosing
+scope leaves the handle's snapshot untouched.
 
 Dispatch is static. At every `h(args)` call site the lowerer reads the
 handle variable's type, builds `[...userArgs, ...HandleCaptureLoad(h)]`
@@ -214,29 +221,33 @@ in the underlying spec's param order, and routes through the regular
 `apply(@bar, x)` calls produce two distinct `apply__<hex>` specs
 because the canonical form of `HandleType` shards on the target name.
 
-Codegen emits one C struct typedef per distinct capture-shape:
-`mtoc2_handle_empty_t` (shared placeholder, captures-free handles) and
-`mtoc2_handle__<8hex>` per capture-tuple. A handle literal renders as
-a C99 compound literal; a `HandleCaptureLoad` renders as the
-corresponding `<base>.cap_<name>` field read. The typedefs are
-emitted ahead of the user code's forward declarations in
-topologically-sorted order (so a handle that captures another handle
-sees its dependency already defined).
+Codegen emits one C struct typedef per distinct capture-shape — keyed
+by `(captureName, cFieldTypeStr(captureType))` per capture, the same
+hashing strategy structs and classes use, so two handle types that
+differ only in lattice precision share a typedef. The no-capture form
+shares `mtoc2_handle_empty_t`. Each shape's typedef and its four
+owned-helpers are program-emitted by the same `emitNamedTypedef`
+machinery as structs and classes; topological sort over the combined
+set (structs, classes, handles) keeps dependency order across the
+three kinds (e.g. a handle that captures a struct sees the struct's
+typedef first). A handle literal renders as a C99 compound literal
+with each owned-typed capture wrapped in its inner-type `_copy`; a
+`HandleCaptureLoad` renders as `<base>.cap_<name>` and is wrapped in
+`_copy` when consumed at an owned site.
 
 Rejected at lowering with a span-carrying error:
 
 - `@builtin_name` — builtin handles aren't supported; call the
   builtin directly.
-- Tensor / string captures — would require per-kind copy / free
-  helpers in the handle struct.
+- String / Void / Unknown captures — types without a C-level field
+  representation in mtoc2.
 - `~` as an anonymous-function parameter.
 - A bare-Ident reference whose name shadows an enclosing-scope
   variable in `@name` form.
 
-The model is intentionally simpler than mtoc's handle system —
-mtoc2 doesn't try to support owned-typed captures, multi-output
-handle calls, or handle-shape unification beyond exact-match. See
-`docs/type_system.md` for the type-level story.
+Multi-output handle calls and handle-shape unification beyond
+exact-match are still not supported. See `docs/type_system.md` for
+the type-level story.
 
 ### Structs and class instances
 

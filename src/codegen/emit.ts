@@ -57,6 +57,7 @@ import { irFuncDocComment, irStmtHeader } from "./prettyIR.js";
 import {
   emitNamedTypedef,
   specForClass,
+  specForHandle,
   specForStruct,
 } from "./emitNamedTypedef.js";
 
@@ -72,28 +73,21 @@ export function emitProgram(prog: IRProgram, opts: EmitOptions = {}): string {
   const state = newRuntimeState();
   const userParts: string[] = [];
 
-  // Collect every distinct HandleType shape referenced anywhere in the
-  // program so we can emit one struct typedef per shape ahead of the
-  // user code.
-  const handleTypedefs = collectHandleTypedefs(prog);
-
-  // Function-handle struct typedefs — one per distinct capture-shape.
-  // Emitted before forward decls so handle-typed params/returns/locals
-  // can refer to them. No-capture handles share the placeholder typedef.
-  if (handleTypedefs.length > 0) {
-    for (const td of handleTypedefs) {
-      userParts.push(renderHandleTypedef(td));
-    }
-    userParts.push("");
-  }
-
-  // Struct/class typedefs — one per distinct shape. Emitted in
-  // topological order so a nested-struct field's typedef appears
-  // before its container's. Each typedef ships with its four
-  // owned-kind helpers (and a _disp helper for structs).
+  // Struct / class / handle typedefs — one per distinct shape.
+  // Emitted ahead of forward decls so user code can refer to them,
+  // and in dependency-topological order so any typedef that references
+  // another (a struct field of struct type, a handle capturing a
+  // tensor's enclosing struct, a handle capturing another handle, ...)
+  // is emitted after its dependency. Each typedef ships with its four
+  // owned-kind helpers (and a `_disp` helper for structs).
   const namedTypedefs = collectNamedTypedefs(prog);
   for (const t of namedTypedefs) {
-    const spec = t.kind === "Struct" ? specForStruct(t) : specForClass(t);
+    const spec =
+      t.kind === "Struct"
+        ? specForStruct(t)
+        : t.kind === "Class"
+          ? specForClass(t)
+          : specForHandle(t);
     userParts.push(emitNamedTypedef(spec, state));
   }
   if (namedTypedefs.length > 0) userParts.push("");
@@ -174,100 +168,53 @@ function runtimePlaceholder(state: RuntimeState): string {
   return `/* runtime helpers omitted (${state.active.size}): ${names} */\n`;
 }
 
-/** Walk the entire program and collect every distinct `HandleType`
- *  shape — by typedef name — referenced anywhere. The no-capture
- *  placeholder shape is always added if any handle is in use, so
- *  named-handle code emits a usable typedef. Ordered by first-seen
- *  for deterministic output. */
-function collectHandleTypedefs(prog: IRProgram): HandleType[] {
-  const seen = new Map<string, HandleType>();
-  const consider = (t: Type | undefined): void => {
-    if (t === undefined) return;
-    if (!isHandle(t)) return;
-    const key = handleTypedefName(t);
-    if (!seen.has(key)) seen.set(key, t);
-  };
-  const visitExpr = (e: IRExpr): void => {
-    forEachSubExpr(e, sub => {
-      consider(sub.ty);
-      if (sub.kind === "HandleLit") {
-        for (const c of sub.captures) consider(c.value.ty);
-      }
-    });
-  };
-  const visitStmts = (stmts: ReadonlyArray<IRStmt>): void => {
-    for (const s of stmts) {
-      forEachTopLevelExpr(s, visitExpr);
-      if (s.kind === "Assign") consider(s.ty);
-      switch (s.kind) {
-        case "If":
-          visitStmts(s.thenBody);
-          visitStmts(s.elseBody);
-          break;
-        case "While":
-        case "For":
-          visitStmts(s.body);
-          break;
-      }
-    }
-  };
-  for (const fn of prog.functions.values()) {
-    for (const ty of fn.paramTypes) consider(ty);
-    for (const ty of fn.outputTypes) consider(ty);
-    visitStmts(fn.body);
-  }
-  visitStmts(prog.topLevelStmts);
-  // Pull in dependent handle types (a handle whose capture is itself
-  // a handle pulls that handle's typedef into the set transitively).
-  let grew = true;
-  while (grew) {
-    grew = false;
-    for (const t of Array.from(seen.values())) {
-      for (const c of t.captures) {
-        if (isHandle(c.ty)) {
-          const k = handleTypedefName(c.ty);
-          if (!seen.has(k)) {
-            seen.set(k, c.ty);
-            grew = true;
-          }
-        }
-      }
-    }
-  }
-  // Topological sort: a handle that captures another handle must come
-  // after its dependency's typedef. The graph is acyclic because
-  // captures snapshot a value type that pre-exists at the @-site.
-  return topoSortHandleTypedefs(Array.from(seen.values()));
-}
+type NamedType = StructType | ClassType | HandleType;
 
-/** Walk the program and collect every distinct `StructType` and
- *  `ClassType` shape, returning them in dependency-topological order
- *  (a typedef whose fields reference another typedef is emitted
- *  after that other typedef). Recurses into struct/class field types
- *  so a transitively-used inner shape gets included even if the
- *  outer shape is the only thing the IR mentions directly. */
-function collectNamedTypedefs(prog: IRProgram): Array<StructType | ClassType> {
-  const seen = new Map<string, StructType | ClassType>();
+/** Walk the program and collect every distinct named (struct / class /
+ *  handle) typedef shape, returning them in dependency-topological
+ *  order so any typedef that references another is emitted after its
+ *  dependency. Recurses into field, property, and capture types so a
+ *  transitively-used inner shape gets included even if the outer shape
+ *  is the only thing the IR mentions directly. Also walks `HandleLit`
+ *  capture value types — those drive the per-capture C field types
+ *  even when the outer expression's `ty` is enough by itself. */
+function collectNamedTypedefs(prog: IRProgram): NamedType[] {
+  const seen = new Map<string, NamedType>();
+
+  const innerTys = (t: NamedType): Type[] => {
+    if (t.kind === "Struct") return t.fields.map(f => f.ty);
+    if (t.kind === "Class") return t.properties.map(p => p.ty);
+    return t.captures.map(c => c.ty);
+  };
 
   const considerNamed = (t: Type | undefined): void => {
     if (t === undefined) return;
+    let key: string;
+    let named: NamedType;
     if (t.kind === "Struct") {
-      const key = structTypedefName(t);
-      if (!seen.has(key)) {
-        seen.set(key, t);
-        for (const f of t.fields) considerNamed(f.ty);
-      }
+      key = structTypedefName(t);
+      named = t;
     } else if (t.kind === "Class") {
-      const key = classTypedefName(t);
-      if (!seen.has(key)) {
-        seen.set(key, t);
-        for (const p of t.properties) considerNamed(p.ty);
-      }
+      key = classTypedefName(t);
+      named = t;
+    } else if (t.kind === "Handle") {
+      key = handleTypedefName(t);
+      named = t;
+    } else {
+      return;
     }
+    if (seen.has(key)) return;
+    seen.set(key, named);
+    for (const ity of innerTys(named)) considerNamed(ity);
   };
 
   const visitExpr = (e: IRExpr): void => {
-    forEachSubExpr(e, sub => considerNamed(sub.ty));
+    forEachSubExpr(e, sub => {
+      considerNamed(sub.ty);
+      if (sub.kind === "HandleLit") {
+        for (const c of sub.captures) considerNamed(c.value.ty);
+      }
+    });
   };
   const visitStmts = (stmts: ReadonlyArray<IRStmt>): void => {
     for (const s of stmts) {
@@ -296,32 +243,33 @@ function collectNamedTypedefs(prog: IRProgram): Array<StructType | ClassType> {
   }
   visitStmts(prog.topLevelStmts);
 
-  // Topological sort: a struct/class whose fields reference another
-  // struct/class must come after its dependency's typedef.
-  return topoSortNamedTypedefs(Array.from(seen.values()));
+  return topoSortNamedTypedefs(Array.from(seen.values()), innerTys);
 }
 
-function namedTypedefKey(t: StructType | ClassType): string {
-  return t.kind === "Struct" ? structTypedefName(t) : classTypedefName(t);
+function namedTypedefKey(t: NamedType): string {
+  if (t.kind === "Struct") return structTypedefName(t);
+  if (t.kind === "Class") return classTypedefName(t);
+  return handleTypedefName(t);
 }
 
 function topoSortNamedTypedefs(
-  ts: Array<StructType | ClassType>
-): Array<StructType | ClassType> {
-  const byName = new Map<string, StructType | ClassType>();
+  ts: NamedType[],
+  innerTys: (t: NamedType) => Type[]
+): NamedType[] {
+  const byName = new Map<string, NamedType>();
   for (const t of ts) byName.set(namedTypedefKey(t), t);
   const visited = new Set<string>();
-  const out: Array<StructType | ClassType> = [];
-  const visit = (t: StructType | ClassType): void => {
+  const out: NamedType[] = [];
+  const visit = (t: NamedType): void => {
     const name = namedTypedefKey(t);
     if (visited.has(name)) return;
     visited.add(name);
-    const inner =
-      t.kind === "Struct"
-        ? t.fields.map(f => f.ty)
-        : t.properties.map(p => p.ty);
-    for (const ity of inner) {
-      if (ity.kind === "Struct" || ity.kind === "Class") {
+    for (const ity of innerTys(t)) {
+      if (
+        ity.kind === "Struct" ||
+        ity.kind === "Class" ||
+        ity.kind === "Handle"
+      ) {
         const dep = byName.get(namedTypedefKey(ity));
         if (dep) visit(dep);
       }
@@ -332,41 +280,6 @@ function topoSortNamedTypedefs(
   return out;
 }
 
-function topoSortHandleTypedefs(ts: HandleType[]): HandleType[] {
-  const byName = new Map<string, HandleType>();
-  for (const t of ts) byName.set(handleTypedefName(t), t);
-  const visited = new Set<string>();
-  const out: HandleType[] = [];
-  const visit = (t: HandleType): void => {
-    const name = handleTypedefName(t);
-    if (visited.has(name)) return;
-    visited.add(name);
-    for (const c of t.captures) {
-      if (isHandle(c.ty)) {
-        const dep = byName.get(handleTypedefName(c.ty));
-        if (dep) visit(dep);
-      }
-    }
-    out.push(t);
-  };
-  for (const t of ts) visit(t);
-  return out;
-}
-
-/** Render a single handle-shape typedef as a C struct definition.
- *  No-capture handles get a single `char _placeholder` field so the
- *  struct is non-empty (C forbids empty structs in standard C). */
-function renderHandleTypedef(t: HandleType): string {
-  const name = handleTypedefName(t);
-  if (t.captures.length === 0) {
-    return `typedef struct ${name} { char _placeholder; } ${name};`;
-  }
-  const fields = t.captures
-    .map(c => `${cTypeFor(c.ty)} cap_${c.name};`)
-    .join(" ");
-  return `typedef struct ${name} { ${fields} } ${name};`;
-}
-
 function cTypeFor(t: Type): string {
   if (isMultiElement(t)) return "mtoc2_tensor_t";
   if (isHandle(t)) return handleTypedefName(t);
@@ -375,10 +288,11 @@ function cTypeFor(t: Type): string {
   return "double";
 }
 
-/** Default initializer for a freshly-declared local of `ty`. Scalars
- *  default to `0.0`; handles default to a zero-initialized struct. */
-function defaultInitFor(ty: Type): string {
-  if (isHandle(ty)) return `(${handleTypedefName(ty)}){0}`;
+/** Default initializer for a freshly-declared non-owned local. Owned
+ *  types (tensors, structs, classes, handles) route through their
+ *  `_empty()` helper instead and never hit this path; everything
+ *  reaching here is scalar real numeric, so `0.0` always fits. */
+function defaultInitFor(): string {
   return "0.0";
 }
 
@@ -420,6 +334,16 @@ function ownedHelpersFor(t: Type): OwnedHelpers {
   }
   if (t.kind === "Class") {
     const name = classTypedefName(t);
+    return {
+      empty: `${name}_empty`,
+      assign: `${name}_assign`,
+      copy: `${name}_copy`,
+      free: `${name}_free`,
+      isRuntime: false,
+    };
+  }
+  if (t.kind === "Handle") {
+    const name = handleTypedefName(t);
     return {
       empty: `${name}_empty`,
       assign: `${name}_assign`,
@@ -545,7 +469,7 @@ function emitFunction(fn: IRFunc, state: RuntimeState): string {
       const h = ownedHelpersFor(outTy);
       lines.push(`  ${cTypeFor(outTy)} ${cOut} = ${h.empty}();`);
     } else if (outTy !== undefined) {
-      lines.push(`  ${cTypeFor(outTy)} ${cOut} = ${defaultInitFor(outTy)};`);
+      lines.push(`  ${cTypeFor(outTy)} ${cOut} = ${defaultInitFor()};`);
     } else {
       lines.push(`  double ${cOut} = 0.0;`);
     }
@@ -841,7 +765,7 @@ function emitStmt(
           !isOwned(slot.ty)
         ) {
           preDecls.push(
-            `${indent}${cTypeFor(slot.ty)} ${slot.binding.cName} = ${defaultInitFor(slot.ty)};`
+            `${indent}${cTypeFor(slot.ty)} ${slot.binding.cName} = ${defaultInitFor()};`
           );
         }
       }
@@ -863,7 +787,7 @@ function emitStmt(
             out.push(`${indent}  ${cTypeFor(slot.ty)} ${tmp} = ${h.empty}();`);
           } else {
             out.push(
-              `${indent}  ${cTypeFor(slot.ty)} ${tmp} = ${defaultInitFor(slot.ty)};`
+              `${indent}  ${cTypeFor(slot.ty)} ${tmp} = ${defaultInitFor()};`
             );
           }
           outArgs.push(`&${tmp}`);
@@ -894,13 +818,18 @@ function emitStmt(
  *  here is freshly-owned; the consumer's `_assign` helper releases
  *  the prior slot and consumes the rhs.
  *
- *  - `Var`        → `<type>_copy(name)` (deep copy)
- *  - `MemberLoad` → `<type>_copy(<base>.<field>)` (the load itself is
- *                   a struct-by-value read; we wrap it in copy so
- *                   the consumer gets a freshly-owned buffer)
- *  - anything else → `emitExpr` (TensorBuild / StructLit / Binary /
- *                    Call etc. already emit fresh-allocating
- *                    helpers) */
+ *  - `Var`               → `<type>_copy(name)` (deep copy)
+ *  - `MemberLoad`        → `<type>_copy(<base>.<field>)` (the load
+ *                          itself is a struct-by-value read; we wrap
+ *                          it in copy so the consumer gets a freshly-
+ *                          owned buffer)
+ *  - `HandleCaptureLoad` → `<type>_copy(<base>.cap_<name>)` (same
+ *                          rationale — the handle's capture slot is
+ *                          read by value and we copy it for the
+ *                          consumer)
+ *  - anything else       → `emitExpr` (TensorBuild / StructLit /
+ *                          HandleLit / Binary / Call etc. already
+ *                          emit fresh-allocating helpers) */
 function emitOwnedRhs(e: IRExpr, state: RuntimeState): string {
   if (e.kind === "Var") {
     activateOwnedRuntime(e.ty, state);
@@ -911,6 +840,11 @@ function emitOwnedRhs(e: IRExpr, state: RuntimeState): string {
     activateOwnedRuntime(e.ty, state);
     const h = ownedHelpersFor(e.ty);
     return `${h.copy}(${emitMemberLoadBare(e, state)})`;
+  }
+  if (e.kind === "HandleCaptureLoad" && isOwned(e.ty)) {
+    activateOwnedRuntime(e.ty, state);
+    const h = ownedHelpersFor(e.ty);
+    return `${h.copy}(${e.base.cName}.cap_${e.captureName})`;
   }
   return emitExpr(e, state);
 }
@@ -982,18 +916,27 @@ function emitExpr(e: IRExpr, state: RuntimeState): string {
       return `${e.cName}(${args})`;
     }
     case "HandleLit": {
-      // `(<typedef>){.cap_<name> = <value>, ...}` for capture-bearing
-      // handles, or `(mtoc2_handle_empty_t){0}` for the no-capture
-      // shared form. Captures are scalar real numeric (enforced at
-      // lowering), so each value is a plain `double` C expression.
+      // No-capture handles share the placeholder typedef and call
+      // through its `_empty()` to mirror the struct/class lifecycle.
+      // Capture-bearing handles emit a designated initializer; each
+      // owned-typed capture value is routed through `emitOwnedRhs`
+      // so a Var read of the enclosing scope's binding wraps in
+      // `<innerTypedef>_copy`, giving the handle struct its own
+      // freshly-owned snapshot (MATLAB by-value capture semantics).
       if (e.ty.kind !== "Handle") {
         throw new Error("emit: HandleLit with non-Handle ty");
       }
       const cTy = handleTypedefName(e.ty);
-      if (e.captures.length === 0) return `(${cTy}){0}`;
-      const parts = e.captures.map(
-        c => `.cap_${c.name} = ${emitExpr(c.value, state)}`
-      );
+      if (e.captures.length === 0) {
+        activateOwnedRuntime(e.ty, state);
+        return `${cTy}_empty()`;
+      }
+      const parts = e.captures.map(c => {
+        const v = isOwned(c.value.ty)
+          ? emitOwnedRhs(c.value, state)
+          : emitExpr(c.value, state);
+        return `.cap_${c.name} = ${v}`;
+      });
       return `(${cTy}){${parts.join(", ")}}`;
     }
     case "HandleCaptureLoad":

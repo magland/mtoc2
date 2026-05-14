@@ -121,18 +121,23 @@ export interface UnknownType {
 /** One captured variable in a `HandleType`. The `name` is both the
  *  enclosing-scope identifier the @-site snapshot reads from AND the
  *  synthesized function's tail-param name; the `ty` is the captured
- *  value's type at the @-site. v1 only supports scalar-real-numeric
- *  captures, so the handle struct stays plain-old-data and needs no
- *  copy/free/assign helpers. */
+ *  value's type at the @-site. Captures of owned types (tensors,
+ *  structs, classes, other handles) are deep-copied into the handle's
+ *  C struct at the `@(...)` site, matching MATLAB by-value capture
+ *  semantics; the handle's per-shape `_free` helper releases each
+ *  owned field at scope exit. */
 export interface HandleCapture {
   name: string;
   ty: Type;
 }
 
-/** Function handle. mtoc2 v1 supports only user-function targets
+/** Function handle. mtoc2 supports only user-function targets
  *  (named `@user_func` and anonymous `@(p1,...,pN) <body>`); `@builtin`
- *  is rejected. Captures are restricted to scalar real numeric values
- *  so the handle's C representation is a flat POD struct. */
+ *  is rejected. Captures may be any non-Void / non-Unknown / non-String
+ *  value type — scalar real numeric, tensor, struct, class instance, or
+ *  another handle. The handle's C representation is a per-capture-shape
+ *  typedef with `_empty / _copy / _assign / _free` helpers, matching
+ *  the struct/class owned-value lifecycle. */
 export interface HandleType {
   kind: "Handle";
   /** Source-level identifier for the target function. For named
@@ -377,16 +382,18 @@ export function isMultiElement(t: Type): boolean {
 
 /** Owned-heap-value types — i.e. types whose C representation holds a
  *  heap pointer the codegen must `free` at scope exit. Multi-element
- *  tensors are the original owned kind. Structs and class instances
- *  also count as owned because their per-shape generated typedef
- *  carries the same `_empty()`/`_assign()`/`_copy()`/`_free()`
- *  lifecycle — a struct with all-scalar fields would technically be
- *  POD, but tracking ownership uniformly keeps the codegen pipeline
- *  simple and lets struct fields hold tensors transparently. */
+ *  tensors are the original owned kind. Structs, class instances, and
+ *  function handles all count as owned because their per-shape generated
+ *  typedef carries the same `_empty()`/`_assign()`/`_copy()`/`_free()`
+ *  lifecycle — a struct or handle with all-scalar fields would
+ *  technically be POD, but tracking ownership uniformly keeps the
+ *  codegen pipeline simple and lets struct fields and handle captures
+ *  hold tensors transparently. */
 export function isOwned(t: Type): boolean {
   if (isMultiElement(t)) return true;
   if (t.kind === "Struct") return true;
   if (t.kind === "Class") return true;
+  if (t.kind === "Handle") return true;
   return false;
 }
 
@@ -733,11 +740,16 @@ export function specializationKey(argTypes: Type[]): string {
  *  handles share `mtoc2_handle_empty_t` regardless of target identity
  *  (the function dispatch is static — the struct is just a carrier).
  *  Handles with captures get a per-shape `mtoc2_handle__<8hex>` typedef
- *  whose hash covers the `(name, canonical-type)` tuple of each capture
- *  in order. */
+ *  whose hash covers the `(name, cFieldTypeStr)` tuple of each capture
+ *  in order. Matches the struct/class precedent: the typedef hash sees
+ *  only the C-level type of each capture, so two handle types that
+ *  differ only in lattice precision (sign, exact, tensor shape) share
+ *  one typedef and one set of owned-helpers. */
 export function handleTypedefName(t: HandleType): string {
   if (t.captures.length === 0) return "mtoc2_handle_empty_t";
-  const canonical = JSON.stringify(t.captures.map(c => [c.name, canon(c.ty)]));
+  const canonical = JSON.stringify(
+    t.captures.map(c => [c.name, cFieldTypeStr(c.ty)])
+  );
   return `mtoc2_handle__${hashType(canonical)}`;
 }
 

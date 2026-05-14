@@ -26,14 +26,15 @@
 
 import {
   classTypedefName,
+  handleTypedefName,
   isHandle,
   isMultiElement,
   structTypedefName,
   type ClassType,
+  type HandleType,
   type StructType,
   type Type,
 } from "../lowering/types.js";
-import { handleTypedefName } from "../lowering/types.js";
 import { useRuntimeByName, type RuntimeState } from "./runtime.js";
 
 /** Catch-all C-type renderer that mirrors `cTypeFor` in emit.ts but
@@ -84,6 +85,15 @@ function ownedOpsFor(t: Type): FieldOwnedOps | null {
       free: `${name}_free`,
     };
   }
+  if (t.kind === "Handle") {
+    const name = handleTypedefName(t);
+    return {
+      empty: `${name}_empty`,
+      assign: `${name}_assign`,
+      copy: `${name}_copy`,
+      free: `${name}_free`,
+    };
+  }
   return null;
 }
 
@@ -121,57 +131,73 @@ export function emitNamedTypedef(
     }
   }
 
+  const isEmpty = spec.fields.length === 0;
+
   const lines: string[] = [];
   lines.push(`/* ${spec.pretty} */`);
   lines.push(`typedef struct ${spec.name} {`);
-  for (const f of spec.fields) {
-    lines.push(`  ${cTypeForField(f.ty)} ${f.name};`);
+  if (isEmpty) {
+    // C99 forbids empty structs; emit a placeholder field. Used by
+    // no-capture function handles (`mtoc2_handle_empty_t`).
+    lines.push(`  char _placeholder;`);
+  } else {
+    for (const f of spec.fields) {
+      lines.push(`  ${cTypeForField(f.ty)} ${f.name};`);
+    }
   }
   lines.push(`} ${spec.name};`);
   lines.push("");
 
   // _empty(): zero-initialize every field. Owned fields get their
   // field-type _empty() (NULL pointers for tensors; recursive empty
-  // for nested struct/class). Scalars default to 0.0; handles use a
-  // {0} compound literal.
+  // for nested struct/class/handle). Scalars default to 0.0.
   lines.push(`static ${spec.name} ${spec.name}_empty(void) {`);
   lines.push(`  ${spec.name} v;`);
-  for (const f of spec.fields) {
-    const ops = ownedOpsFor(f.ty);
-    if (ops !== null) {
-      lines.push(`  v.${f.name} = ${ops.empty}();`);
-    } else if (isHandle(f.ty)) {
-      lines.push(`  v.${f.name} = (${handleTypedefName(f.ty)}){0};`);
-    } else {
-      lines.push(`  v.${f.name} = 0.0;`);
+  if (isEmpty) {
+    lines.push(`  v._placeholder = 0;`);
+  } else {
+    for (const f of spec.fields) {
+      const ops = ownedOpsFor(f.ty);
+      if (ops !== null) {
+        lines.push(`  v.${f.name} = ${ops.empty}();`);
+      } else {
+        lines.push(`  v.${f.name} = 0.0;`);
+      }
     }
   }
   lines.push(`  return v;`);
   lines.push(`}`);
   lines.push("");
 
-  // _free(): release every owned field. Scalars / handles are POD —
-  // skip them.
+  // _free(): release every owned field. Scalars are POD — skip them.
   lines.push(`static void ${spec.name}_free(${spec.name} *p) {`);
-  for (const f of spec.fields) {
-    const ops = ownedOpsFor(f.ty);
-    if (ops !== null) {
-      lines.push(`  ${ops.free}(&p->${f.name});`);
+  if (isEmpty) {
+    lines.push(`  (void)p;`);
+  } else {
+    for (const f of spec.fields) {
+      const ops = ownedOpsFor(f.ty);
+      if (ops !== null) {
+        lines.push(`  ${ops.free}(&p->${f.name});`);
+      }
     }
   }
   lines.push(`}`);
   lines.push("");
 
-  // _copy(): deep copy every owned field via its _copy; scalars and
-  // handles plain-assign.
+  // _copy(): deep copy every owned field via its _copy; scalars plain-
+  // assign.
   lines.push(`static ${spec.name} ${spec.name}_copy(${spec.name} v) {`);
   lines.push(`  ${spec.name} out;`);
-  for (const f of spec.fields) {
-    const ops = ownedOpsFor(f.ty);
-    if (ops !== null) {
-      lines.push(`  out.${f.name} = ${ops.copy}(v.${f.name});`);
-    } else {
-      lines.push(`  out.${f.name} = v.${f.name};`);
+  if (isEmpty) {
+    lines.push(`  out._placeholder = v._placeholder;`);
+  } else {
+    for (const f of spec.fields) {
+      const ops = ownedOpsFor(f.ty);
+      if (ops !== null) {
+        lines.push(`  out.${f.name} = ${ops.copy}(v.${f.name});`);
+      } else {
+        lines.push(`  out.${f.name} = v.${f.name};`);
+      }
     }
   }
   lines.push(`  return out;`);
@@ -237,6 +263,11 @@ function emitStructDisp(spec: NamedTypedefSpec, state: RuntimeState): string[] {
       // than failing — lowering rejects disp(class_instance) up
       // front, so this path is unreachable for well-formed input.
       lines.push(`  /* skipping class-typed field '${f.name}' in disp */`);
+    } else if (f.ty.kind === "Handle") {
+      // Handle-field disp not supported; lowering rejects
+      // disp(handle) up front so this path is unreachable for
+      // well-formed input.
+      lines.push(`  /* skipping handle-typed field '${f.name}' in disp */`);
     } else {
       // Scalar real numeric. Use the existing scalar disp helper.
       useRuntimeByName(state, "mtoc2_disp_double");
@@ -265,5 +296,23 @@ export function specForClass(t: ClassType): NamedTypedefSpec {
     fields: t.properties.map(p => ({ name: p.name, ty: p.ty })),
     emitDisp: false,
     pretty: `class ${t.className}`,
+  };
+}
+
+/** Helper for emit.ts: build a `NamedTypedefSpec` for a `HandleType`.
+ *  Captures map to fields named `cap_<captureName>` — matching the
+ *  layout that `HandleCaptureLoad` codegen reads. The no-capture
+ *  shape emits as a placeholder-bearing struct (handled by the empty-
+ *  fields branch in `emitNamedTypedef`). Handles never emit `_disp` —
+ *  `disp(handle)` is rejected at lowering. */
+export function specForHandle(t: HandleType): NamedTypedefSpec {
+  return {
+    name: handleTypedefName(t),
+    fields: t.captures.map(c => ({ name: `cap_${c.name}`, ty: c.ty })),
+    emitDisp: false,
+    pretty:
+      t.captures.length === 0
+        ? `handle @${t.targetName}`
+        : `handle @${t.targetName}{${t.captures.map(c => c.name).join(", ")}}`,
   };
 }
