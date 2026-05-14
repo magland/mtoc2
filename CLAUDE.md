@@ -251,6 +251,23 @@ Two layers, strict separation:
   byte-for-byte over every `.m` in `test_scripts/`. New end-to-end tests
   go here as `.m` files (auto-discovered). Don't add per-script entries
   to vitest.
+
+  **Keep the script count low.** Per-script overhead is substantial —
+  each entry spawns `tsx` for numbl, then `tsx` again for mtoc2, then
+  `cc` to compile the emitted C, then runs the binary. A wall-time
+  budget that should stay close to ~15s end-to-end means consolidating
+  related cases into one file rather than minting a fresh script per
+  feature or regression. Prefer the topic-file pattern (see
+  [test_scripts/indexing.m](test_scripts/indexing.m)): a thin
+  top-level block that calls a series of local functions, one per
+  scenario. New regression cases join the existing topic file
+  (an indexing regression goes into `indexing.m`, a tensor-arithmetic
+  regression into `tensors.m`, etc.) unless the topic genuinely
+  doesn't exist yet. Two reasons to start a fresh file: the topic is
+  new, or the file needs its own `% mtoc2-test-mask:` /
+  `% mtoc2-test-drop:` directive that would contaminate unrelated
+  scripts.
+
 - **Vitest** is reserved for unit-level assertions (emitted-C shapes,
   error attribution, type-system invariants). Not used yet — add a
   `tests/` directory when there's something worth covering at that level.

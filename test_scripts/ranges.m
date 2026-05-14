@@ -1,13 +1,18 @@
-% Float-step ranges where (end - start) / step is an integer in math
-% but evaluates to (integer - epsilon) in IEEE 754. numbl bumps the
-% count by 1e-10 before flooring and snaps the last element to `end`.
-% mtoc2 must match byte-for-byte.
+% Range edge cases: float-step rounding/snap, length-one collapses,
+% step=0 empty.
 
 test_count_when_quotient_underflows();
 test_count_when_quotient_overshoots();
 test_snap_last_element();
 test_snap_inside_arithmetic();
 test_step_zero_emits_empty();
+
+test_basic_length_one_range();
+test_length_one_with_step();
+test_length_one_in_arithmetic();
+test_length_one_disp_directly();
+
+% -------- float-step ranges --------
 
 function test_count_when_quotient_underflows()
   % (0.3 - 0) / 0.1 = 2.9999999999999996; numbl rounds to 4 elements,
@@ -47,4 +52,28 @@ function test_step_zero_emits_empty()
   step = 0;
   v = s:step:e;
   disp(numel(v));
+end
+
+% -------- length-one ranges --------
+
+function test_basic_length_one_range()
+  % A statically-length-1 range like `1:1` (or `5:5:5`) is type-system
+  % scalar. Lowering collapses MakeRange of length 1 to its start
+  % expression so the LHS sees a scalar.
+  x = 1:1;
+  disp(x);
+end
+
+function test_length_one_with_step()
+  x = 5:5:5;
+  disp(x);
+end
+
+function test_length_one_in_arithmetic()
+  x = (3:3) * 4;
+  disp(x);
+end
+
+function test_length_one_disp_directly()
+  disp(7:7);
 end
