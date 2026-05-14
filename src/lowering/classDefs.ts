@@ -1,8 +1,9 @@
 /**
- * Class-definition registry. Walks the program once at lowering
- * entry, validates each `Stmt.ClassDef`, infers property types from
- * the declared default expressions, and stores the result keyed by
- * class name.
+ * Class-definition registry. The `Workspace` walks each known
+ * `Stmt.ClassDef` (main file + every workspace file containing a
+ * classdef) and calls `registerClassDef` to validate and infer
+ * property types from the declared default expressions. Results are
+ * keyed by class name.
  *
  * Scope for v1:
  *   - Single `classdef Foo properties ... methods ... end end`
@@ -12,14 +13,19 @@
  *     overloads, no `get.`/`set.` accessors. Every rejected form
  *     surfaces with a clean `UnsupportedConstruct` carrying the
  *     class's source span.
- *   - Properties must declare a default-value expression. The
- *     default's type drives the property's storage type (after
- *     the precise default's type — the C typedef hash uses
+ *   - Properties may declare a default-value expression. When set,
+ *     the default's type drives the property's storage type
+ *     eagerly. When unset, the property's type is inferred at first
+ *     constructor specialization from the first
+ *     `obj.<prop> = <rhs>` write at the top level of the
+ *     constructor body — see `Lowerer.resolveClassType` in
+ *     [lower.ts](./lower.ts). The C typedef hash uses
  *     `cFieldTypeStr` (one C-type string per property), so the
- *     typedef stays stable even if writes evolve the internal type).
+ *     typedef stays stable even if writes evolve the internal type.
  *   - Methods can be the constructor (named same as class, returns
- *     the receiver) or regular methods. v1 only supports methods
- *     with 0 or 1 outputs (same as user functions).
+ *     the receiver), an instance method, or a static method
+ *     (declared inside `methods (Static)` block). v1 only supports
+ *     methods with 0 or 1 outputs (same as user functions).
  */
 import type { Span, Stmt, Expr } from "../parser/index.js";
 import { UnaryOperation } from "../parser/index.js";
@@ -39,42 +45,52 @@ type FuncStmt = Extract<Stmt, { type: "Function" }>;
 export interface ClassRegistration {
   /** Source-level name. */
   className: string;
-  /** Inferred class instance type. Property list is sorted (canonical
-   *  form). Each property carries its default expression's precise
-   *  type (with sign / exact / shape preserved) — the C typedef is
-   *  independent of that precision (it hashes via `cFieldTypeStr`),
-   *  so carrying the precise type is free at the C level and
-   *  beneficial at the lattice level. */
-  ty: ClassType;
-  /** Property-default expressions, indexed by name. Kept around so
-   *  the constructor-call site can synthesize an initial receiver as
-   *  a `StructLit` whose field values are the default expressions. */
-  defaults: Map<string, Expr>;
+  /** File the classdef lives in (used to salt specialization keys
+   *  and for diagnostics). */
+  file: string;
+  /** Declared property names in source order (sorted version lives on
+   *  `ty.properties` once resolved). */
+  propertyNames: string[];
+  /** Properties with an explicit default-value expression. Each
+   *  carries the lowered default's precise type (sign, exact, shape
+   *  preserved). The C typedef hash uses `cFieldTypeStr` so precision
+   *  differences across writes don't shard typedefs, but downstream
+   *  reads / spec keying benefit from precision. */
+  defaults: Map<string, { expr: Expr; ty: Type }>;
+  /** Properties WITHOUT a default. Their C-level type is inferred at
+   *  first constructor specialization from direct
+   *  `obj.<prop> = <rhs>` writes in the constructor body. Disjoint
+   *  from `defaults`. */
+  pendingProperties: Set<string>;
+  /** Class instance type. Eagerly resolved when every property has a
+   *  default (`pendingProperties` empty). Otherwise null at
+   *  registration and filled in by the lowerer's
+   *  `resolveClassType()` at first constructor specialization. */
+  ty: ClassType | null;
   /** Constructor (a method whose name matches the class). May be
    *  null when the class has no constructor — in that case the
    *  default-valued receiver is the constructor's "body" and
-   *  `Foo()` (no args) is the only legal call. */
+   *  `Foo()` (no args) is the only legal call. Required when
+   *  `pendingProperties` is non-empty. */
   constructor: FuncStmt | null;
-  /** Other methods, keyed by source name. The constructor is NOT
+  /** Instance methods, keyed by source name. The constructor is NOT
    *  included here. */
   methods: Map<string, FuncStmt>;
+  /** Static methods, keyed by source name. Called as
+   *  `ClassName.method(args)` — the receiver is not passed. */
+  staticMethods: Map<string, FuncStmt>;
 }
 
-export function collectClassDefs(
-  stmts: ReadonlyArray<Stmt>
-): Map<string, ClassRegistration> {
-  const out = new Map<string, ClassRegistration>();
-  for (const s of stmts) {
-    if (s.type !== "ClassDef") continue;
-    if (out.has(s.name)) {
-      throw new UnsupportedConstruct(`duplicate classdef '${s.name}'`, s.span);
-    }
-    out.set(s.name, registerClassDef(s));
-  }
-  return out;
-}
-
-function registerClassDef(s: ClassDefStmt): ClassRegistration {
+/** Validate one `classdef` AST and infer its property types. Throws
+ *  `UnsupportedConstruct` for any v1-unsupported form (inheritance,
+ *  class attributes, get/set accessors, events/enumeration/arguments
+ *  blocks, operator overloads, etc.). The `file` argument is stored
+ *  on the registration so cross-file specialization keys can salt by
+ *  it. */
+export function registerClassDef(
+  s: ClassDefStmt,
+  file: string
+): ClassRegistration {
   if (s.classAttributes.length > 0) {
     throw new UnsupportedConstruct(
       `classdef '${s.name}' has class attributes; not supported in v1`,
@@ -88,9 +104,12 @@ function registerClassDef(s: ClassDefStmt): ClassRegistration {
     );
   }
 
-  const props: { name: string; ty: Type }[] = [];
-  const defaults = new Map<string, Expr>();
+  const propertyNames: string[] = [];
+  const propsWithDefault: { name: string; ty: Type }[] = [];
+  const defaults = new Map<string, { expr: Expr; ty: Type }>();
+  const pendingProperties = new Set<string>();
   const methods = new Map<string, FuncStmt>();
+  const staticMethods = new Map<string, FuncStmt>();
   let constructor: FuncStmt | null = null;
 
   for (const m of s.members) {
@@ -105,33 +124,50 @@ function registerClassDef(s: ClassDefStmt): ClassRegistration {
         for (let i = 0; i < m.names.length; i++) {
           const name = m.names[i];
           const def = m.defaultValues[i];
-          if (def === null) {
+          if (
+            propertyNames.includes(name) ||
+            pendingProperties.has(name) ||
+            propsWithDefault.some(p => p.name === name)
+          ) {
             throw new UnsupportedConstruct(
-              `property '${name}' on class '${s.name}' must have a ` +
-                `default-value expression (v1 derives the property type from it)`,
+              `duplicate property '${name}' on class '${s.name}'`,
               s.span
             );
+          }
+          propertyNames.push(name);
+          if (def === null) {
+            // No default. Type will be inferred at first constructor
+            // specialization from the first `obj.<name> = <rhs>` write
+            // in the constructor body.
+            pendingProperties.add(name);
+            continue;
           }
           // Carry the default's precise type (sign, exact, shape) on
           // the property. The C typedef hash uses `cFieldTypeStr` so
           // precision differences across writes don't shard typedefs,
           // but downstream reads / spec keying benefit from precision.
           const ty = inferDefaultType(def, name);
-          if (props.some(p => p.name === name)) {
-            throw new UnsupportedConstruct(
-              `duplicate property '${name}' on class '${s.name}'`,
-              s.span
-            );
-          }
-          props.push({ name, ty });
-          defaults.set(name, def);
+          propsWithDefault.push({ name, ty });
+          defaults.set(name, { expr: def, ty });
         }
         break;
       }
       case "Methods": {
-        if (m.attributes.length > 0) {
+        // The only `methods (...)` block attribute supported in v1 is
+        // `Static = true` (or bare `Static`). Anything else (Access,
+        // Sealed, Hidden, ...) is rejected so unsupported semantics
+        // don't silently slip through.
+        let isStatic = false;
+        for (const attr of m.attributes) {
+          if (
+            attr.name.toLowerCase() === "static" &&
+            (attr.value === null || attr.value === "true")
+          ) {
+            isStatic = true;
+            continue;
+          }
           throw new UnsupportedConstruct(
-            `'methods' block attributes are not supported in v1`,
+            `'methods' block attribute '${attr.name}' is not supported in v1`,
             s.span
           );
         }
@@ -160,6 +196,27 @@ function registerClassDef(s: ClassDefStmt): ClassRegistration {
               stmt.span
             );
           }
+          if (isStatic) {
+            // Static methods can't double as the constructor.
+            if (stmt.name === s.name) {
+              throw new UnsupportedConstruct(
+                `constructor '${stmt.name}' cannot be declared in a 'methods (Static)' block`,
+                stmt.span
+              );
+            }
+            if (
+              staticMethods.has(stmt.name) ||
+              methods.has(stmt.name) ||
+              stmt.name === s.name
+            ) {
+              throw new UnsupportedConstruct(
+                `duplicate method '${stmt.name}' on class '${s.name}'`,
+                stmt.span
+              );
+            }
+            staticMethods.set(stmt.name, stmt);
+            continue;
+          }
           if (stmt.name === s.name) {
             if (constructor !== null) {
               throw new UnsupportedConstruct(
@@ -175,7 +232,7 @@ function registerClassDef(s: ClassDefStmt): ClassRegistration {
             }
             constructor = stmt;
           } else {
-            if (methods.has(stmt.name)) {
+            if (methods.has(stmt.name) || staticMethods.has(stmt.name)) {
               throw new UnsupportedConstruct(
                 `duplicate method '${stmt.name}' on class '${s.name}'`,
                 stmt.span
@@ -196,12 +253,33 @@ function registerClassDef(s: ClassDefStmt): ClassRegistration {
     }
   }
 
+  // When every property has a default, build the ClassType eagerly so
+  // downstream code can read `reg.ty` without a resolve step. When at
+  // least one property lacks a default, leave `ty` null — the lowerer
+  // fills it in at first constructor specialization.
+  const ty =
+    pendingProperties.size === 0 ? classType(s.name, propsWithDefault) : null;
+  // A class with pending properties must declare a constructor — that's
+  // where the inference reads from. Without one, the class is
+  // un-constructible (no zero-arg path can produce a typed instance).
+  if (pendingProperties.size > 0 && constructor === null) {
+    throw new UnsupportedConstruct(
+      `class '${s.name}' has property without a default (${[...pendingProperties].join(", ")}) ` +
+        `but declares no constructor; either add defaults or define a constructor that ` +
+        `assigns each property at the top level of its body`,
+      s.span
+    );
+  }
   return {
     className: s.name,
-    ty: classType(s.name, props),
+    file,
+    propertyNames,
     defaults,
+    pendingProperties,
+    ty,
     constructor,
     methods,
+    staticMethods,
   };
 }
 

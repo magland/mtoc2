@@ -18,10 +18,13 @@ import {
   resetPrintTypeSink,
 } from "../src/lowering/lower.js";
 import { emitProgram } from "../src/codegen/emit.js";
+import { Workspace } from "../src/workspace/workspace.js";
 
 function translate(source: string, fileName = "test.m"): string {
   const ast = parseMFile(source, fileName);
-  const lowerer = new Lowerer(source);
+  const workspace = new Workspace(fileName);
+  workspace.addFile({ name: fileName, source, ast });
+  const lowerer = new Lowerer(workspace);
   const prog = lowerer.lowerProgram(ast);
   return emitProgram(prog);
 }

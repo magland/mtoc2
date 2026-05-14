@@ -21,13 +21,22 @@ location mtoc2 imports its parser from.
 
 ### Adding a script-level test
 
-Drop a new `.m` file under `test_scripts/<category>/`. The walker
-auto-discovers. There's no need to wire it into vitest or anywhere
-else; the file's existence is the test.
+The walker uses a two-tier rule so flat single-file tests and
+multifile workspace tests can coexist without polluting each other:
+
+- `test_scripts/*.m` — each top-level `.m` file is a test entry. Drop
+  a new file and it's auto-discovered.
+- `test_scripts/<subdir>/main.m` — each subdirectory is a multifile
+  test group. `main.m` is the entry; every other `.m` in the
+  subdirectory is a workspace sibling (auto-picked up by the CLI's
+  `scanSiblings`). The walker does NOT treat sibling files in a
+  subdir as standalone entries.
 
 Each script should:
 
-- Be self-contained (no `require`/`import`-style behavior).
+- Be self-contained within its tier (a flat-tier test must not need
+  siblings; a multifile-tier test gets its sibling files from its own
+  subdirectory and nowhere else).
 - Use only `disp` for output, so stdout is the comparison surface.
 - Exercise one thing crisply. If a script catches three bugs at once,
   split it.

@@ -3,18 +3,22 @@
  * the CLI (`src/cli.ts`) and the web IDE
  * (`src/components/IDEWorkspace.tsx`).
  *
- * MVP scope is single-file: the named active file is parsed, lowered,
- * and emitted. Other files in `files` are recorded but their function
- * defs are not yet visible to the active file (mtoc1's workspace
- * resolution will come back online in a later milestone).
+ * Multi-file projects: every file in `files` is parsed and registered
+ * with the `Workspace`. The active file is the entry — its top-level
+ * script body is lowered. Sibling files become workspace functions
+ * (callable by their bare filename) and class definitions; numbl's
+ * `resolveFunction` (vendored via sibling-relative import) decides
+ * which file each call site resolves to, honoring MATLAB's full
+ * precedence ladder.
  *
  * Errors are normalized into a single shape and returned (never thrown);
  * callers can render them inline without a try/catch dance.
  */
-import { parseMFile, SyntaxError as ParseSyntaxError } from "./parser/index.js";
+import { SyntaxError as ParseSyntaxError } from "./parser/index.js";
 import { UnsupportedConstruct, TypeError } from "./lowering/errors.js";
 import { Lowerer } from "./lowering/lower.js";
 import { emitProgram } from "./codegen/emit.js";
+import { Workspace, parseFiles } from "./workspace/workspace.js";
 
 export interface SourceFile {
   /** File name used in error attribution. */
@@ -62,19 +66,38 @@ export function translateProject(
     };
   }
 
-  let ast;
+  // Parse every file in the project up-front. Workspace files
+  // (siblings of the active file) need to be parsed so numbl's
+  // resolver can index their subfunctions / classdefs even if the
+  // active file never calls into them. Parser errors are reported
+  // for whichever file failed.
+  let workspaceFiles;
   try {
-    ast = parseMFile(active.source, active.name);
+    workspaceFiles = parseFiles(files);
   } catch (e) {
     if (e instanceof ParseSyntaxError) {
       return { error: normalizeSyntaxError(e, files) };
     }
     throw e;
   }
+  const activeWsFile = workspaceFiles.find(f => f.name === activeName);
+  if (!activeWsFile?.ast) {
+    return {
+      error: {
+        kind: "UnsupportedConstruct",
+        message: `active file '${activeName}' produced no AST`,
+      },
+    };
+  }
+
+  const workspace = new Workspace(activeName, opts.searchPaths ?? []);
+  for (const f of workspaceFiles) {
+    workspace.addFile(f);
+  }
 
   try {
-    const lowerer = new Lowerer(active.source);
-    const prog = lowerer.lowerProgram(ast);
+    const lowerer = new Lowerer(workspace);
+    const prog = lowerer.lowerProgram(activeWsFile.ast);
     return { c: emitProgram(prog, { includeRuntime }) };
   } catch (e) {
     if (e instanceof UnsupportedConstruct || e instanceof TypeError) {

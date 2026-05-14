@@ -3,21 +3,26 @@
  * mtoc2 CLI entry. Two subcommands:
  *   run <script.m>          translate, compile, execute; forward stdout
  *   translate <script.m> [-o out.c]  emit C only
+ *
+ * The script's directory is the workspace search path: every sibling
+ * `.m` file is registered as a workspace file, so cross-file calls
+ * (e.g. `helper(x)` referring to `helper.m`) resolve through numbl's
+ * vendored resolver. Mirrors numbl's CLI exactly so the cross-runner
+ * sees the same workspace shape from both runners.
  */
 
-import { readFileSync, writeFileSync, mkdtempSync } from "node:fs";
+import {
+  readFileSync,
+  readdirSync,
+  statSync,
+  writeFileSync,
+  mkdtempSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
-import { join, basename } from "node:path";
+import { dirname, join, resolve, basename } from "node:path";
 import { spawnSync } from "node:child_process";
 
-import { parseMFile } from "./parser/index.js";
-import { Lowerer } from "./lowering/lower.js";
-import { emitProgram } from "./codegen/emit.js";
-import {
-  UnsupportedConstruct,
-  TypeError,
-  formatError,
-} from "./lowering/errors.js";
+import { translateProject, type SourceFile } from "./translate.js";
 
 function usage(): never {
   console.error("usage: mtoc2 run <script.m>");
@@ -25,20 +30,50 @@ function usage(): never {
   process.exit(2);
 }
 
-function translate(scriptPath: string): string {
-  const source = readFileSync(scriptPath, "utf8");
-  const ast = parseMFile(source, scriptPath);
-  const lowerer = new Lowerer(source);
+/** Scan `dir` for sibling `.m` files and read each one. Skips
+ *  subdirectories — mtoc2 v1 doesn't support `+pkg/`, `@Class/`, or
+ *  `private/` layouts; an `.m` inside one would surface as
+ *  unsupported at the resolver anyway. */
+function scanSiblings(dir: string, excludeAbs: string): SourceFile[] {
+  let entries: string[];
   try {
-    const prog = lowerer.lowerProgram(ast);
-    return emitProgram(prog);
-  } catch (e) {
-    if (e instanceof UnsupportedConstruct || e instanceof TypeError) {
-      console.error(formatError(e, source));
-      process.exit(1);
-    }
-    throw e;
+    entries = readdirSync(dir);
+  } catch {
+    return [];
   }
+  const out: SourceFile[] = [];
+  for (const entry of entries) {
+    if (!entry.endsWith(".m")) continue;
+    const full = join(dir, entry);
+    if (resolve(full) === excludeAbs) continue;
+    try {
+      if (!statSync(full).isFile()) continue;
+    } catch {
+      continue;
+    }
+    out.push({ name: full, source: readFileSync(full, "utf8") });
+  }
+  return out;
+}
+
+function translate(scriptPath: string): string {
+  const absScript = resolve(scriptPath);
+  const source = readFileSync(absScript, "utf8");
+  const dir = dirname(absScript);
+  const files: SourceFile[] = [
+    { name: absScript, source },
+    ...scanSiblings(dir, absScript),
+  ];
+  const result = translateProject(files, absScript, { searchPaths: [dir] });
+  if (result.error) {
+    const e = result.error;
+    const file = e.fileName ?? absScript;
+    const where =
+      e.startOffset !== undefined ? ` (offset ${e.startOffset})` : "";
+    console.error(`${file}: ${e.kind}: ${e.message}${where}`);
+    process.exit(1);
+  }
+  return result.c ?? "";
 }
 
 function runScript(scriptPath: string): void {

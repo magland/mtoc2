@@ -55,8 +55,14 @@ The Type lattice is written from scratch for mtoc2 — see
 - `StructType { fields }` for `struct(...)`-produced values; field
   list is canonical (sorted by name). Owned.
 - `ClassType { className, properties }` for class instances; property
-  list is canonical and pre-computed once from the `classdef`'s
-  declared defaults. Owned.
+  list is canonical. Properties with an explicit default get their
+  type at registration; properties without a default get their type
+  inferred at first constructor specialization from the first
+  top-level `obj.<prop> = <rhs>` write in the constructor body (the
+  RHS is lowered in a temp env binding constructor params to the
+  call's `argTypes`). The C typedef hash uses `cFieldTypeStr`, so
+  precision differences (sign / exact / tensor shape) don't shard
+  the typedef. Owned.
 - `canonicalizeType` + FNV-1a hash drive function specialization keys.
   Crucially, the canonical form **includes `exact`**, so each distinct
   exact-value input produces its own specialization.
@@ -212,42 +218,67 @@ variable refreshes via `withPathTypeUpdated` so subsequent reads of
 the field see the rhs's full internal type; the C typedef is
 unaffected because its hash depends only on `cFieldTypeStr`.
 
-**Classes.** `Stmt.ClassDef` is collected up front by
-`collectClassDefs` (`src/lowering/classDefs.ts`) into a registry
-keyed by class name. Each registration carries:
+**Classes.** Each classdef AST (workspace or local) goes through
+`registerClassDef` (`src/lowering/classDefs.ts`) at Workspace
+finalize time. The registration carries:
 
-- a `ClassType` whose properties come from the `properties` block
-  defaults (each typed by a shallow inference accepting numeric
-  literals, signed numerics, and tensor literals — precise types
-  carry through to the property type, since `cFieldTypeStr`-based
-  typedef hashing makes the precision free at the C level);
-- the property-default expressions, used to synthesize the
-  initial receiver at every constructor call site;
+- the declared property names (source order);
+- for properties WITH a default-value expression, the lowered
+  default's precise type (typed by a shallow inference accepting
+  numeric literals, signed numerics, and tensor literals — precise
+  types carry through, since `cFieldTypeStr`-based typedef hashing
+  makes the precision free at the C level);
+- for properties WITHOUT a default, a slot in `pendingProperties`;
+  their C-level type is inferred at first constructor specialization
+  (see below);
 - the constructor (a method named after the class) and the other
-  methods, each kept as the original `FuncStmt` for specialization
-  on demand.
+  methods (instance + static), each kept as the original `FuncStmt`
+  for specialization on demand.
+
+If `pendingProperties` is empty, `ClassType` is built eagerly. If
+non-empty, `reg.ty` is `null` until the first `lowerClassConstructorCall`
+fires, at which point `Lowerer.resolveClassType` runs the inference:
+for each pending property, scan the constructor body for the first
+top-level `<receiver>.<propName> = <rhs>` write, lower the RHS in a
+temp env (params bound to the call's argTypes), and use the RHS's
+static type as the property's type. The result is cached on
+`reg.ty`; subsequent specializations validate against it via the
+normal `MemberStore` storage-equivalence check, so a second call
+producing an incompatible C-level type surfaces with a clean error
+at the call site.
 
 Constructor specialization pre-seeds the receiver `obj` in the
 spec's env via a `preSeedOutput` parameter to
-`specializeUserFunction`. A synthetic Assign of the default-valued
-`StructLit` is prepended to the lowered body so `obj.x = ...`
-writes against an already-initialized slot from the first user
-statement. Method dispatch (`obj.method(args)`) routes through
+`specializeUserFunction`. A synthetic Assign of the
+`StructLit`-shaped initial receiver is prepended to the lowered body
+so `obj.x = ...` writes against an already-initialized slot from the
+first user statement. The initial-receiver `StructLit` uses the
+declared default expression for default-having properties; for
+pending properties, `synthesizeZeroValue` builds a zero of the
+inferred C-level type (scalar `0.0` or empty `mtoc2_tensor_t` —
+nested struct/class/handle properties without defaults are rejected
+with `UnsupportedConstruct`).
+
+Method dispatch (`obj.method(args)`) routes through
 `specializeUserFunction` with a custom source-name half
 (`<className>__<methodName>`) for the spec key, so two methods of
 the same source name on different classes get distinct mangled C
 names.
 
-v1 caveats — all surface at registration time with span-carrying
-errors:
+v1 caveats — all surface at registration time (or first-spec time
+for inferred properties) with span-carrying errors:
 
 - No inheritance, no handle classes, no class attributes.
 - No `Events` / `Enumeration` / `Arguments` blocks.
 - No `get.` / `set.` accessor methods.
-- Properties must declare a default-value expression.
+- A pending property must have a top-level direct write at the
+  start of the constructor body (a conditional / loop / nested-block
+  write doesn't count for inference; add a default in that case).
+- A pending property inferred to a non-numeric type (struct, class,
+  handle) is rejected — supply an explicit default.
+- A class with pending properties must declare a constructor (no
+  zero-arg / no-constructor path can produce a typed instance).
 - Methods must declare 0 or 1 outputs.
-- `method(obj, ...)` function-call dispatch form is not supported
-  (use `obj.method(...)`).
 - `disp(classInstance)` is rejected.
 
 **Codegen.** `src/codegen/emitNamedTypedef.ts` renders one block of
@@ -349,11 +380,19 @@ parent's iter loop instead.)
 
 ### Lowerer (`lower.ts`)
 
-The `Lowerer` class owns three pieces of mutable state:
+The `Lowerer` class owns mutable state:
 
 - `env: Map<name, { cName, ty }>` — current scope's variable bindings.
-- `functionDefs: Map<name, FuncStmt>` — pre-scanned from top-level.
 - `specializations: Map<specKey, IRFunc>` — cached completed specs.
+- `currentFile: string` — file the lowerer is currently inside. Pushed
+  and popped by `specializeUserFunction` so a call from inside a
+  workspace function's body reports the right file in its `CallSite`
+  to the resolver.
+
+Function-name resolution is delegated to the `Workspace` (see below).
+The lowerer never carries its own per-file `functionDefs` map — every
+call site is resolved through `workspace.resolve(name, argTypes,
+callSite, span)`.
 
 Two rules drive exact propagation:
 
@@ -378,16 +417,73 @@ emit runtime IR regardless of whether `exact` is set. See
 
 ### Function specialization
 
-A user function call `sq(5)` triggers `specializeUserFunction(decl, argTypes)`:
+A user function call `sq(5)` triggers `specializeUserFunction(decl,
+argTypes, specSource?, definingFile?, preSeedOutput?)`:
 
-1. Compute the spec key (`<funcName>__<8-hex of canonicalized arg types>`).
+1. Compute the spec key
+   (`<sanitize(specSource ?? decl.name)>__<8-hex of FNV-1a(file | arg-type canon)>`).
+   The file is the function's `definingFile` (the workspace resolver's
+   verdict file, or the class's file for methods, or the file the
+   `@(...)` was written in for anonymous-function synths). Salting by
+   file is what lets two files define a subfunction with the same name
+   and still get distinct C names.
 2. If cached, return the cached `IRFunc`.
-3. Otherwise: snapshot outer env, install a fresh env with params bound
-   to their arg types, recursively lower the function body, capture the
-   output types from the final env, restore outer env.
+3. Otherwise: snapshot outer env / declared / tempCounter /
+   currentFile; install a fresh env with params bound to their arg
+   types; set `currentFile = definingFile`; recursively lower the
+   function body; capture output types from the final env; restore.
 
 Recursion isn't supported yet — the placeholder pattern at the top of
 `specializeUserFunction` lets us produce a clean error if it happens.
+
+### Workspace and cross-file resolution
+
+The `Workspace` (in [src/workspace/workspace.ts](../src/workspace/workspace.ts))
+is the lowerer's portal to numbl's resolver. At construction it
+instantiates a numbl `LoweringContext` (vendored via sibling-relative
+import); `addFile()` mirrors each pre-parsed `.m` AST into numbl's
+`fileASTCache`; `finalize()` registers the main file's top-level
+functions and classdefs as locals, calls
+`ctx.registerWorkspaceFiles(...)` on the siblings, builds the
+`FunctionIndex`, and walks every classdef (workspace + local) to
+build mtoc2's own `Map<className, ClassRegistration>`.
+
+`workspace.resolve(name, argTypes, callSite, span)` delegates to
+numbl's `resolveFunction` (the single source of truth for MATLAB
+precedence rules) and narrows the verdict to mtoc2's supported
+kinds:
+
+- `userFunction { ast, file }` — local-to-main, workspace primary, or
+  workspace subfunction. The lowerer specializes `ast` with `file`
+  passed as `definingFile`.
+- `classMethod { className, methodName, stripInstance }` — covers
+  `obj.method(args)`, `method(obj, args)`, and the
+  `obj.staticMethod(args)` flavor where the resolver flips
+  `stripInstance=true`. Note that `ClassName.staticMethod(args)` (no
+  receiver in args) lands here too, but with `stripInstance=false` —
+  the lowerer disambiguates by looking the method up in
+  `reg.staticMethods` vs. `reg.methods`.
+- `classConstructor { className }` — `Foo(args)`. In practice the
+  lowerer short-circuits constructor calls before the resolver fires
+  (it checks `workspace.isClass(name)` against the syntactic call
+  name), so this branch is for completeness.
+- `builtin { name }` — numbl agrees it's a builtin; mtoc2 still
+  validates the name against its own builtin registry.
+
+Everything else (`privateFunction`, `jsUserFunction`, class-file
+subfunctions) raises `UnsupportedConstruct` with the call-site span.
+
+The `MType → ItemType` adapter ([`mtypeToItemType`](../src/workspace/workspace.ts))
+is intentionally lossy: only `ClassType` maps to a distinguishing
+`ClassInstance` shape; every other mtoc2 type collapses to
+`Unknown`. That's all numbl's resolver needs to apply class-method
+precedence.
+
+The CLI scans `dirname(absolute-entry)` for sibling `.m` files. The
+web IDE passes flat file names — no scan needed since the workspace
+already contains every project file. Multifile test groups under
+`test_scripts/<subdir>/` follow the same flow: `main.m` is the
+entry, every other `.m` in the directory is a workspace sibling.
 
 Functions may declare 0 or 1 outputs. A 0-output call's IR type is
 `Void`; the lowerer accepts it only as the direct expression of an

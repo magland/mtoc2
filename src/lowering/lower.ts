@@ -1,8 +1,15 @@
 /**
  * mtoc2 lowerer. Walks the numbl AST, threads a type env (with exact-
  * value tracking), and produces typed IR. The same pass:
+ *   - resolves every function-call site through the shared
+ *     `Workspace` (which delegates to numbl's `resolveFunction`),
+ *     so MATLAB precedence rules (local > workspace > builtin, plus
+ *     class-method dispatch on `obj.method(args)` and
+ *     `ClassName.method(args)`) are inherited from numbl wholesale;
  *   - allocates per-call function specializations (mangled by the
- *     FNV-1a hash of the canonicalized arg-type tuple);
+ *     FNV-1a hash of the canonicalized arg-type tuple, salted by
+ *     the defining file so two files defining a subfunction with
+ *     the same name get distinct C names);
  *   - merges types across control-flow joins;
  *   - widens variables assigned inside loop bodies (strips exact)
  *     before lowering the body, so the one-pass lowering doesn't
@@ -18,8 +25,11 @@
  *
  * MVP scope: scalar real double + arithmetic + comparisons + disp +
  * if/while/for + user functions (0 or 1 outputs; 0-output calls return
- * `Void` and are only valid as the expression of an `ExprStmt`).
- * Anything outside that throws `UnsupportedConstruct` with a span.
+ * `Void` and are only valid as the expression of an `ExprStmt`) +
+ * classes (instance methods, static methods, constructors), with
+ * resolution against sibling `.m` files in the workspace via numbl's
+ * vendored resolver. Anything outside that throws
+ * `UnsupportedConstruct` with a span.
  */
 
 import type { AbstractSyntaxTree, Expr, Stmt, Span } from "../parser/index.js";
@@ -30,8 +40,10 @@ import {
   type NumericType,
   type HandleType,
   type HandleCapture,
+  type ClassType,
   scalarDouble,
   tensorDouble,
+  classType,
   signFromNumber,
   isScalarRealNumeric,
   isMultiElement,
@@ -45,13 +57,16 @@ import {
   structType,
   typeToString,
   VOID,
+  hashType,
   unify,
   storageEquivalent,
   stripExactFromEnv,
-  specializationKey,
+  canonicalizeType,
   classMethodSpecSource,
 } from "./types.js";
-import { collectClassDefs, type ClassRegistration } from "./classDefs.js";
+import type { ClassRegistration } from "./classDefs.js";
+import type { Workspace } from "../workspace/workspace.js";
+import type { CallSite } from "../../../numbl/src/numbl-core/runtime/runtimeHelpers.js";
 
 /** Hook for the `%!numbl:printtype` directive's compile-time output.
  *  Defaults to `console.error` (so emitted lines go to stderr and
@@ -80,8 +95,6 @@ type FuncStmt = Extract<Stmt, { type: "Function" }>;
 
 export class Lowerer {
   private env: Map<string, EnvEntry> = new Map();
-  private functionDefs: Map<string, FuncStmt> = new Map();
-  private classDefs: Map<string, ClassRegistration> = new Map();
   private specializations: Map<string, IRFunc> = new Map();
   /** Per-scope set: names introduced (first-assignment) in current
    *  function body. Used to decide `declare: true` on Assign. Reset
@@ -94,42 +107,38 @@ export class Lowerer {
    *  (`anon_0`, `anon_1`, ...). Shared across the whole program so two
    *  textually distinct `@(...)` expressions get distinct identities. */
   private anonCounter: number = 0;
+  /** Source file the lowerer is currently inside. Defaults to the
+   *  workspace's main file at construction; pushed/popped by
+   *  `specializeUserFunction` so a call from inside `helper.m`'s
+   *  subfunction reports the right file in its `CallSite`. */
+  private currentFile: string;
 
-  /** Source text, retained for offset→line/col conversion when
-   *  rendering compile-time diagnostics such as the
-   *  `%!numbl:printtype` directive's output. Empty string is allowed
-   *  for callers that don't need positional output. */
-  constructor(private source: string = "") {}
+  constructor(private workspace: Workspace) {
+    this.currentFile = workspace.mainFile;
+  }
+
+  /** Built `CallSite` for the vendored numbl resolver. New
+   *  resolver-relevant fields added later (`className`, `methodName`,
+   *  ...) only need to be threaded here. */
+  private callSite(): CallSite {
+    return { file: this.currentFile };
+  }
+
+  /** Look up a registered class (workspace or local) by name. */
+  private classReg(name: string): ClassRegistration | undefined {
+    return this.workspace.classes.get(name);
+  }
 
   lowerProgram(ast: AbstractSyntaxTree): IRProgram {
-    // Pre-scan: collect top-level function definitions.
-    for (const s of ast.body) {
-      if (s.type === "Function") {
-        if (this.functionDefs.has(s.name)) {
-          throw new UnsupportedConstruct(
-            `duplicate function '${s.name}'`,
-            s.span
-          );
-        }
-        this.functionDefs.set(s.name, s);
-      }
-    }
-    // Pre-scan: validate every classdef and build the registry.
-    // Property types are inferred from declared defaults here so the
-    // class instance typedef is known to the lowerer before any
-    // constructor / method specialization runs.
-    this.classDefs = collectClassDefs(ast.body);
-    // Reject classes that shadow a top-level function name (call-site
-    // dispatch routes by name, so disambiguation would be ambiguous).
-    for (const cName of this.classDefs.keys()) {
-      if (this.functionDefs.has(cName)) {
-        throw new UnsupportedConstruct(
-          `class '${cName}' shadows a top-level function with the same name`,
-          this.classDefs.get(cName)!.constructor?.span ?? ast.body[0].span
-        );
-      }
-    }
-    // Lower top-level statements (functions filter to null).
+    // Build numbl's function index + mtoc2's class registry. The
+    // Workspace has already had every file added; `finalize()` is
+    // idempotent so a double-call from a caller that explicitly
+    // finalized first is harmless.
+    this.workspace.finalize();
+    // Lower top-level statements (Function / ClassDef stmts return
+    // null and are filtered out). The active file's top-level body
+    // is the script entry; sibling-file bodies (workspace functions)
+    // are lowered lazily by `specializeUserFunction` from call sites.
     const topLevelStmts = this.lowerStmts(ast.body);
     return { topLevelStmts, functions: this.specializations };
   }
@@ -244,7 +253,8 @@ export class Lowerer {
     }
     if (s.directive === "printtype") {
       const entries = this.snapshotTypeEntries(s.args, s.span, "printtype");
-      const { line, column } = offsetToLineCol(this.source, s.span.start);
+      const fileSource = this.workspace.sourceOf(s.span.file) ?? "";
+      const { line, column } = offsetToLineCol(fileSource, s.span.start);
       for (const e of entries) {
         printTypeSink(
           `${s.span.file}:${line}:${column}: type ${e.name} :: ${typeToString(e.ty)}`
@@ -855,12 +865,29 @@ export class Lowerer {
     };
   }
 
-  /** `obj.method(args)` — class instance method dispatch. The base
-   *  must be a class instance value; `method` must exist on the
-   *  class. The receiver is passed as the first arg of the
-   *  specialized method's mangled name. v1 only supports methods
-   *  with 0 or 1 outputs. */
+  /** Class method dispatch. Covers three call shapes:
+   *    - `obj.method(args)` — instance method.
+   *    - `obj.staticMethod(args)` — instance-style call to a static
+   *      method; numbl's resolver flips `stripInstance=true` so the
+   *      receiver is NOT passed at the C level.
+   *    - `ClassName.method(args)` — static method called by class
+   *      name; we detect this by inspecting the AST base before
+   *      lowering, set `targetClassName` on the call site, and let
+   *      the resolver pick the right method (also stripInstance).
+   *
+   *  v1 only supports methods with 0 or 1 outputs. */
   private lowerMethodCall(e: Extract<Expr, { type: "MethodCall" }>): IRExpr {
+    // Static dispatch by class name: `ClassName.method(args)`.
+    if (
+      e.base.type === "Ident" &&
+      !this.env.has(e.base.name) &&
+      this.workspace.isClass(e.base.name)
+    ) {
+      return this.lowerStaticMethodCall(e.base.name, e, e.span);
+    }
+
+    // Instance dispatch: the base lowers to a value and must be a
+    // class instance.
     const base = this.lowerExpr(e.base);
     this.requireValueType(base, `method call '.${e.name}'`);
     if (!isClass(base.ty)) {
@@ -870,32 +897,50 @@ export class Lowerer {
         e.span
       );
     }
-    const reg = this.classDefs.get(base.ty.className);
-    if (reg === undefined) {
-      // Shouldn't be reachable — the ClassType comes from our own
-      // registry.
-      throw new UnsupportedConstruct(
-        `internal: class '${base.ty.className}' missing from registry`,
-        e.span
-      );
+    const args = e.args.map(a => this.lowerExpr(a));
+    for (const a of args) {
+      this.requireValueType(a, `argument to method '${e.name}'`);
     }
-    const method = reg.methods.get(e.name);
-    if (method === undefined) {
+    // Build the type tuple the resolver inspects: receiver + user
+    // args. The resolver decides whether `e.name` is an instance or
+    // static method of `base.ty.className` and toggles
+    // `stripInstance` accordingly.
+    const argTypesForResolve: Type[] = [base.ty, ...args.map(a => a.ty)];
+    const target = this.workspace.resolve(
+      e.name,
+      argTypesForResolve,
+      { ...this.callSite(), targetClassName: base.ty.className },
+      e.span
+    );
+    if (target?.kind !== "classMethod") {
       throw new TypeError(
         `class '${base.ty.className}' has no method '${e.name}'`,
         e.span
       );
     }
-    const args = e.args.map(a => this.lowerExpr(a));
-    for (const a of args) {
-      this.requireValueType(a, `argument to method '${e.name}'`);
+    const reg = this.classReg(target.className);
+    if (reg === undefined) {
+      throw new UnsupportedConstruct(
+        `internal: class '${target.className}' missing from workspace registry`,
+        e.span
+      );
     }
-    const allArgs: IRExpr[] = [base, ...args];
+    const method = target.stripInstance
+      ? reg.staticMethods.get(target.methodName)
+      : reg.methods.get(target.methodName);
+    if (method === undefined) {
+      throw new TypeError(
+        `class '${target.className}' has no ${target.stripInstance ? "static " : ""}method '${target.methodName}'`,
+        e.span
+      );
+    }
+    const allArgs: IRExpr[] = target.stripInstance ? args : [base, ...args];
     const argTypes = allArgs.map(a => a.ty);
     const spec = this.specializeUserFunction(
       method,
       argTypes,
-      classMethodSpecSource(base.ty.className, e.name)
+      classMethodSpecSource(target.className, target.methodName),
+      reg.file
     );
     const ty: Type =
       method.outputs.length === 0
@@ -904,10 +949,82 @@ export class Lowerer {
     return {
       kind: "Call",
       cName: spec.cName,
-      name: `${base.ty.className}.${e.name}`,
+      name: `${target.className}.${target.methodName}`,
       args: allArgs,
       ty,
       span: e.span,
+    };
+  }
+
+  /** `ClassName.staticMethod(args)` — static method called via class
+   *  name. The receiver is not present; arg types feed the resolver
+   *  directly. */
+  private lowerStaticMethodCall(
+    className: string,
+    e: Extract<Expr, { type: "MethodCall" }>,
+    span: Span
+  ): IRExpr {
+    const args = e.args.map(a => this.lowerExpr(a));
+    for (const a of args) {
+      this.requireValueType(a, `argument to static method '${e.name}'`);
+    }
+    const argTypes = args.map(a => a.ty);
+    const target = this.workspace.resolve(
+      e.name,
+      argTypes,
+      { ...this.callSite(), targetClassName: className },
+      span
+    );
+    if (target?.kind !== "classMethod") {
+      throw new TypeError(
+        `class '${className}' has no static method '${e.name}'`,
+        span
+      );
+    }
+    const reg = this.classReg(target.className);
+    if (reg === undefined) {
+      throw new UnsupportedConstruct(
+        `internal: class '${target.className}' missing from workspace registry`,
+        span
+      );
+    }
+    // Numbl's `stripInstance` only fires on the `targetClassName`
+    // branch when args[0] is a ClassInstance (i.e. the
+    // `obj.staticMethod(...)` syntax). For the `ClassName.method(...)`
+    // syntax we never prepend a receiver, so `stripInstance` is
+    // always false — we instead look up `staticMethods` directly to
+    // disambiguate static vs. instance.
+    const method = reg.staticMethods.get(target.methodName);
+    if (method === undefined) {
+      if (reg.methods.has(target.methodName)) {
+        throw new TypeError(
+          `'${target.className}.${target.methodName}' is an instance method; ` +
+            `call it on an instance (e.g. 'obj.${target.methodName}(...)')`,
+          span
+        );
+      }
+      throw new TypeError(
+        `class '${target.className}' has no static method '${target.methodName}'`,
+        span
+      );
+    }
+    const spec = this.specializeUserFunction(
+      method,
+      argTypes,
+      classMethodSpecSource(target.className, target.methodName),
+      reg.file
+    );
+    const ty: Type =
+      method.outputs.length === 0
+        ? VOID
+        : (spec.outputTypes[0] ?? { kind: "Unknown" });
+    return {
+      kind: "Call",
+      cName: spec.cName,
+      name: `${target.className}.${target.methodName}`,
+      args,
+      ty,
+      span,
     };
   }
 
@@ -1043,16 +1160,20 @@ export class Lowerer {
     //      the (name, value, name, value, ...) arg list.
     //   1. A bound variable whose type is `HandleType` — dispatch
     //      through the handle to the underlying user function.
-    //   2. The name matches a registered class — dispatch to the
-    //      class constructor (or synthesize a default-valued
-    //      receiver when the class has no constructor).
-    //   3. A registered builtin (`disp`, `sum`, ...).
-    //   4. A top-level user function definition.
+    //   2. The name matches a registered class — route to the
+    //      constructor (or synthesize a default-valued receiver when
+    //      the class has no constructor). We could let the resolver
+    //      return `classConstructor`, but the constructor's defaults/
+    //      class type live in `workspace.classes`, so we look that up
+    //      directly. Either path produces the same call.
+    //   3. Resolver verdict (numbl's `resolveFunction`): builtin,
+    //      user function (local or cross-file), or class method
+    //      (`method(obj, ...)` syntax).
     //
     // Note: an in-scope variable of a non-handle type at a call site
     // means the user wrote `name(args)` expecting indexing/call, which
-    // mtoc2 doesn't support yet — fall through to the unknown-function
-    // error.
+    // mtoc2 doesn't support yet — emit a clearer error than "unknown
+    // function".
     if (e.name === "struct") {
       return this.lowerStructConstructor(e);
     }
@@ -1060,20 +1181,14 @@ export class Lowerer {
     if (envEntry !== undefined && isHandle(envEntry.ty)) {
       return this.dispatchHandleCall(e.name, envEntry, e.args, e.span);
     }
-    if (envEntry === undefined && this.classDefs.has(e.name)) {
+    if (envEntry === undefined && this.workspace.isClass(e.name)) {
       return this.lowerClassConstructorCall(
-        this.classDefs.get(e.name)!,
+        this.workspace.classes.get(e.name)!,
         e.args,
         e.span
       );
     }
     if (envEntry !== undefined) {
-      // The name is bound in env (so it's not a free function reference)
-      // but isn't a handle. This is either indexing of a scalar/tensor
-      // (`v(k)` — unsupported in v1) or a handle whose type unified to
-      // Unknown across a control-flow merge of differently-shaped
-      // handles (also unsupported). Either way, give a clearer error
-      // than "unknown function".
       throw new UnsupportedConstruct(
         `'${e.name}' is an in-scope variable of type ` +
           `${typeToString(envEntry.ty)}; cannot be called as a function ` +
@@ -1088,46 +1203,118 @@ export class Lowerer {
     }
     const argTypes = args.map(a => a.ty);
 
-    // Builtin path.
-    const b = getBuiltin(e.name);
-    if (b) {
-      if (args.length !== b.arity) {
-        throw new TypeError(
-          `'${e.name}' expects ${b.arity} arg(s), got ${args.length}`,
-          e.span
-        );
-      }
-      const ty = b.transfer(argTypes, e.span);
-      return {
-        kind: "Call",
-        cName: e.name, // builtins use their bare name in C (mtoc2_<name> via codegen)
-        name: e.name,
-        args,
-        ty,
-        span: e.span,
-      };
-    }
-
-    // User function path.
-    const decl = this.functionDefs.get(e.name);
-    if (!decl) {
+    const target = this.workspace.resolve(
+      e.name,
+      argTypes,
+      this.callSite(),
+      e.span
+    );
+    if (!target) {
       throw new UnsupportedConstruct(`unknown function '${e.name}'`, e.span);
     }
-    const spec = this.specializeUserFunction(decl, argTypes);
-    // Zero-output user functions return Void; the call is only valid as
-    // an ExprStmt (checked by `requireValueType` at every other use site).
-    const ty: Type =
-      decl.outputs.length === 0
-        ? VOID
-        : (spec.outputTypes[0] ?? { kind: "Unknown" });
-    return {
-      kind: "Call",
-      cName: spec.cName,
-      name: e.name,
-      args,
-      ty,
-      span: e.span,
-    };
+    switch (target.kind) {
+      case "builtin": {
+        // Numbl agreed it's a builtin; mtoc2 still requires the
+        // builtin to be registered in its own table (and to match
+        // arity).
+        const b = getBuiltin(e.name);
+        if (!b) {
+          throw new UnsupportedConstruct(
+            `builtin '${e.name}' is not supported by mtoc2`,
+            e.span
+          );
+        }
+        if (args.length !== b.arity) {
+          throw new TypeError(
+            `'${e.name}' expects ${b.arity} arg(s), got ${args.length}`,
+            e.span
+          );
+        }
+        const ty = b.transfer(argTypes, e.span);
+        return {
+          kind: "Call",
+          cName: e.name,
+          name: e.name,
+          args,
+          ty,
+          span: e.span,
+        };
+      }
+      case "userFunction": {
+        const spec = this.specializeUserFunction(
+          target.ast,
+          argTypes,
+          undefined,
+          target.file
+        );
+        const ty: Type =
+          target.ast.outputs.length === 0
+            ? VOID
+            : (spec.outputTypes[0] ?? { kind: "Unknown" });
+        return {
+          kind: "Call",
+          cName: spec.cName,
+          name: e.name,
+          args,
+          ty,
+          span: e.span,
+        };
+      }
+      case "classMethod": {
+        // `method(obj, args)` syntax — the resolver decided this
+        // name is a class method because one of the arg types is a
+        // ClassInstance. Route through the same path as the dot
+        // form.
+        const reg = this.classReg(target.className);
+        if (reg === undefined) {
+          throw new UnsupportedConstruct(
+            `internal: class '${target.className}' missing from workspace registry`,
+            e.span
+          );
+        }
+        const method = target.stripInstance
+          ? reg.staticMethods.get(target.methodName)
+          : reg.methods.get(target.methodName);
+        if (method === undefined) {
+          throw new TypeError(
+            `class '${target.className}' has no ${target.stripInstance ? "static " : ""}method '${target.methodName}'`,
+            e.span
+          );
+        }
+        const callArgs = target.stripInstance ? args.slice(1) : args;
+        const callArgTypes = callArgs.map(a => a.ty);
+        const spec = this.specializeUserFunction(
+          method,
+          callArgTypes,
+          classMethodSpecSource(target.className, target.methodName),
+          reg.file
+        );
+        const ty: Type =
+          method.outputs.length === 0
+            ? VOID
+            : (spec.outputTypes[0] ?? { kind: "Unknown" });
+        return {
+          kind: "Call",
+          cName: spec.cName,
+          name: `${target.className}.${target.methodName}`,
+          args: callArgs,
+          ty,
+          span: e.span,
+        };
+      }
+      case "classConstructor": {
+        // Shouldn't fire because we short-circuit above on
+        // `isClass(name)`, but kept for completeness.
+        const reg = this.classReg(target.className);
+        if (reg === undefined) {
+          throw new UnsupportedConstruct(
+            `internal: class '${target.className}' missing from workspace registry`,
+            e.span
+          );
+        }
+        return this.lowerClassConstructorCall(reg, e.args, e.span);
+      }
+    }
   }
 
   /** `struct('f1', v1, 'f2', v2, ...)`. Validates that args come in
@@ -1213,7 +1400,13 @@ export class Lowerer {
   /** `ClassName(args)` — class constructor call. Synthesizes a
    *  default-valued receiver (a `StructLit` whose `ty` is the
    *  class's declared `ClassType`) and routes it as the first arg of
-   *  the specialized constructor. */
+   *  the specialized constructor.
+   *
+   *  When the class has properties without explicit defaults, the
+   *  ClassType is resolved on first call: `resolveClassType()` runs
+   *  the inference (lowering each pending property's first direct
+   *  write in the constructor body, in a temp env bound to the
+   *  call's argTypes) and caches the result on the registration. */
   private lowerClassConstructorCall(
     reg: ClassRegistration,
     args: Expr[],
@@ -1221,30 +1414,35 @@ export class Lowerer {
   ): IRExpr {
     if (reg.constructor === null) {
       // No constructor declared: only a zero-arg call is valid; the
-      // value IS the default-valued receiver.
+      // value IS the default-valued receiver. (Classes with pending
+      // properties are required to declare a constructor at
+      // registration time, so reg.ty is non-null on this branch.)
       if (args.length !== 0) {
         throw new TypeError(
           `class '${reg.className}' has no constructor; cannot pass arguments`,
           span
         );
       }
-      return this.makeInitialClassReceiver(reg, span);
+      const ty = this.resolveClassType(reg, [], span);
+      return this.makeInitialClassReceiver(reg, ty, span);
     }
     const userArgs = args.map(a => this.lowerExpr(a));
     for (const a of userArgs) {
       this.requireValueType(a, `argument to constructor '${reg.className}'`);
     }
     const argTypes = userArgs.map(a => a.ty);
-    const initialReceiver = this.makeInitialClassReceiver(reg, span);
+    const classTy = this.resolveClassType(reg, argTypes, span);
+    const initialReceiver = this.makeInitialClassReceiver(reg, classTy, span);
     const outName = reg.constructor.outputs[0];
     const spec = this.specializeUserFunction(
       reg.constructor,
       argTypes,
       reg.className,
-      { name: outName, ty: reg.ty, initExpr: initialReceiver }
+      reg.file,
+      { name: outName, ty: classTy, initExpr: initialReceiver }
     );
     // Constructor must return one output (validated at registration).
-    const ty: Type = spec.outputTypes[0] ?? reg.ty;
+    const ty: Type = spec.outputTypes[0] ?? classTy;
     return {
       kind: "Call",
       cName: spec.cName,
@@ -1255,32 +1453,128 @@ export class Lowerer {
     };
   }
 
-  /** Synthesize a `StructLit` whose ty is `reg.ty` and whose field
-   *  values are the property defaults from `reg.defaults`. Each
-   *  default expression is lowered once per call site (cheap —
-   *  defaults are restricted to literals at registration). */
-  private makeInitialClassReceiver(reg: ClassRegistration, span: Span): IRExpr {
-    const fields: { name: string; value: IRExpr }[] = [];
-    for (const p of reg.ty.properties) {
-      const defExpr = reg.defaults.get(p.name);
-      if (defExpr === undefined) {
-        throw new Error(
-          `internal: class '${reg.className}' property '${p.name}' has no default`
+  /** Settle the class's `ClassType`. For a class with every property
+   *  declaring a default, `reg.ty` is already filled in at
+   *  registration and we just return it. For a class with pending
+   *  properties, we pre-scan the constructor body for direct
+   *  `obj.<prop> = <rhs>` writes (where `obj` is the constructor's
+   *  output receiver) and lower each first-write RHS in a temp env
+   *  bound to the call's `argTypes`. The first call wins — subsequent
+   *  specs validate against the cached type via the normal
+   *  `MemberStore` storage-equivalence check. */
+  private resolveClassType(
+    reg: ClassRegistration,
+    argTypes: Type[],
+    span: Span
+  ): ClassType {
+    if (reg.ty !== null) return reg.ty;
+    // `registerClassDef` enforces that pendingProperties.size > 0
+    // implies a constructor is declared. Defensive assertion.
+    if (reg.constructor === null) {
+      throw new UnsupportedConstruct(
+        `internal: class '${reg.className}' has pending properties but no constructor`,
+        span
+      );
+    }
+    const decl = reg.constructor;
+    if (argTypes.length !== decl.params.length) {
+      // Surface the arity mismatch with the constructor call site span.
+      throw new TypeError(
+        `constructor '${reg.className}' expects ${decl.params.length} arg(s), got ${argTypes.length}`,
+        span
+      );
+    }
+    const receiverName = decl.outputs[0];
+
+    // Save outer lowering state — we're going to lower the first-write
+    // RHSs in a fresh env that mirrors the constructor's entry state
+    // (params bound, no other locals).
+    const savedEnv = this.env;
+    const savedDeclared = this.declared;
+    const savedTempCounter = this.tempCounter;
+    const savedCurrentFile = this.currentFile;
+    this.env = new Map();
+    this.declared = new Set();
+    this.tempCounter = 0;
+    this.currentFile = reg.file;
+    for (let i = 0; i < decl.params.length; i++) {
+      this.env.set(decl.params[i], { cName: decl.params[i], ty: argTypes[i] });
+      this.declared.add(decl.params[i]);
+    }
+
+    const props: { name: string; ty: Type }[] = [];
+    try {
+      for (const propName of reg.propertyNames) {
+        const def = reg.defaults.get(propName);
+        if (def !== undefined) {
+          // Default-having property: use the type already inferred at
+          // registration (it's literal-derived, so it's stable).
+          props.push({ name: propName, ty: def.ty });
+          continue;
+        }
+        // Pending property: find the first top-level direct write in
+        // the constructor body and lower its RHS for its static type.
+        const rhs = findFirstPropertyWrite(decl.body, receiverName, propName);
+        if (rhs === null) {
+          throw new UnsupportedConstruct(
+            `class '${reg.className}' property '${propName}' has no default ` +
+              `and is not directly assigned at the top level of the ` +
+              `constructor body (\`${receiverName}.${propName} = <expr>;\`); ` +
+              `either add a default value or add such an assignment`,
+            decl.span
+          );
+        }
+        const inferred = this.lowerExpr(rhs);
+        this.requireValueType(
+          inferred,
+          `inferring type of '${reg.className}.${propName}'`
         );
+        props.push({ name: propName, ty: inferred.ty });
       }
-      // Lower in a child env so the default's lowering can't see the
-      // outer scope. Default expressions are restricted to literals
-      // at registration, so an empty env is sufficient.
-      const savedEnv = this.env;
-      this.env = new Map();
-      const value = this.lowerExpr(defExpr);
+    } finally {
       this.env = savedEnv;
+      this.declared = savedDeclared;
+      this.tempCounter = savedTempCounter;
+      this.currentFile = savedCurrentFile;
+    }
+
+    const ty = classType(reg.className, props);
+    reg.ty = ty;
+    return ty;
+  }
+
+  /** Synthesize a `StructLit` whose ty is `classTy` and whose field
+   *  values are the property defaults from `reg.defaults` — for any
+   *  property without a default, synthesize a zero-value matching the
+   *  inferred C-level type (the constructor body's first write
+   *  overwrites it anyway; the zero is just a typed placeholder so
+   *  the C designated initializer is well-formed and any
+   *  read-before-write reads as 0 / empty). */
+  private makeInitialClassReceiver(
+    reg: ClassRegistration,
+    classTy: ClassType,
+    span: Span
+  ): IRExpr {
+    const fields: { name: string; value: IRExpr }[] = [];
+    for (const p of classTy.properties) {
+      const def = reg.defaults.get(p.name);
+      let value: IRExpr;
+      if (def !== undefined) {
+        // Defaults are restricted to literals, so an empty env is
+        // sufficient to lower them.
+        const savedEnv = this.env;
+        this.env = new Map();
+        value = this.lowerExpr(def.expr);
+        this.env = savedEnv;
+      } else {
+        value = synthesizeZeroValue(p.ty, reg.className, p.name, span);
+      }
       fields.push({ name: p.name, value });
     }
     return {
       kind: "StructLit",
       fields,
-      ty: reg.ty,
+      ty: classTy,
       span,
     };
   }
@@ -1290,7 +1584,9 @@ export class Lowerer {
   /** `@name` — a named handle to a top-level user function. Builds the
    *  handle type, captures empty, and returns a HandleLit. Builtin
    *  targets (`@disp`, `@sin`) are rejected — mtoc2 v1 doesn't support
-   *  them. Unknown names raise `UnsupportedConstruct`. */
+   *  them. Class methods (`@SomeClass.method`) aren't reachable via
+   *  this AST (the parser emits a different shape for those). The
+   *  workspace resolver finds local + cross-file function targets. */
   private lowerFuncHandle(e: Extract<Expr, { type: "FuncHandle" }>): IRExpr {
     // Names shadowed by an in-scope variable: numbl forbids `@name` on
     // a non-function name (it's always a function reference, never a
@@ -1308,14 +1604,19 @@ export class Lowerer {
         e.span
       );
     }
-    const decl = this.functionDefs.get(e.name);
-    if (decl === undefined) {
+    // Pass `[]` argTypes — the resolver doesn't need them to decide
+    // a function vs. classMethod for a bare `@name`; if the name is
+    // a class instance method, the resolver returns its
+    // `classMethod` verdict but we reject it (handles to class
+    // methods aren't supported in v1).
+    const target = this.workspace.resolve(e.name, [], this.callSite(), e.span);
+    if (target?.kind !== "userFunction") {
       throw new UnsupportedConstruct(
         `unresolved function-handle target '@${e.name}'`,
         e.span
       );
     }
-    const ty = handleType(decl.name, decl, []);
+    const ty = handleType(target.ast.name, target.ast, []);
     return { kind: "HandleLit", captures: [], ty, span: e.span };
   }
 
@@ -1396,9 +1697,10 @@ export class Lowerer {
       argumentsBlocks: [],
       span: e.span,
     };
-    // Park the synth AST so dispatchHandleCall can reach it by name
-    // through the normal specializeUserFunction path.
-    this.functionDefs.set(synthName, synthAst);
+    // The synth AST is reachable only via `handleTy.ast` at call
+    // sites (`dispatchHandleCall` passes it straight to
+    // `specializeUserFunction`); it never needs name-based lookup,
+    // so we don't park it anywhere external.
     const ty = handleType(synthName, synthAst, captures);
     return {
       kind: "HandleLit",
@@ -1440,7 +1742,15 @@ export class Lowerer {
     }));
     const allArgs = [...userArgs, ...captureArgs];
     const argTypes = allArgs.map(a => a.ty);
-    const spec = this.specializeUserFunction(handleTy.ast, argTypes);
+    // The handle's stored AST carries its own source span, which
+    // identifies the file the function was defined in — that's the
+    // right file to salt the spec key with.
+    const spec = this.specializeUserFunction(
+      handleTy.ast,
+      argTypes,
+      undefined,
+      handleTy.ast.span.file
+    );
     const ty: Type =
       handleTy.ast.outputs.length === 0
         ? VOID
@@ -1457,9 +1767,16 @@ export class Lowerer {
 
   // ── Function specialization ───────────────────────────────────────────
 
-  /** Options for the specialization process. v1 only uses these for
-   *  class constructors, which need their (output) receiver pre-
-   *  seeded with the class defaults before the body executes. */
+  /** Specialize a user function (or method, or anonymous-function
+   *  synth) on the given arg-type tuple. The C mangling salts by the
+   *  defining file so two files defining a same-named subfunction
+   *  get distinct mangled names.
+   *
+   *  Caller is responsible for passing `definingFile` — for top-level
+   *  functions resolved through the workspace, that's the resolver's
+   *  verdict file; for class methods it's the class's file; for
+   *  anonymous-function synth ASTs it's the file where `@(...)` was
+   *  written. */
   private specializeUserFunction(
     decl: FuncStmt,
     argTypes: Type[],
@@ -1468,6 +1785,10 @@ export class Lowerer {
      *  C name disambiguates two methods of the same source-level name
      *  on different classes. Defaults to `decl.name`. */
     specSource?: string,
+    /** File the function definition lives in. Salts the spec key so
+     *  cross-file homonyms get distinct C names. Defaults to the
+     *  function's source span's file. */
+    definingFile?: string,
     /** When set, the named output gets a synthetic first assignment
      *  to `initExpr` (an already-lowered IR expression) prepended to
      *  the body. The user's constructor body then sees the receiver
@@ -1487,7 +1808,12 @@ export class Lowerer {
       );
     }
     const source = specSource ?? decl.name;
-    const key = `${source}__${specializationKey(argTypes)}`;
+    const file = definingFile ?? decl.span.file ?? this.currentFile;
+    // Hash the (file, argTypes) pair together so the C name salts by
+    // both. Keep the human-readable prefix (`apply__<hex>`) — the
+    // hash collapses everything that doesn't matter.
+    const hashInput = `${file}|${argTypes.map(canonicalizeType).join("|")}`;
+    const key = `${sanitizeCIdent(source)}__${hashType(hashInput)}`;
     const cached = this.specializations.get(key);
     if (cached) return cached;
 
@@ -1511,9 +1837,11 @@ export class Lowerer {
     const savedEnv = this.env;
     const savedDeclared = this.declared;
     const savedTempCounter = this.tempCounter;
+    const savedCurrentFile = this.currentFile;
     this.env = new Map();
     this.declared = new Set();
     this.tempCounter = 0;
+    this.currentFile = file;
 
     // Bind params.
     for (let i = 0; i < decl.params.length; i++) {
@@ -1561,6 +1889,7 @@ export class Lowerer {
     this.env = savedEnv;
     this.declared = savedDeclared;
     this.tempCounter = savedTempCounter;
+    this.currentFile = savedCurrentFile;
 
     const out: IRFunc = {
       ...placeholder,
@@ -1620,6 +1949,80 @@ export class Lowerer {
  *  the resulting branch is taken/dropped before codegen. Arithmetic /
  *  comparisons / builtin calls and Ident reads all produce runtime IR
  *  even when their `ty.exact` is known. */
+/** Replace every non-C-identifier character (`[^A-Za-z0-9_]`) with
+ *  `_`. Used to make `<funcname>__<hex>` mangled names always valid C
+ *  identifiers when the source name comes from a class
+ *  (`MyClass__method`) or carries a path-like prefix. */
+function sanitizeCIdent(s: string): string {
+  return s.replace(/[^A-Za-z0-9_]/g, "_");
+}
+
+/** Scan a constructor body for the FIRST top-level direct
+ *  `<receiver>.<propName> = <rhs>` assignment. Returns the rhs Expr,
+ *  or `null` if no such assignment is found. Conditional / loop /
+ *  nested-block writes are intentionally NOT considered — for v1,
+ *  property-type inference relies on writes that the body
+ *  unconditionally performs. */
+function findFirstPropertyWrite(
+  body: Stmt[],
+  receiverName: string,
+  propName: string
+): Expr | null {
+  for (const s of body) {
+    if (
+      s.type === "AssignLValue" &&
+      s.lvalue.type === "Member" &&
+      s.lvalue.name === propName &&
+      s.lvalue.base.type === "Ident" &&
+      s.lvalue.base.name === receiverName
+    ) {
+      return s.expr;
+    }
+  }
+  return null;
+}
+
+/** Build a zero / empty IR value of `ty`'s C-level shape. Used by
+ *  `makeInitialClassReceiver` to fill the `StructLit` slot for a
+ *  property that lacks an explicit default — the constructor body's
+ *  first write overwrites it anyway, but the C designated initializer
+ *  still needs a syntactic value, and a read-before-write should
+ *  observe a stable zero. Only Numeric types are supported in v1;
+ *  struct / class / handle / string properties without defaults raise
+ *  `UnsupportedConstruct` here. */
+function synthesizeZeroValue(
+  ty: Type,
+  className: string,
+  propName: string,
+  span: Span
+): IRExpr {
+  if (ty.kind === "Numeric") {
+    if (isMultiElement(ty)) {
+      // Empty 0×0 tensor — matches MATLAB's `[]` initial value. The
+      // first constructor write replaces it.
+      return {
+        kind: "TensorBuild",
+        elements: [],
+        shape: [0, 0],
+        ty: tensorDouble([0, 0]),
+        span,
+      };
+    }
+    return {
+      kind: "NumLit",
+      value: 0,
+      ty: scalarDouble("zero", 0),
+      span,
+    };
+  }
+  throw new UnsupportedConstruct(
+    `class '${className}' property '${propName}' is inferred to type ` +
+      `${typeToString(ty)}, but v1 can only synthesize a zero placeholder ` +
+      `for numeric properties; provide an explicit default value`,
+    span
+  );
+}
+
 function condToBool(cond: IRExpr): boolean | null {
   if (!isNumeric(cond.ty)) return null;
   const x = cond.ty.exact;

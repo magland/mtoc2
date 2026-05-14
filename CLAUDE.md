@@ -77,12 +77,23 @@ mtoc2 is a _static_ translator. Anything outside the supported subset raises
   the handle's C representation stays POD (no copy / free / assign
   helpers). `@builtin`, tensor captures, and `~` params are
   rejected with a span.
+- **Workspace files** — every `.m` file in the project (active file
+  plus siblings on the search path) is registered with a `Workspace`
+  at translate time. Cross-file calls (a sibling's filename used as
+  a function name, a workspace `classdef`, etc.) are resolved through
+  numbl's `resolveFunction` directly — see
+  [src/workspace/workspace.ts](src/workspace/workspace.ts). The CLI
+  scans `dirname(entry)` for sibling `.m`s; the web IDE passes flat
+  file names. MATLAB precedence rules (local-to-main beats workspace
+  beats builtin) are inherited from numbl rather than reimplemented.
 
 Not yet supported: matrix multiplication / division, indexing
 (`a(k)`), runtime-shape constructors (`zeros(n)`), general broadcast
-(non-scalar mismatched shapes), complex, strings, chars, structs,
-classes, builtin handles, tensor captures on anonymous functions.
-Expanding scope is gated by the cross-runner.
+(non-scalar mismatched shapes), complex, strings, chars, builtin
+handles, tensor captures on anonymous functions, `private/`
+directories, `+pkg/` namespaces, `@Class/` folders, `import`
+statements, `.numbl.js` user functions. Expanding scope is gated by
+the cross-runner.
 
 ## Docs are part of the change
 
@@ -299,7 +310,6 @@ sibling import. `tsc` (not `tsc -b`) is the typecheck command.
 The original mtoc carried a lot of complexity that mtoc2 is intentionally
 deferring or rebuilding. Don't reflexively port:
 
-- Multi-file workspace resolution.
 - Old optimization toggles (`enableTempInlining`, `threads`, etc.).
 - Native execution server. mtoc2 runs WASM-only in the browser; the CLI
   shells out to `cc` directly.

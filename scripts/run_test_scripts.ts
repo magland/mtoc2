@@ -25,17 +25,32 @@ const cliPath = join(repoRoot, "src", "cli.ts");
 const numblCliPath = resolve(repoRoot, "..", "numbl", "src", "cli.ts");
 const scriptsDir = join(repoRoot, "test_scripts");
 
+/** Discovery rule:
+ *  - `test_scripts/*.m` — each file is an entry (flat layout for
+ *    single-file tests).
+ *  - `test_scripts/<subdir>/main.m` — each subdir is a multifile
+ *    test group with `main.m` as the entry. Sibling `.m` files are
+ *    workspace files (picked up automatically by the CLI's
+ *    `scanSiblings`); they are NOT entries on their own.
+ *  This rule keeps flat tests working while letting multifile
+ *  groups isolate their workspace from each other and from the
+ *  flat tests. */
 function discoverScripts(): string[] {
   const found: string[] = [];
-  const walk = (dir: string): void => {
-    for (const entry of readdirSync(dir)) {
-      const p = join(dir, entry);
-      const st = statSync(p);
-      if (st.isDirectory()) walk(p);
-      else if (st.isFile() && entry.endsWith(".m")) found.push(p);
+  for (const entry of readdirSync(scriptsDir)) {
+    const p = join(scriptsDir, entry);
+    const st = statSync(p);
+    if (st.isFile() && entry.endsWith(".m")) {
+      found.push(p);
+    } else if (st.isDirectory()) {
+      const main = join(p, "main.m");
+      try {
+        if (statSync(main).isFile()) found.push(main);
+      } catch {
+        // Subdir without main.m — silently skip.
+      }
     }
-  };
-  walk(scriptsDir);
+  }
   return found.sort();
 }
 
