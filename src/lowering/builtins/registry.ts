@@ -34,9 +34,10 @@ export interface Builtin {
 const REGISTRY = new Map<string, Builtin>();
 
 export function registerBuiltin(b: Builtin): void {
-  if (REGISTRY.has(b.name)) {
-    throw new Error(`registerBuiltin: duplicate '${b.name}'`);
-  }
+  // Overwrite rather than throw on duplicate: the registration list is
+  // static and a real duplicate is obvious at the call site, while a throw
+  // here breaks Vite HMR (the registry module instance survives reloads
+  // but importers re-run their registration side-effects).
   REGISTRY.set(b.name, b);
 }
 

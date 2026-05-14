@@ -111,6 +111,17 @@ export function irExprToString(e: IRExpr): string {
       }
       return `[${rowsOut.join("; ")}]`;
     }
+    case "HandleLit":
+      if (e.ty.kind === "Handle") {
+        if (e.captures.length === 0) return `@${e.ty.targetName}`;
+        const args = e.ty.ast.params
+          .slice(0, e.ty.ast.params.length - e.captures.length)
+          .join(", ");
+        return `@(${args}) ${e.ty.targetName}`;
+      }
+      return `@?`;
+    case "HandleCaptureLoad":
+      return `${e.base.name}.${e.captureName}`;
   }
 }
 

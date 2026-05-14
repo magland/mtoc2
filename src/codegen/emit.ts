@@ -25,11 +25,15 @@
 import type { IRExpr, IRStmt, IRFunc, IRProgram } from "../lowering/ir.js";
 import { getBuiltin } from "../lowering/builtins/index.js";
 import {
+  handleTypedefName,
+  isHandle,
   isMultiElement,
   isNumeric,
   isOwned,
+  type HandleType,
   type Type,
 } from "../lowering/types.js";
+import { forEachSubExpr, forEachTopLevelExpr } from "../lowering/walk.js";
 import {
   BASE_HEADERS,
   collectRuntimeHeaders,
@@ -57,6 +61,21 @@ export function emitProgram(prog: IRProgram, opts: EmitOptions = {}): string {
   const includeRuntime = opts.includeRuntime ?? true;
   const state = newRuntimeState();
   const userParts: string[] = [];
+
+  // Collect every distinct HandleType shape referenced anywhere in the
+  // program so we can emit one struct typedef per shape ahead of the
+  // user code.
+  const handleTypedefs = collectHandleTypedefs(prog);
+
+  // Function-handle struct typedefs — one per distinct capture-shape.
+  // Emitted before forward decls so handle-typed params/returns/locals
+  // can refer to them. No-capture handles share the placeholder typedef.
+  if (handleTypedefs.length > 0) {
+    for (const td of handleTypedefs) {
+      userParts.push(renderHandleTypedef(td));
+    }
+    userParts.push("");
+  }
 
   // Forward declarations.
   for (const fn of prog.functions.values()) {
@@ -123,9 +142,118 @@ function runtimePlaceholder(state: RuntimeState): string {
   return `/* runtime helpers omitted (${state.active.size}): ${names} */\n`;
 }
 
+/** Walk the entire program and collect every distinct `HandleType`
+ *  shape — by typedef name — referenced anywhere. The no-capture
+ *  placeholder shape is always added if any handle is in use, so
+ *  named-handle code emits a usable typedef. Ordered by first-seen
+ *  for deterministic output. */
+function collectHandleTypedefs(prog: IRProgram): HandleType[] {
+  const seen = new Map<string, HandleType>();
+  const consider = (t: Type | undefined): void => {
+    if (t === undefined) return;
+    if (!isHandle(t)) return;
+    const key = handleTypedefName(t);
+    if (!seen.has(key)) seen.set(key, t);
+  };
+  const visitExpr = (e: IRExpr): void => {
+    forEachSubExpr(e, sub => {
+      consider(sub.ty);
+      if (sub.kind === "HandleLit") {
+        for (const c of sub.captures) consider(c.value.ty);
+      }
+    });
+  };
+  const visitStmts = (stmts: ReadonlyArray<IRStmt>): void => {
+    for (const s of stmts) {
+      forEachTopLevelExpr(s, visitExpr);
+      if (s.kind === "Assign") consider(s.ty);
+      switch (s.kind) {
+        case "If":
+          visitStmts(s.thenBody);
+          visitStmts(s.elseBody);
+          break;
+        case "While":
+        case "For":
+          visitStmts(s.body);
+          break;
+      }
+    }
+  };
+  for (const fn of prog.functions.values()) {
+    for (const ty of fn.paramTypes) consider(ty);
+    for (const ty of fn.outputTypes) consider(ty);
+    visitStmts(fn.body);
+  }
+  visitStmts(prog.topLevelStmts);
+  // Pull in dependent handle types (a handle whose capture is itself
+  // a handle pulls that handle's typedef into the set transitively).
+  let grew = true;
+  while (grew) {
+    grew = false;
+    for (const t of Array.from(seen.values())) {
+      for (const c of t.captures) {
+        if (isHandle(c.ty)) {
+          const k = handleTypedefName(c.ty);
+          if (!seen.has(k)) {
+            seen.set(k, c.ty);
+            grew = true;
+          }
+        }
+      }
+    }
+  }
+  // Topological sort: a handle that captures another handle must come
+  // after its dependency's typedef. The graph is acyclic because
+  // captures snapshot a value type that pre-exists at the @-site.
+  return topoSortHandleTypedefs(Array.from(seen.values()));
+}
+
+function topoSortHandleTypedefs(ts: HandleType[]): HandleType[] {
+  const byName = new Map<string, HandleType>();
+  for (const t of ts) byName.set(handleTypedefName(t), t);
+  const visited = new Set<string>();
+  const out: HandleType[] = [];
+  const visit = (t: HandleType): void => {
+    const name = handleTypedefName(t);
+    if (visited.has(name)) return;
+    visited.add(name);
+    for (const c of t.captures) {
+      if (isHandle(c.ty)) {
+        const dep = byName.get(handleTypedefName(c.ty));
+        if (dep) visit(dep);
+      }
+    }
+    out.push(t);
+  };
+  for (const t of ts) visit(t);
+  return out;
+}
+
+/** Render a single handle-shape typedef as a C struct definition.
+ *  No-capture handles get a single `char _placeholder` field so the
+ *  struct is non-empty (C forbids empty structs in standard C). */
+function renderHandleTypedef(t: HandleType): string {
+  const name = handleTypedefName(t);
+  if (t.captures.length === 0) {
+    return `typedef struct ${name} { char _placeholder; } ${name};`;
+  }
+  const fields = t.captures
+    .map(c => `${cTypeFor(c.ty)} cap_${c.name};`)
+    .join(" ");
+  return `typedef struct ${name} { ${fields} } ${name};`;
+}
+
 function cTypeFor(t: Type): string {
   if (isMultiElement(t)) return "mtoc2_tensor_t";
+  if (isHandle(t)) return handleTypedefName(t);
   return "double";
+}
+
+/** Default initializer for a freshly-declared local of `ty`. Scalars
+ *  default to `0.0`; handles default to a zero-initialized struct. */
+function defaultInitFor(ty: Type): string {
+  if (isHandle(ty)) return `(${handleTypedefName(ty)}){0}`;
+  return "0.0";
 }
 
 function fnRetType(fn: IRFunc): string {
@@ -191,6 +319,8 @@ function emitFunction(fn: IRFunc, state: RuntimeState): string {
     if (outTy && isOwned(outTy)) {
       useRuntimeByName(state, "mtoc2_tensor_empty");
       lines.push(`  mtoc2_tensor_t ${cOut} = mtoc2_tensor_empty();`);
+    } else if (outTy !== null) {
+      lines.push(`  ${cTypeFor(outTy)} ${cOut} = ${defaultInitFor(outTy)};`);
     } else {
       lines.push(`  double ${cOut} = 0.0;`);
     }
@@ -291,7 +421,7 @@ function emitStmt(
       }
       const rhs = emitExpr(s.expr, state);
       if (s.declare) {
-        return `${indent}double ${s.cName} = ${rhs};`;
+        return `${indent}${cTypeFor(s.ty)} ${s.cName} = ${rhs};`;
       }
       return `${indent}${s.cName} = ${rhs};`;
     }
@@ -426,6 +556,23 @@ function emitExpr(e: IRExpr, state: RuntimeState): string {
         .join(", ");
       return `${e.cName}(${args})`;
     }
+    case "HandleLit": {
+      // `(<typedef>){.cap_<name> = <value>, ...}` for capture-bearing
+      // handles, or `(mtoc2_handle_empty_t){0}` for the no-capture
+      // shared form. Captures are scalar real numeric (enforced at
+      // lowering), so each value is a plain `double` C expression.
+      if (e.ty.kind !== "Handle") {
+        throw new Error("emit: HandleLit with non-Handle ty");
+      }
+      const cTy = handleTypedefName(e.ty);
+      if (e.captures.length === 0) return `(${cTy}){0}`;
+      const parts = e.captures.map(
+        c => `.cap_${c.name} = ${emitExpr(c.value, state)}`
+      );
+      return `(${cTy}){${parts.join(", ")}}`;
+    }
+    case "HandleCaptureLoad":
+      return `${e.base.cName}.cap_${e.captureName}`;
   }
 }
 

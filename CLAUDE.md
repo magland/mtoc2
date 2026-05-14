@@ -69,11 +69,20 @@ mtoc2 is a _static_ translator. Anything outside the supported subset raises
   literal `1.0` directly since the C arg is a bare `double`).
 - **disp** routes on shape: scalar → `mtoc2_disp_double`,
   multi-element tensor → `mtoc2_disp_tensor`.
+- **Function handles** — `@user_func` (named) and `@(...) <body>`
+  (anonymous). Dispatch is static: every `h(args)` call site reads
+  the handle variable's `HandleType`, builds capture-args via
+  `HandleCaptureLoad`, and routes through `specializeUserFunction`.
+  v1 restricts captures to scalar real numeric and other handles so
+  the handle's C representation stays POD (no copy / free / assign
+  helpers). `@builtin`, tensor captures, and `~` params are
+  rejected with a span.
 
 Not yet supported: matrix multiplication / division, indexing
 (`a(k)`), runtime-shape constructors (`zeros(n)`), general broadcast
 (non-scalar mismatched shapes), complex, strings, chars, structs,
-classes. Expanding scope is gated by the cross-runner.
+classes, builtin handles, tensor captures on anonymous functions.
+Expanding scope is gated by the cross-runner.
 
 ## Docs are part of the change
 

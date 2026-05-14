@@ -30,6 +30,12 @@ export function forEachSubExpr(e: IRExpr, visit: (sub: IRExpr) => void): void {
     case "Call":
       for (const a of e.args) forEachSubExpr(a, visit);
       return;
+    case "HandleLit":
+      for (const c of e.captures) forEachSubExpr(c.value, visit);
+      return;
+    case "HandleCaptureLoad":
+      forEachSubExpr(e.base, visit);
+      return;
   }
 }
 

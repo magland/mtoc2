@@ -10,7 +10,9 @@
  * codegen reject anything outside scope with UnsupportedConstruct.
  */
 
-import type { Span } from "../parser/index.js";
+import type { Span, Stmt } from "../parser/index.js";
+
+type FunctionStmt = Extract<Stmt, { type: "Function" }>;
 
 // ── Sign lattice ────────────────────────────────────────────────────────
 
@@ -114,6 +116,42 @@ export interface UnknownType {
   kind: "Unknown";
 }
 
+// ── Function-handle type ────────────────────────────────────────────────
+
+/** One captured variable in a `HandleType`. The `name` is both the
+ *  enclosing-scope identifier the @-site snapshot reads from AND the
+ *  synthesized function's tail-param name; the `ty` is the captured
+ *  value's type at the @-site. v1 only supports scalar-real-numeric
+ *  captures, so the handle struct stays plain-old-data and needs no
+ *  copy/free/assign helpers. */
+export interface HandleCapture {
+  name: string;
+  ty: Type;
+}
+
+/** Function handle. mtoc2 v1 supports only user-function targets
+ *  (named `@user_func` and anonymous `@(p1,...,pN) <body>`); `@builtin`
+ *  is rejected. Captures are restricted to scalar real numeric values
+ *  so the handle's C representation is a flat POD struct. */
+export interface HandleType {
+  kind: "Handle";
+  /** Source-level identifier for the target function. For named
+   *  handles, this is the user's name (e.g. `sq`); for anonymous
+   *  handles, the synthesized name (e.g. `anon_0`). Used as the
+   *  source-name half of the specialization mangling. */
+  targetName: string;
+  /** Synthesized or pre-scanned `Function` AST handed to
+   *  `specializeUserFunction` at every call site. The params list
+   *  contains `[...userParams, ...captureNames]` (in that order); the
+   *  body's references to a captured variable resolve naturally to the
+   *  matching synthesized tail param. */
+  ast: FunctionStmt;
+  /** Variables captured from the enclosing scope at the `@(...)` site.
+   *  Empty for named handles and for capture-free anonymous functions.
+   *  Field order matches the synth function's tail params. */
+  captures: ReadonlyArray<HandleCapture>;
+}
+
 /** "No value" — the type of a call to a user function with zero
  *  outputs. Valid only as the expression type of an `ExprStmt`. Every
  *  other lowering site (Assign RHS, sub-expression of a Binary / Unary
@@ -123,7 +161,12 @@ export interface VoidType {
   kind: "Void";
 }
 
-export type Type = NumericType | StringType | UnknownType | VoidType;
+export type Type =
+  | NumericType
+  | StringType
+  | UnknownType
+  | VoidType
+  | HandleType;
 
 export const VOID: VoidType = { kind: "Void" };
 
@@ -192,6 +235,15 @@ export function tensorDouble(
 
 export const UNKNOWN: UnknownType = { kind: "Unknown" };
 
+/** Constructor for a `@<user_func>` handle (named or anonymous). */
+export function handleType(
+  targetName: string,
+  ast: FunctionStmt,
+  captures: ReadonlyArray<HandleCapture> = []
+): HandleType {
+  return { kind: "Handle", targetName, ast, captures };
+}
+
 // ── Predicates ──────────────────────────────────────────────────────────
 
 export function isNumeric(t: Type): t is NumericType {
@@ -200,6 +252,10 @@ export function isNumeric(t: Type): t is NumericType {
 
 export function isVoid(t: Type): t is VoidType {
   return t.kind === "Void";
+}
+
+export function isHandle(t: Type): t is HandleType {
+  return t.kind === "Handle";
 }
 
 export function isScalar(t: Type): boolean {
@@ -349,6 +405,10 @@ export function unify(a: Type, b: Type): Type {
     }
     return { kind: "String" };
   }
+  if (a.kind === "Handle" && b.kind === "Handle") {
+    if (canonicalizeType(a) === canonicalizeType(b)) return a;
+    return UNKNOWN;
+  }
   return UNKNOWN;
 }
 
@@ -382,6 +442,13 @@ export function typeToString(t: Type): string {
       if (t.sign !== "unknown") s += `:${t.sign}`;
       if (t.exact !== undefined) s += `=${formatExactForType(t.exact)}`;
       return s;
+    }
+    case "Handle": {
+      const caps =
+        t.captures.length === 0
+          ? ""
+          : `{${t.captures.map(c => `${c.name}:${typeToString(c.ty)}`).join(",")}}`;
+      return `@${t.targetName}${caps}`;
     }
   }
 }
@@ -431,6 +498,16 @@ function canon(t: Type): unknown {
       }
       return out;
     }
+    case "Handle":
+      // The AST is intentionally NOT serialized — it would bloat the
+      // canonical string and isn't part of the type's observable
+      // shape. Two handles with the same targetName + captures (by
+      // name and canonical type) share a specialization key.
+      return {
+        k: "H",
+        n: t.targetName,
+        c: t.captures.map(c => [c.name, canon(c.ty)]),
+      };
   }
 }
 
@@ -446,6 +523,18 @@ export function hashType(s: string): string {
 
 export function specializationKey(argTypes: Type[]): string {
   return hashType(argTypes.map(canonicalizeType).join("|"));
+}
+
+/** Mangled C typedef name for a handle's capture shape. All no-capture
+ *  handles share `mtoc2_handle_empty_t` regardless of target identity
+ *  (the function dispatch is static — the struct is just a carrier).
+ *  Handles with captures get a per-shape `mtoc2_handle__<8hex>` typedef
+ *  whose hash covers the `(name, canonical-type)` tuple of each capture
+ *  in order. */
+export function handleTypedefName(t: HandleType): string {
+  if (t.captures.length === 0) return "mtoc2_handle_empty_t";
+  const canonical = JSON.stringify(t.captures.map(c => [c.name, canon(c.ty)]));
+  return `mtoc2_handle__${hashType(canonical)}`;
 }
 
 // ── Span re-export for convenience ──────────────────────────────────────

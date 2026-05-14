@@ -27,6 +27,8 @@ import { UnsupportedConstruct, TypeError } from "./errors.js";
 import {
   type Type,
   type NumericType,
+  type HandleType,
+  type HandleCapture,
   scalarDouble,
   tensorDouble,
   signFromNumber,
@@ -34,6 +36,9 @@ import {
   isMultiElement,
   isNumeric,
   isVoid,
+  isHandle,
+  handleType,
+  typeToString,
   VOID,
   unify,
   stripExactFromEnv,
@@ -64,6 +69,10 @@ export class Lowerer {
   /** Monotonic counter for synthesizing `_mtoc2_t1`, `_mtoc2_t2`, ...
    *  hoist-temp names. Reset per function specialization. */
   private tempCounter: number = 0;
+  /** Monotonic counter for synthesizing anonymous-function names
+   *  (`anon_0`, `anon_1`, ...). Shared across the whole program so two
+   *  textually distinct `@(...)` expressions get distinct identities. */
+  private anonCounter: number = 0;
 
   lowerProgram(ast: AbstractSyntaxTree): IRProgram {
     // Pre-scan: collect top-level function definitions.
@@ -229,6 +238,8 @@ export class Lowerer {
     switch (e.kind) {
       case "NumLit":
       case "Var":
+      case "HandleLit":
+      case "HandleCaptureLoad":
         return e;
       case "TensorBuild":
         return {
@@ -557,6 +568,10 @@ export class Lowerer {
         return this.lowerFuncCall(e);
       case "Tensor":
         return this.lowerTensorLit(e);
+      case "FuncHandle":
+        return this.lowerFuncHandle(e);
+      case "AnonFunc":
+        return this.lowerAnonFunc(e);
       default:
         throw new UnsupportedConstruct(
           `expression type '${e.type}' not supported`,
@@ -692,6 +707,35 @@ export class Lowerer {
   }
 
   private lowerFuncCall(e: Extract<Expr, { type: "FuncCall" }>): IRExpr {
+    // Resolve the name. Three cases, in priority order:
+    //   1. A bound variable whose type is `HandleType` — dispatch
+    //      through the handle to the underlying user function.
+    //   2. A registered builtin (`disp`, `sum`, ...).
+    //   3. A top-level user function definition.
+    //
+    // Note: an in-scope variable of a non-handle type at a call site
+    // means the user wrote `name(args)` expecting indexing/call, which
+    // mtoc2 doesn't support yet — fall through to the unknown-function
+    // error.
+    const envEntry = this.env.get(e.name);
+    if (envEntry !== undefined && isHandle(envEntry.ty)) {
+      return this.dispatchHandleCall(e.name, envEntry, e.args, e.span);
+    }
+    if (envEntry !== undefined) {
+      // The name is bound in env (so it's not a free function reference)
+      // but isn't a handle. This is either indexing of a scalar/tensor
+      // (`v(k)` — unsupported in v1) or a handle whose type unified to
+      // Unknown across a control-flow merge of differently-shaped
+      // handles (also unsupported). Either way, give a clearer error
+      // than "unknown function".
+      throw new UnsupportedConstruct(
+        `'${e.name}' is an in-scope variable of type ` +
+          `${typeToString(envEntry.ty)}; cannot be called as a function ` +
+          `(indexing and dynamically-typed handles are not supported)`,
+        e.span
+      );
+    }
+
     const args = e.args.map(a => this.lowerExpr(a));
     for (const a of args) {
       this.requireValueType(a, `argument to '${e.name}'`);
@@ -737,6 +781,176 @@ export class Lowerer {
       args,
       ty,
       span: e.span,
+    };
+  }
+
+  // ── Function handles ──────────────────────────────────────────────────
+
+  /** `@name` — a named handle to a top-level user function. Builds the
+   *  handle type, captures empty, and returns a HandleLit. Builtin
+   *  targets (`@disp`, `@sin`) are rejected — mtoc2 v1 doesn't support
+   *  them. Unknown names raise `UnsupportedConstruct`. */
+  private lowerFuncHandle(e: Extract<Expr, { type: "FuncHandle" }>): IRExpr {
+    // Names shadowed by an in-scope variable: numbl forbids `@name` on
+    // a non-function name (it's always a function reference, never a
+    // var read).
+    if (this.env.has(e.name)) {
+      throw new TypeError(
+        `function-handle target '@${e.name}' refers to an in-scope variable, ` +
+          `not a function`,
+        e.span
+      );
+    }
+    if (getBuiltin(e.name)) {
+      throw new UnsupportedConstruct(
+        `builtin function handles (e.g. '@${e.name}') are not supported`,
+        e.span
+      );
+    }
+    const decl = this.functionDefs.get(e.name);
+    if (decl === undefined) {
+      throw new UnsupportedConstruct(
+        `unresolved function-handle target '@${e.name}'`,
+        e.span
+      );
+    }
+    const ty = handleType(decl.name, decl, []);
+    return { kind: "HandleLit", captures: [], ty, span: e.span };
+  }
+
+  /** `@(p1, ..., pN) <body>` — an anonymous function. Detects every
+   *  free Ident in the body that's bound in the enclosing scope (and
+   *  not in the param list) as a capture, then synthesizes a top-level
+   *  `function out = anon_<N>(p1, ..., pN, c1, ..., cM)` whose body
+   *  assigns the source body expression to the synthesized output.
+   *  The synthesized AST is parked in `functionDefs` so every call
+   *  site routes through the same specialization cache used for
+   *  user-declared functions.
+   *
+   *  v1 restricts capture types to scalar real numeric — tensor /
+   *  string / handle captures are rejected with `UnsupportedConstruct`
+   *  so the handle struct stays plain-old-data (no per-capture
+   *  copy/free helpers needed). */
+  private lowerAnonFunc(e: Extract<Expr, { type: "AnonFunc" }>): IRExpr {
+    const paramSet = new Set(e.params);
+    const captureNames: string[] = [];
+    const captureSet = new Set<string>();
+    collectAnonCaptures(this.env, e.body, paramSet, captureNames, captureSet);
+
+    const captures: HandleCapture[] = [];
+    const captureValues: { name: string; value: IRExpr }[] = [];
+    for (const cname of captureNames) {
+      if (paramSet.has(cname)) {
+        throw new UnsupportedConstruct(
+          `anonymous-function parameter '${cname}' shadows a captured ` +
+            `variable; rename the parameter`,
+          e.span
+        );
+      }
+      const entry = this.env.get(cname);
+      if (entry === undefined) {
+        throw new UnsupportedConstruct(
+          `internal: capture '${cname}' lost between detection and lowering`,
+          e.span
+        );
+      }
+      if (!isScalarRealNumeric(entry.ty) && !isHandle(entry.ty)) {
+        throw new UnsupportedConstruct(
+          `anonymous function captures '${cname}' of unsupported type ` +
+            `(only scalar real numeric and function-handle captures are supported)`,
+          e.span
+        );
+      }
+      captures.push({ name: cname, ty: entry.ty });
+      captureValues.push({
+        name: cname,
+        value: {
+          kind: "Var",
+          name: cname,
+          cName: entry.cName,
+          ty: entry.ty,
+          span: e.span,
+        },
+      });
+    }
+
+    const idx = this.anonCounter++;
+    const synthName = `anon_${idx}`;
+    const outName = `anonOut_${idx}`;
+    const synthAst: FuncStmt = {
+      type: "Function",
+      name: synthName,
+      functionId: synthName,
+      params: [...e.params, ...captureNames],
+      outputs: [outName],
+      body: [
+        {
+          type: "Assign",
+          name: outName,
+          expr: e.body,
+          suppressed: true,
+          span: e.span,
+        },
+      ],
+      argumentsBlocks: [],
+      span: e.span,
+    };
+    // Park the synth AST so dispatchHandleCall can reach it by name
+    // through the normal specializeUserFunction path.
+    this.functionDefs.set(synthName, synthAst);
+    const ty = handleType(synthName, synthAst, captures);
+    return {
+      kind: "HandleLit",
+      captures: captureValues,
+      ty,
+      span: e.span,
+    };
+  }
+
+  /** Dispatch `h(args)` where `h` is an in-scope handle variable.
+   *  Reads the handle's `ast` off its type, lowers the user-supplied
+   *  args, appends per-capture `HandleCaptureLoad` reads, specializes
+   *  the underlying function on the combined arg-type tuple, and emits
+   *  a direct call to the mangled name. */
+  private dispatchHandleCall(
+    handleName: string,
+    handleEntry: EnvEntry,
+    argExprs: Expr[],
+    span: Span
+  ): IRExpr {
+    const handleTy = handleEntry.ty as HandleType;
+    const userArgs = argExprs.map(a => this.lowerExpr(a));
+    for (const a of userArgs) {
+      this.requireValueType(a, `argument to handle '${handleName}'`);
+    }
+    const baseVar: Extract<IRExpr, { kind: "Var" }> = {
+      kind: "Var",
+      name: handleName,
+      cName: handleEntry.cName,
+      ty: handleTy,
+      span,
+    };
+    const captureArgs: IRExpr[] = handleTy.captures.map(c => ({
+      kind: "HandleCaptureLoad",
+      base: baseVar,
+      captureName: c.name,
+      ty: c.ty,
+      span,
+    }));
+    const allArgs = [...userArgs, ...captureArgs];
+    const argTypes = allArgs.map(a => a.ty);
+    const spec = this.specializeUserFunction(handleTy.ast, argTypes);
+    const ty: Type =
+      handleTy.ast.outputs.length === 0
+        ? VOID
+        : (spec.outputTypes[0] ?? { kind: "Unknown" });
+    return {
+      kind: "Call",
+      cName: spec.cName,
+      name: handleTy.targetName,
+      args: allArgs,
+      ty,
+      span,
     };
   }
 
@@ -877,6 +1091,90 @@ function condToBool(cond: IRExpr): boolean | null {
   if (typeof x !== "number") return null;
   if (!Number.isFinite(x)) return null;
   return x !== 0;
+}
+
+/** Walk an anonymous-function body and register every free `Ident`
+ *  whose name is bound in the enclosing scope (and not in the param
+ *  list) as a capture. Order matters — we use registration order for
+ *  the synth function's tail params and the handle struct's field
+ *  layout, so the call site can match positions.
+ *
+ *  Names that hit a registered builtin OR a top-level user function
+ *  are NOT captures — they're function references resolved at the
+ *  call site. A bare-Ident reference to such a name without a call is
+ *  not yet meaningful in mtoc2 (only `@name` produces a handle), so we
+ *  conservatively treat any in-scope variable as a capture.
+ *
+ *  Nested `@(...)` and `@name` inside the body do NOT contribute to
+ *  the OUTER anonymous's captures — `@name` resolves at body-lowering
+ *  time, and a nested `@(...)`'s captures are detected when that
+ *  inner anonymous itself is lowered. */
+function collectAnonCaptures(
+  outerEnv: ReadonlyMap<string, EnvEntry>,
+  e: Expr,
+  params: ReadonlySet<string>,
+  names: string[],
+  seen: Set<string>
+): void {
+  const register = (name: string): void => {
+    if (params.has(name)) return;
+    if (seen.has(name)) return;
+    if (getBuiltin(name)) return;
+    if (!outerEnv.has(name)) return;
+    seen.add(name);
+    names.push(name);
+  };
+  switch (e.type) {
+    case "Ident":
+      register(e.name);
+      return;
+    case "Number":
+      return;
+    case "Binary":
+      collectAnonCaptures(outerEnv, e.left, params, names, seen);
+      collectAnonCaptures(outerEnv, e.right, params, names, seen);
+      return;
+    case "Unary":
+      collectAnonCaptures(outerEnv, e.operand, params, names, seen);
+      return;
+    case "Range":
+      collectAnonCaptures(outerEnv, e.start, params, names, seen);
+      if (e.step) collectAnonCaptures(outerEnv, e.step, params, names, seen);
+      collectAnonCaptures(outerEnv, e.end, params, names, seen);
+      return;
+    case "FuncCall":
+      // A bare `name(args)` may refer to a captured handle variable
+      // OR to a top-level user function / builtin. The same
+      // `register` predicate filters: only bound-in-outer-scope names
+      // become captures.
+      register(e.name);
+      for (const a of e.args)
+        collectAnonCaptures(outerEnv, a, params, names, seen);
+      return;
+    case "Tensor":
+      for (const row of e.rows) {
+        for (const cell of row) {
+          collectAnonCaptures(outerEnv, cell, params, names, seen);
+        }
+      }
+      return;
+    case "AnonFunc": {
+      const nested = new Set(params);
+      for (const p of e.params) nested.add(p);
+      collectAnonCaptures(outerEnv, e.body, nested, names, seen);
+      return;
+    }
+    case "FuncHandle":
+      // `@name` resolves to a function reference at body-lowering
+      // time — not a capture of the outer scope.
+      return;
+    default:
+      // Other expression kinds (Index, Member, ...) are unsupported in
+      // mtoc2 v1; if they appear inside an anonymous-function body,
+      // the body's own lowering will reject them with a span. Skip
+      // capture detection here.
+      return;
+  }
 }
 
 /** Walk a stmt-tree and collect names of LHS targets (Assign, MultiAssign,

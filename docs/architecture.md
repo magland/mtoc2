@@ -58,10 +58,11 @@ The Type lattice is written from scratch for mtoc2 — see
 ### IR (`ir.ts`)
 
 A small typed tree: `NumLit`, `TensorBuild`, `Var`, `Binary`, `Unary`,
-`Call` for expressions; `ExprStmt`, `Assign`, `If`, `While`, `For`,
-`ReturnFromFunction`, `Break`, `Continue` for statements. `IRFunc`
-captures a single specialization (params, types, body, output type).
-`IRProgram` is top-level statements plus a map of specializations.
+`Call`, `HandleLit`, `HandleCaptureLoad` for expressions; `ExprStmt`,
+`Assign`, `If`, `While`, `For`, `ReturnFromFunction`, `Break`,
+`Continue` for statements. `IRFunc` captures a single specialization
+(params, types, body, output type). `IRProgram` is top-level
+statements plus a map of specializations.
 
 **`TensorBuild`** is the only tensor-construction IR node: every
 source-level tensor literal lowers through it (the all-literal case
@@ -127,6 +128,46 @@ Today's builtins:
   row-vector reduction deferred.
 
 Operator-to-builtin maps live alongside the registry.
+
+### Function handles
+
+`@user_func` (named) and `@(p1, ..., pN) <body>` (anonymous) lower to a
+`HandleLit` IR node carrying a `HandleType`. The type carries the
+target's AST (a synthesized `FunctionStmt` for anonymous forms) plus a
+list of captured variables. v1 restricts captures to scalar real
+numeric and other handles — both POD on the C side, so the handle
+struct needs no copy / free / assign helpers.
+
+Dispatch is static. At every `h(args)` call site the lowerer reads the
+handle variable's type, builds `[...userArgs, ...HandleCaptureLoad(h)]`
+in the underlying spec's param order, and routes through the regular
+`specializeUserFunction` cache. Two `apply(@foo, x)` and
+`apply(@bar, x)` calls produce two distinct `apply__<hex>` specs
+because the canonical form of `HandleType` shards on the target name.
+
+Codegen emits one C struct typedef per distinct capture-shape:
+`mtoc2_handle_empty_t` (shared placeholder, captures-free handles) and
+`mtoc2_handle__<8hex>` per capture-tuple. A handle literal renders as
+a C99 compound literal; a `HandleCaptureLoad` renders as the
+corresponding `<base>.cap_<name>` field read. The typedefs are
+emitted ahead of the user code's forward declarations in
+topologically-sorted order (so a handle that captures another handle
+sees its dependency already defined).
+
+Rejected at lowering with a span-carrying error:
+
+- `@builtin_name` — builtin handles aren't supported; call the
+  builtin directly.
+- Tensor / string captures — would require per-kind copy / free
+  helpers in the handle struct.
+- `~` as an anonymous-function parameter.
+- A bare-Ident reference whose name shadows an enclosing-scope
+  variable in `@name` form.
+
+The model is intentionally simpler than mtoc's handle system —
+mtoc2 doesn't try to support owned-typed captures, multi-output
+handle calls, or handle-shape unification beyond exact-match. See
+`docs/type_system.md` for the type-level story.
 
 ## Owned-value codegen
 

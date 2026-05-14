@@ -92,6 +92,31 @@ Used at control-flow joins that can't be reconciled, and as the
 return type of void builtins like `disp` (which the ExprStmt path
 discards).
 
+### HandleType
+
+```ts
+interface HandleType {
+  kind: "Handle";
+  targetName: string; // user-func name or synth "anon_<N>"
+  ast: FunctionStmt; // target body for specialization
+  captures: ReadonlyArray<{ name: string; ty: Type }>;
+}
+```
+
+A function handle. `targetName + canonicalized captures` form the
+canonical-string shard, so `apply(@foo, x)` and `apply(@bar, x)`
+specialize separately. The `ast` rides on the type to feed
+`specializeUserFunction` at every `h(args)` call site but is
+intentionally excluded from `canonicalizeType` (it would bloat the
+hash input).
+
+`unify(a, b)` on handles is exact-match — two handles unify only
+when their canonical forms agree; otherwise the join drops to
+`UnknownType`. Captures are restricted to scalar real numeric and
+other handles so the C-side struct stays POD. See
+[architecture.md](architecture.md) (§ Function handles) for the
+lowering and codegen rules.
+
 ## The exact field
 
 ```ts
@@ -189,7 +214,16 @@ body. Arithmetic still emits as runtime C.
   `ExprStmt` expression — see [architecture.md](architecture.md) for
   the lowering rule). The lattice would extend trivially with a tuple
   variant for multi-output.
-- **Struct fields, class instances, cells, function handles, sparse,
-  dictionaries** — all live in numbl's RuntimeValue model but mtoc2
-  hasn't grown the corresponding type-system entries yet. Add them
-  when the lowering scope reaches them.
+- **Struct fields, class instances, cells, sparse, dictionaries** —
+  all live in numbl's RuntimeValue model but mtoc2 hasn't grown the
+  corresponding type-system entries yet. Add them when the lowering
+  scope reaches them.
+- **Function handles** ARE in the lattice (`HandleType`) — but only
+  user-function targets with scalar-real-numeric captures so far. See
+  [architecture.md](architecture.md) for the static-dispatch model and
+  the codegen rule that emits one C typedef per distinct capture-shape.
+  `canonicalizeType` for handles shards on `(targetName, captures)` so
+  higher-order calls like `apply(@foo, x)` vs `apply(@bar, x)` produce
+  distinct specializations. Builtin handles (`@disp`), tensor / handle
+  captures, and capture-shape unification across CFG joins are not yet
+  supported and produce span-carrying lowering errors.

@@ -77,7 +77,51 @@ export interface Call {
   span: Span;
 }
 
-export type IRExpr = NumLit | TensorBuild | Var | Binary | Unary | Call;
+/** Function-handle literal — produced by `@user_func` (no captures) or
+ *  `@(p1, ..., pN) <body>` (zero+ captures). `ty` is a `HandleType`
+ *  whose `targetName`/`ast` identify the underlying user function and
+ *  whose `captures` list shapes the C struct. The literal renders as a
+ *  C compound literal: `(mtoc2_handle_empty_t){0}` for no captures, or
+ *  `(mtoc2_handle__<hex>){.cap_<name> = <value>, ...}` per shape.
+ *
+ *  Dispatch is static — every `h(args)` call site reads the handle
+ *  variable's type, specializes against the target AST with
+ *  `[...argTypes, ...captureTypes]`, and emits a direct call. The
+ *  handle struct only carries captures. */
+export interface HandleLit {
+  kind: "HandleLit";
+  /** One entry per `ty.captures` field, in the same order. Each value
+   *  is the lowered IR expression for the captured local at the
+   *  `@(...)` site (typically a `Var` read of the enclosing scope's
+   *  binding). v1 restricts capture types to scalar real numeric, so
+   *  these values are plain `double` C expressions. */
+  captures: ReadonlyArray<{ name: string; value: IRExpr }>;
+  ty: Type;
+  span: Span;
+}
+
+/** Field read of a captured value inside a handle struct. Used at
+ *  `h(args)` dispatch sites: each capture of `h`'s `HandleType` becomes
+ *  a `HandleCaptureLoad` IR node that reads `h.cap_<name>` and is
+ *  passed as an extra positional arg to the underlying specialization.
+ *  Codegen emits `<base.cName>.cap_<captureName>`. */
+export interface HandleCaptureLoad {
+  kind: "HandleCaptureLoad";
+  base: Var;
+  captureName: string;
+  ty: Type;
+  span: Span;
+}
+
+export type IRExpr =
+  | NumLit
+  | TensorBuild
+  | Var
+  | Binary
+  | Unary
+  | Call
+  | HandleLit
+  | HandleCaptureLoad;
 
 // ── Statements ──────────────────────────────────────────────────────────
 
