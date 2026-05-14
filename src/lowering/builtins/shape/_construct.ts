@@ -46,10 +46,35 @@ const MTOC2_MAX_NDIM = 8;
 
 /** Per-axis resolution. `argIndex` is the position in the original
  *  argTypes/argsC arrays that supplies this axis's value — both axes
- *  of the single-arg square form share `argIndex = 0`. */
+ *  of the single-arg square form share `argIndex = 0`. Synthetic
+ *  axes inserted by the pad-to-2 normalizer use `argIndex = 0` as
+ *  a placeholder; they're always `kind: "exact", value: 1` and the
+ *  emitter only consumes `argIndex` for dynamic axes. */
 type ResolvedAxis =
   | { kind: "exact"; value: number; argIndex: number }
   | { kind: "dynamic"; argIndex: number };
+
+/** Mirror numbl's makeTensor shape canonicalization: drop trailing
+ *  exact-1 axes down to a 2-axis floor, then pad up to 2 if shorter.
+ *  Dynamic axes are never stripped (their value isn't known at
+ *  translate time, so trailing `zeros(3, n)` with `n == 1` at runtime
+ *  must NOT collapse the axis here — that's the runtime helper's
+ *  problem, not ours). Without this step `zeros(3, 2, 1)` would lower
+ *  to a rank-3 tensor and `disp` / `size` would diverge from numbl. */
+function normalizeAxes(axes: ResolvedAxis[]): ResolvedAxis[] {
+  const out = axes.slice();
+  while (
+    out.length > 2 &&
+    out[out.length - 1].kind === "exact" &&
+    (out[out.length - 1] as { kind: "exact"; value: number }).value === 1
+  ) {
+    out.pop();
+  }
+  while (out.length < 2) {
+    out.push({ kind: "exact", value: 1, argIndex: 0 });
+  }
+  return out;
+}
 
 interface ResolvedShape {
   axes: ResolvedAxis[];
@@ -126,11 +151,13 @@ function resolveShape(
       }
       axes.push({ kind: "exact", value: v, argIndex: 0 });
     }
-    // Pad to a 2-axis minimum (mtoc2's lattice represents every
-    // tensor with at least 2 axes; `zeros([5])` == `zeros(5, 1)` per
-    // MATLAB).
-    while (axes.length < 2) axes.push({ kind: "exact", value: 1, argIndex: 0 });
-    return { axes, ndim: axes.length, isSquare: false };
+    // Strip trailing exact-1 axes down to the 2-axis floor (mtoc2's
+    // lattice represents every tensor with at least 2 axes; `zeros([5])`
+    // == `zeros(5, 1)` per MATLAB), then pad up if shorter. Mirrors
+    // numbl's makeTensor canonicalization so e.g. `zeros([3 2 1])`
+    // surfaces as a 3×2, not a 3×2×1.
+    const norm = normalizeAxes(axes);
+    return { axes: norm, ndim: norm.length, isSquare: false };
   }
 
   const axes: ResolvedAxis[] = [];
@@ -170,7 +197,11 @@ function resolveShape(
   if (axes.length === 1) {
     return { axes: [axes[0], axes[0]], ndim: 2, isSquare: true };
   }
-  return { axes, ndim: axes.length, isSquare: false };
+  // Strip trailing exact-1 axes down to a 2-axis floor (see Form B
+  // for rationale). Without this, `zeros(3, 2, 1)` would lower to
+  // a rank-3 tensor and diverge from numbl.
+  const norm = normalizeAxes(axes);
+  return { axes: norm, ndim: norm.length, isSquare: false };
 }
 
 /** Return the concrete number[] shape when every axis is exact;
