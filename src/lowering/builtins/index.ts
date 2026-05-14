@@ -31,6 +31,12 @@ import { disp } from "./io/disp.js";
 import { length } from "./reduction/length.js";
 import { numel } from "./reduction/numel.js";
 import { sum } from "./reduction/sum.js";
+import { prod } from "./reduction/prod.js";
+import { mean } from "./reduction/mean.js";
+import { min } from "./reduction/min.js";
+import { max } from "./reduction/max.js";
+import { any } from "./reduction/any.js";
+import { all } from "./reduction/all.js";
 import { zeros } from "./shape/zeros.js";
 import { ones } from "./shape/ones.js";
 import { reshape } from "./shape/reshape.js";
@@ -75,6 +81,12 @@ for (const b of [
   length,
   numel,
   sum,
+  prod,
+  mean,
+  min,
+  max,
+  any,
+  all,
   zeros,
   ones,
   reshape,

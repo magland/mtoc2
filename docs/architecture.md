@@ -211,12 +211,34 @@ Today's builtins:
   `mtoc2_disp_tensor(t)`; struct → the program-emitted
   `<struct-typedef>_disp(s)` helper (one per canonical shape).
   Class instance `disp` is not supported in v1.
-- **Introspection / reduction**: `length`, `numel` — runtime
+- **Introspection**: `length`, `numel` — runtime
   `mtoc2_length` / `mtoc2_numel` on tensors; literal `1.0` for scalar
-  args (the C arg type is `double`, not `mtoc2_tensor_t`). `sum` →
-  `mtoc2_sum(t)` for tensors, identity for scalars. Matrix →
-  row-vector reduction deferred; `sum` on rank-N (N>2) tensors is
-  rejected at lowering.
+  args (the C arg type is `double`, not `mtoc2_tensor_t`).
+- **Reductions** (`sum`, `prod`, `mean`, `min`, `max`, `any`, `all`):
+  three call forms per op — default
+  (`name(A)`: first non-singleton dim picked from the input's lattice
+  via `chooseDefaultAxis`), explicit dim
+  (`name(A, dim)`, or `min(A, [], dim)` / `max(A, [], dim)`
+  because of MATLAB's slot layout), and the literal `'all'` flag
+  (collapses every axis). The shared transfer / codegen pair lives
+  in `src/lowering/builtins/reduction/_shape.ts`; each per-op file
+  is a one-liner that supplies the kernel pieces (init / step /
+  finalize / sign rule / empty-fiber default) through `defineReducer`.
+  The C-side helpers are macro-generated into
+  `src/codegen/runtime/tensor_reduce_real.h`, defining
+  `mtoc2_<name>_all` (scalar return) and `mtoc2_<name>_dim`
+  (tensor return) per op, all riding on the single
+  `mtoc2_tensor_reduce_real` runtime snippet (per-name registry
+  entries are thin alias dependencies, mirroring the
+  `mtoc2_tensor_elemwise_real` pattern). When every input element
+  is exact (`Float64Array` carrying ≤ `EXACT_ARRAY_MAX_ELEMENTS`
+  values), the transfer computes the result type at compile time;
+  beyond the cap (or on opaque input) the runtime helpers take
+  over. Min/max use a NaN-skip seed (`acc = NaN`; first non-NaN
+  captures, subsequent non-NaN compare via `<` / `>`) and the
+  no-arg form returns a scalar / dim-collapsed tensor only —
+  multi-output `[v, i] = min(x)` is rejected. The 2-arg elementwise
+  form `min(A, B)` / `max(A, B)` is also rejected (separate slope).
 - **Rank-N constructors**: `zeros(d1, …, dN)` and `ones(d1, …, dN)`
   (1..`MTOC2_MAX_NDIM` shape args, each a statically-known finite
   non-negative integer). One-arg form means an n×n square (MATLAB

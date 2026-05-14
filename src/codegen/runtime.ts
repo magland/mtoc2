@@ -167,8 +167,75 @@ const REGISTRY: ReadonlyMap<string, RuntimeSnippet> = new Map<
     loadSnippet("tensor_unary_real_math.h", ["mtoc2_tensor_t", "mtoc2_alloc"]),
   ],
 
-  // ── sum (reduce real tensor to scalar) ────────────────────────────
-  ["mtoc2_sum", loadSnippet("sum.h", ["mtoc2_tensor_t"])],
+  // ── Reductions (sum/prod/mean/min/max/any/all on real tensors) ────
+  // One shared snippet defines every `_all` + `_dim` variant via
+  // C-side macros; the per-name entries below pull it in transitively
+  // so any reducer builtin's `runtimeDeps` activates the whole pack
+  // (dedupe is automatic via the snippet activator).
+  [
+    "mtoc2_tensor_reduce_real",
+    loadSnippet("tensor_reduce_real.h", [
+      "mtoc2_tensor_t",
+      "mtoc2_alloc",
+      "mtoc2_tensor_alloc_nd",
+    ]),
+  ],
+  [
+    "mtoc2_sum_all",
+    { headers: [], code: "", deps: ["mtoc2_tensor_reduce_real"] },
+  ],
+  [
+    "mtoc2_sum_dim",
+    { headers: [], code: "", deps: ["mtoc2_tensor_reduce_real"] },
+  ],
+  [
+    "mtoc2_prod_all",
+    { headers: [], code: "", deps: ["mtoc2_tensor_reduce_real"] },
+  ],
+  [
+    "mtoc2_prod_dim",
+    { headers: [], code: "", deps: ["mtoc2_tensor_reduce_real"] },
+  ],
+  [
+    "mtoc2_mean_all",
+    { headers: [], code: "", deps: ["mtoc2_tensor_reduce_real"] },
+  ],
+  [
+    "mtoc2_mean_dim",
+    { headers: [], code: "", deps: ["mtoc2_tensor_reduce_real"] },
+  ],
+  [
+    "mtoc2_min_all",
+    { headers: [], code: "", deps: ["mtoc2_tensor_reduce_real"] },
+  ],
+  [
+    "mtoc2_min_dim",
+    { headers: [], code: "", deps: ["mtoc2_tensor_reduce_real"] },
+  ],
+  [
+    "mtoc2_max_all",
+    { headers: [], code: "", deps: ["mtoc2_tensor_reduce_real"] },
+  ],
+  [
+    "mtoc2_max_dim",
+    { headers: [], code: "", deps: ["mtoc2_tensor_reduce_real"] },
+  ],
+  [
+    "mtoc2_any_all",
+    { headers: [], code: "", deps: ["mtoc2_tensor_reduce_real"] },
+  ],
+  [
+    "mtoc2_any_dim",
+    { headers: [], code: "", deps: ["mtoc2_tensor_reduce_real"] },
+  ],
+  [
+    "mtoc2_all_all",
+    { headers: [], code: "", deps: ["mtoc2_tensor_reduce_real"] },
+  ],
+  [
+    "mtoc2_all_dim",
+    { headers: [], code: "", deps: ["mtoc2_tensor_reduce_real"] },
+  ],
 
   // ── length / numel (tensor → scalar shape queries) ───────────────
   ["mtoc2_length", loadSnippet("length.h", ["mtoc2_tensor_t"])],

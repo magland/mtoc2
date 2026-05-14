@@ -84,6 +84,12 @@ type Type =
   (rank > 2) are constructed via the `zeros` / `ones` builtins;
   every other code path (assign / copy / free / elemwise / `disp` /
   `length` / `numel`) is shape-agnostic.
+- `provablyNonEmpty(t: NumericType)` is the lattice-aware
+  "definitely contains ≥ 1 element" predicate the reducer family
+  uses to refine sign / exact bounds (empty `sum → 0`, `prod → 1`,
+  `min/max → NaN`, etc.). True iff `shape` is concrete with no
+  zeros, or — with no concrete shape — every `dims[i].kind !==
+"unknown"`. Scalars are always provably non-empty.
 - `sign` is one of `positive | nonneg | negative | nonpositive | zero
 | nonzero | unknown`. Coarser than exact but useful when exact isn't
   available (e.g. `unifySign("positive", "positive") === "positive"`).

@@ -420,6 +420,19 @@ export function isMultiElement(t: Type): boolean {
   return isNumeric(t) && t.dims.some(d => d.kind !== "one");
 }
 
+/** Statically provable to contain at least one element. True iff
+ *  every dim is statically known (no `unknown` lattice slots) AND, if
+ *  a concrete `shape` is set, every entry is > 0. Used by reductions
+ *  to decide whether the empty-input edge case (sum→0, prod→1,
+ *  min/max→NaN, mean→NaN) is reachable; tighter sign rules apply
+ *  only on the provably-non-empty branch. */
+export function provablyNonEmpty(t: NumericType): boolean {
+  if (t.shape !== undefined) {
+    return t.shape.every(s => s > 0);
+  }
+  return t.dims.every(d => d.kind !== "unknown");
+}
+
 /** Owned-heap-value types — i.e. types whose C representation holds a
  *  heap pointer the codegen must `free` at scope exit. Multi-element
  *  tensors are the original owned kind. Structs, class instances, and

@@ -1,0 +1,797 @@
+/**
+ * Shared reducer infrastructure for the `sum / prod / mean / min /
+ * max / any / all` family. Each builtin is a thin wrapper that
+ * supplies its kernel spec (init, op, finalize, sign rule, empty
+ * result) and lets this module drive transfer / codegen / arity.
+ *
+ * Numbl is the dialect oracle (see `../numbl/src/numbl-core/interpreter/
+ * builtins/reductions.ts`). The shape rules here mirror numbl's
+ * `shapeAfterReduction` against mtoc2's three-state DimInfo lattice
+ * (`one` / `notOne` / `unknown`) plus concrete `shape` when set.
+ *
+ * The lattice analysis is sharper than numbl's static type pass in two
+ * places worth flagging:
+ *   - A `(unknown, one, ..., one)` shape signature (e.g. a slice
+ *     `M(:, 2:3)` of a known-row-vector `M`) proves the output is
+ *     scalar even though the leading dim's runtime length is unknown,
+ *     because every later axis is statically `1`.
+ *   - Per-axis `notOne` lattice slots let elementwise transfer fns
+ *     keep tensor-vs-scalar dispatch precise even without a concrete
+ *     `shape`.
+ *
+ * Folding: when every input element is exact (scalar `t.exact: number`
+ * or tensor `t.exact: Float64Array`), the transfer computes the
+ * compile-time result. We cap the materialized result size at
+ * `EXACT_ARRAY_MAX_ELEMENTS`; beyond the cap the runtime path takes
+ * over.
+ *
+ * Out of scope: complex inputs, the `omitnan` / `includenan` flag,
+ * runtime (non-exact) integer `dim`, and multi-output
+ * `[v, i] = min(x)` — all rejected with span.
+ */
+
+import type { Span } from "../../../parser/index.js";
+import { UnsupportedConstruct, TypeError } from "../../errors.js";
+import {
+  DIM_ONE,
+  EXACT_ARRAY_MAX_ELEMENTS,
+  isNumeric,
+  isScalar,
+  provablyNonEmpty,
+  scalarDouble,
+  scalarLogical,
+  signFromNumber,
+  tensorDouble,
+  tensorDoubleFromDims,
+  unifySign,
+  type DimInfo,
+  type NumericType,
+  type Sign,
+  type Type,
+} from "../../types.js";
+import type { Builtin } from "../registry.js";
+import { exactDouble, exactRealArray } from "../_shared.js";
+
+/** What kind of reducer we're computing. Drives the kernel pieces
+ *  (init / accumulator / finalizer / empty fallback / sign rule /
+ *  result element type) without each builtin file rewriting the
+ *  reduce loop. */
+export interface KernelSpec {
+  /** Public source-level name (e.g. `"sum"`). */
+  name: string;
+  /** Position of the dim slot in the source-level arg list. For
+   *  `sum/prod/mean/any/all`: slot 2 (`name(A, dim)`).
+   *  For `min/max`: slot 3 (`name(A, [], dim)`). */
+  dimArgIndex: 1 | 2;
+  /** Identity / empty result. For scalar reducers (`sum`, `prod`,
+   *  `mean`), the empty-data scalar (`0`, `1`, `NaN`). For
+   *  logical reducers (`any`, `all`), 0 or 1. For NaN-seed
+   *  reducers (`min`, `max`), `NaN`. */
+  emptyValue: number;
+  /** Accumulator step. NaN-aware (the impl skips NaN where
+   *  appropriate). Receives the running accumulator and the next
+   *  element; returns the new accumulator. */
+  step(acc: number, x: number, count: number): number;
+  /** Optional finalizer (e.g. mean divides by count). */
+  finalize?(acc: number, count: number): number;
+  /** Output element kind. `"double"` for sum/prod/mean/min/max,
+   *  `"logical"` for any/all. */
+  outputElem: "double" | "logical";
+  /** Compute the sign of the result given the *input* type plus a
+   *  flag indicating whether the reduced fiber is provably
+   *  non-empty. */
+  resultSign(t: NumericType, nonEmpty: boolean): Sign;
+}
+
+// ── Axis classification ────────────────────────────────────────────────
+
+interface AxisAll {
+  kind: "all";
+}
+interface AxisFixed {
+  kind: "fixed";
+  /** 1-based axis number, statically known. */
+  dim: number;
+}
+type AxisChoice = AxisAll | AxisFixed | { kind: "default" };
+
+/** Inspect the parsed dim slot. Throws on rejection cases (non-
+ *  exact, non-positive, non-integer, wrong type). Returns `default`
+ *  if no dim slot was supplied. */
+function classifyDimArg(
+  name: string,
+  dimType: Type | undefined,
+  span: Span
+): AxisChoice {
+  if (dimType === undefined) return { kind: "default" };
+  if (dimType.kind === "String") {
+    const v = dimType.exact;
+    if (v === "all") return { kind: "all" };
+    if (v === undefined) {
+      throw new UnsupportedConstruct(
+        `'${name}' dim arg: opaque string (only the literal 'all' is supported)`,
+        span
+      );
+    }
+    throw new UnsupportedConstruct(
+      `'${name}' dim arg: string literal must be 'all' (got '${v}')`,
+      span
+    );
+  }
+  if (!isNumeric(dimType) || dimType.isComplex || !isScalar(dimType)) {
+    throw new TypeError(
+      `'${name}' dim arg must be a scalar real integer or the string 'all'`,
+      span
+    );
+  }
+  const v = exactDouble(dimType);
+  if (v === undefined) {
+    throw new UnsupportedConstruct(
+      `'${name}' dim arg must be a statically-known integer in v1 ` +
+        `(runtime dim values can't be deduced into a result shape)`,
+      span
+    );
+  }
+  if (!Number.isFinite(v) || !Number.isInteger(v) || v < 1) {
+    throw new TypeError(
+      `'${name}' dim arg must be a finite positive integer (got ${v})`,
+      span
+    );
+  }
+  return { kind: "fixed", dim: v };
+}
+
+/** When no explicit dim was supplied, pick the reduction axis from
+ *  the input's lattice. This is the sharp pass: a leading `unknown`
+ *  followed only by `one` axes still proves the output is scalar
+ *  (the leading axis MUST be the non-singleton one, or the whole
+ *  tensor is `(1×1×…)`-shaped → scalar collapse anyway).
+ *
+ *  Returns `all` for the degenerate `(1, 1, ...)` case (matches
+ *  scalar input), `fixed(k)` for a clearly chosen axis, or throws
+ *  for the genuinely ambiguous case (`unknown` leading dim followed
+ *  by at least one `notOne` or another `unknown`). */
+function chooseDefaultAxis(
+  name: string,
+  t: NumericType,
+  span: Span
+): AxisAll | AxisFixed {
+  // Concrete shape: numbl's firstReduceDim. If every dim is 1 ⇒
+  // scalar collapse (treat as 'all'); else pick the first dim with
+  // size > 1.
+  if (t.shape !== undefined) {
+    const nonSingleton = t.shape.findIndex(s => s !== 1);
+    if (nonSingleton === -1) return { kind: "all" };
+    return { kind: "fixed", dim: nonSingleton + 1 };
+  }
+  // Lattice walk. First `notOne` wins.
+  for (let i = 0; i < t.dims.length; i++) {
+    const d = t.dims[i];
+    if (d.kind === "notOne") {
+      return { kind: "fixed", dim: i + 1 };
+    }
+    if (d.kind === "unknown") {
+      // Hit `unknown` before any `notOne`. If every later dim is
+      // `one`, the leading axis is the only candidate — output is
+      // scalar regardless of its runtime length (whether 1×… or N×1×…
+      // both reduce to a single scalar).
+      if (t.dims.slice(i + 1).every(later => later.kind === "one")) {
+        return { kind: "all" };
+      }
+      throw new UnsupportedConstruct(
+        `'${name}' on a tensor with ambiguous lattice ` +
+          `(${t.dims.map(d => d.kind).join("×")}): can't deduce the ` +
+          `reduction axis — pass an explicit dim (e.g. ` +
+          `${name}(A, 1)) or 'all'`,
+        span
+      );
+    }
+    // `one`: skip, no contribution.
+  }
+  // All dims are `one`: scalar.
+  return { kind: "all" };
+}
+
+/** Squeeze trailing singleton dims subject to a 2-axis floor (matches
+ *  numbl's `shapeAfterReduction` post-pass and the tensor-shape
+ *  normalization rule). */
+function squeezeTrailing<T>(arr: T[], isOne: (x: T) => boolean): T[] {
+  const out = arr.slice();
+  while (out.length > 2 && isOne(out[out.length - 1])) out.pop();
+  return out;
+}
+
+/** Mirror of numbl's `shapeAfterReduction(shape, dim)` on a concrete
+ *  shape. Returns either `{ scalar: true }` (every axis is 1 after
+ *  the collapse) or `{ scalar: false, shape: [...] }`. */
+function reduceConcreteShape(
+  shape: number[],
+  dim: number
+): { scalar: true } | { scalar: false; shape: number[] } {
+  if (dim > shape.length) {
+    if (shape.every(d => d === 1)) return { scalar: true };
+    return { scalar: false, shape: shape.slice() };
+  }
+  const out = shape.slice();
+  out[dim - 1] = 1;
+  const squeezed = squeezeTrailing(out, s => s === 1);
+  if (squeezed.every(d => d === 1)) return { scalar: true };
+  return { scalar: false, shape: squeezed };
+}
+
+/** Same as `reduceConcreteShape` but for the lattice form. Result
+ *  is either `scalar` (every dim collapses to `one`) or a new dims
+ *  array, post-squeeze. */
+function reduceLatticeDims(
+  dims: DimInfo[],
+  dim: number
+): { scalar: true } | { scalar: false; dims: DimInfo[] } {
+  if (dim > dims.length) {
+    if (dims.every(d => d.kind === "one")) return { scalar: true };
+    return { scalar: false, dims: dims.slice() };
+  }
+  const out = dims.slice();
+  out[dim - 1] = DIM_ONE;
+  const squeezed = squeezeTrailing(out, d => d.kind === "one");
+  if (squeezed.every(d => d.kind === "one")) return { scalar: true };
+  return { scalar: false, dims: squeezed };
+}
+
+// ── Folding ───────────────────────────────────────────────────────────
+
+/** Compile-time evaluation of the reducer when every input element
+ *  is exact. Returns `undefined` to fall back to runtime emission
+ *  (e.g. unsupported axis layouts, oversized results, no input
+ *  exact). */
+function foldExact(
+  spec: KernelSpec,
+  data: Float64Array,
+  shape: number[],
+  axis: AxisAll | AxisFixed
+):
+  | { kind: "scalar"; value: number }
+  | { kind: "tensor"; shape: number[]; data: Float64Array }
+  | undefined {
+  if (axis.kind === "all") {
+    let acc = spec.emptyValue;
+    const n = data.length;
+    if (spec.outputElem === "logical") {
+      // Short-circuit logical reductions; matches the runtime.
+      if (spec.name === "any") {
+        for (let i = 0; i < n; i++) {
+          if (data[i] !== 0) {
+            acc = 1;
+            break;
+          }
+        }
+        return { kind: "scalar", value: acc };
+      }
+      if (spec.name === "all") {
+        acc = 1;
+        for (let i = 0; i < n; i++) {
+          if (data[i] === 0) {
+            acc = 0;
+            break;
+          }
+        }
+        return { kind: "scalar", value: acc };
+      }
+    }
+    if (spec.name === "min" || spec.name === "max") {
+      // NaN-seed with NaN-skip.
+      acc = NaN;
+      for (let i = 0; i < n; i++) {
+        const x = data[i];
+        if (Number.isNaN(x)) continue;
+        if (Number.isNaN(acc) || (spec.name === "min" ? x < acc : x > acc)) {
+          acc = x;
+        }
+      }
+      return { kind: "scalar", value: acc };
+    }
+    // Accumulator-based: sum / prod / mean.
+    for (let i = 0; i < n; i++) {
+      acc = spec.step(acc, data[i], i + 1);
+    }
+    const finalized = spec.finalize ? spec.finalize(acc, n) : acc;
+    return { kind: "scalar", value: finalized };
+  }
+
+  // AxisFixed: reduce along one axis. Output shape comes from
+  // `reduceConcreteShape`; the layout below mirrors numbl's
+  // forEachSlice with column-major fiber stride.
+  const dim = axis.dim;
+  const result = reduceConcreteShape(shape, dim);
+  if (result.scalar) {
+    // Fall back to the AxisAll path (every axis collapses to 1).
+    return foldExact(spec, data, shape, { kind: "all" });
+  }
+  // Compute the per-fiber reduction.
+  const dimIdx = dim - 1;
+  // dim > ndim ⇒ output shape == input shape (copy). We forward the
+  // data verbatim; matches the runtime helper's no-op axis branch.
+  if (dim > shape.length) {
+    if (spec.outputElem === "logical") {
+      // any/all dim > ndim is elementwise cast to logical.
+      const cast = new Float64Array(data.length);
+      for (let i = 0; i < data.length; i++) cast[i] = data[i] !== 0 ? 1 : 0;
+      return { kind: "tensor", shape: result.shape, data: cast };
+    }
+    return {
+      kind: "tensor",
+      shape: result.shape,
+      data: new Float64Array(data),
+    };
+  }
+  const axisLen = shape[dimIdx];
+  let before = 1;
+  for (let i = 0; i < dimIdx; i++) before *= shape[i];
+  let after = 1;
+  for (let i = dimIdx + 1; i < shape.length; i++) after *= shape[i];
+  const outLen = before * after;
+  if (outLen > EXACT_ARRAY_MAX_ELEMENTS) return undefined;
+  const out = new Float64Array(outLen);
+  const slab = before * axisLen;
+  for (let outer = 0; outer < after; outer++) {
+    const slabBase = outer * slab;
+    for (let inner = 0; inner < before; inner++) {
+      let acc =
+        spec.name === "min" || spec.name === "max" ? NaN : spec.emptyValue;
+      let shortCircuited = false;
+      for (let k = 0; k < axisLen; k++) {
+        const x = data[slabBase + inner + k * before];
+        if (spec.name === "min" || spec.name === "max") {
+          if (Number.isNaN(x)) continue;
+          if (Number.isNaN(acc) || (spec.name === "min" ? x < acc : x > acc)) {
+            acc = x;
+          }
+        } else if (spec.outputElem === "logical") {
+          if (spec.name === "any") {
+            if (x !== 0) {
+              acc = 1;
+              shortCircuited = true;
+              break;
+            }
+          } else {
+            // all
+            if (x === 0) {
+              acc = 0;
+              shortCircuited = true;
+              break;
+            }
+          }
+        } else {
+          acc = spec.step(acc, x, k + 1);
+        }
+      }
+      if (
+        !shortCircuited &&
+        spec.outputElem === "double" &&
+        spec.name !== "min" &&
+        spec.name !== "max" &&
+        spec.finalize
+      ) {
+        acc = spec.finalize(acc, axisLen);
+      }
+      out[outer * before + inner] = acc;
+    }
+  }
+  return { kind: "tensor", shape: result.shape, data: out };
+}
+
+// ── Result type construction ──────────────────────────────────────────
+
+function makeResultType(
+  spec: KernelSpec,
+  shape: number[] | undefined,
+  dims: DimInfo[] | undefined,
+  isScalarResult: boolean,
+  exactScalar: number | undefined,
+  exactArray: Float64Array | undefined,
+  sign: Sign
+): Type {
+  if (isScalarResult) {
+    if (spec.outputElem === "logical") {
+      if (exactScalar !== undefined) {
+        return scalarLogical(exactScalar !== 0);
+      }
+      return scalarLogical();
+    }
+    if (exactScalar !== undefined) {
+      return scalarDouble(
+        unifySign(sign, signFromNumber(exactScalar)),
+        exactScalar
+      );
+    }
+    return scalarDouble(sign);
+  }
+  // Tensor result.
+  if (shape !== undefined) {
+    const out: NumericType = exactArray
+      ? tensorDouble(shape, exactArray)
+      : tensorDouble(shape);
+    if (spec.outputElem === "logical") {
+      out.elem = "logical";
+      // Logical result range is {0, 1} → nonneg.
+      out.sign = "nonneg";
+    } else {
+      out.sign = sign;
+    }
+    return out;
+  }
+  // Lattice-only result (no concrete shape).
+  if (dims !== undefined) {
+    const out = tensorDoubleFromDims(dims);
+    if (spec.outputElem === "logical") {
+      out.elem = "logical";
+      out.sign = "nonneg";
+    } else {
+      out.sign = sign;
+    }
+    return out;
+  }
+  // Should be unreachable — every code path either has a shape or
+  // lattice info to construct from.
+  return scalarDouble(sign);
+}
+
+// ── Public entry points ────────────────────────────────────────────────
+
+/** The transfer function. Returns the result type; throws with span
+ *  on rejection cases. */
+export function reductionTransfer(
+  argTypes: Type[],
+  span: Span,
+  spec: KernelSpec
+): Type {
+  const inputType = argTypes[0];
+  if (!isNumeric(inputType) || inputType.isComplex) {
+    throw new TypeError(
+      `'${spec.name}' arg must be a real numeric (got ${inputType.kind})`,
+      span
+    );
+  }
+  if (inputType.elem !== "double" && inputType.elem !== "logical") {
+    throw new TypeError(
+      `'${spec.name}' arg must be double or logical (got ${inputType.elem})`,
+      span
+    );
+  }
+  // min/max: 2-arg form is the elementwise slope. Reject (separate
+  // slope, not part of this family).
+  if (spec.dimArgIndex === 2 && argTypes.length === 2) {
+    throw new UnsupportedConstruct(
+      `'${spec.name}' two-arg form (elementwise '${spec.name}(A, B)') ` +
+        `is not yet supported — use the reduction form ` +
+        `'${spec.name}(A, [], dim)' or '${spec.name}(A)'`,
+      span
+    );
+  }
+  // 3-arg form for min/max requires the [] placeholder in slot 2.
+  if (spec.dimArgIndex === 2 && argTypes.length === 3) {
+    const placeholder = argTypes[1];
+    if (
+      !(
+        isNumeric(placeholder) &&
+        placeholder.elem === "double" &&
+        !placeholder.isComplex &&
+        placeholder.shape !== undefined &&
+        placeholder.shape.length === 2 &&
+        placeholder.shape[0] === 0 &&
+        placeholder.shape[1] === 0
+      )
+    ) {
+      throw new UnsupportedConstruct(
+        `'${spec.name}(A, [], dim)' requires the second arg to be the ` +
+          `empty literal '[]' (got something else)`,
+        span
+      );
+    }
+  }
+  const dimType = argTypes[spec.dimArgIndex];
+  const axis = classifyDimArg(spec.name, dimType, span);
+
+  // Scalar input: identity (or logical cast for any/all).
+  if (isScalar(inputType)) {
+    if (spec.outputElem === "logical") {
+      const xv = exactDouble(inputType);
+      if (xv !== undefined) {
+        return scalarLogical(xv !== 0);
+      }
+      return scalarLogical();
+    }
+    const xv = exactDouble(inputType);
+    if (xv !== undefined) {
+      return scalarDouble(signFromNumber(xv), xv);
+    }
+    return scalarDouble(inputType.sign);
+  }
+
+  // Pick the reduction axis.
+  let resolved: AxisAll | AxisFixed;
+  if (axis.kind === "default") {
+    resolved = chooseDefaultAxis(spec.name, inputType, span);
+  } else {
+    resolved = axis;
+  }
+
+  const nonEmpty = provablyNonEmpty(inputType);
+  const sign = spec.resultSign(inputType, nonEmpty);
+
+  // Fully-exact fold path.
+  const exactArr = exactRealArray(inputType);
+  if (exactArr !== undefined && inputType.shape !== undefined) {
+    const folded = foldExact(spec, exactArr, inputType.shape, resolved);
+    if (folded !== undefined) {
+      if (folded.kind === "scalar") {
+        return makeResultType(
+          spec,
+          undefined,
+          undefined,
+          true,
+          folded.value,
+          undefined,
+          sign
+        );
+      }
+      if (folded.data.length <= EXACT_ARRAY_MAX_ELEMENTS) {
+        return makeResultType(
+          spec,
+          folded.shape,
+          undefined,
+          false,
+          undefined,
+          folded.data,
+          sign
+        );
+      }
+      // Result too big — drop exact, keep shape.
+      return makeResultType(
+        spec,
+        folded.shape,
+        undefined,
+        false,
+        undefined,
+        undefined,
+        sign
+      );
+    }
+  }
+
+  // Non-exact path: compute the result shape on lattice + concrete-shape
+  // form so downstream codegen has the precision to dispatch tensor
+  // vs. scalar.
+  if (resolved.kind === "all") {
+    return makeResultType(
+      spec,
+      undefined,
+      undefined,
+      true,
+      undefined,
+      undefined,
+      sign
+    );
+  }
+  // AxisFixed
+  if (inputType.shape !== undefined) {
+    const r = reduceConcreteShape(inputType.shape, resolved.dim);
+    if (r.scalar) {
+      return makeResultType(
+        spec,
+        undefined,
+        undefined,
+        true,
+        undefined,
+        undefined,
+        sign
+      );
+    }
+    return makeResultType(
+      spec,
+      r.shape,
+      undefined,
+      false,
+      undefined,
+      undefined,
+      sign
+    );
+  }
+  // Lattice-only.
+  const r = reduceLatticeDims(inputType.dims, resolved.dim);
+  if (r.scalar) {
+    return makeResultType(
+      spec,
+      undefined,
+      undefined,
+      true,
+      undefined,
+      undefined,
+      sign
+    );
+  }
+  return makeResultType(
+    spec,
+    undefined,
+    r.dims,
+    false,
+    undefined,
+    undefined,
+    sign
+  );
+}
+
+// ── Codegen ────────────────────────────────────────────────────────────
+
+/** Build the codegenC closure for a reducer. The kernel name powers
+ *  the emitted helper call (`mtoc2_<kernel>_all` / `_dim`). */
+export function reductionCodegen(spec: {
+  name: string;
+  dimArgIndex: 1 | 2;
+  outputElem: "double" | "logical";
+}): (argsC: string[], argTypes: Type[]) => string {
+  return (argsC, argTypes) => {
+    const inputT = argTypes[0];
+    if (!isNumeric(inputT)) {
+      throw new Error(`internal: ${spec.name} codegen got non-numeric arg`);
+    }
+    // Scalar fast path: identity (or `(x != 0)` for logical).
+    if (isScalar(inputT)) {
+      if (spec.outputElem === "logical") {
+        return `((${argsC[0]}) != 0.0 ? 1.0 : 0.0)`;
+      }
+      return argsC[0];
+    }
+    // Tensor path. Determine axis the same way transfer did.
+    const dimType: Type | undefined = argTypes[spec.dimArgIndex];
+    let axis: AxisAll | AxisFixed;
+    if (dimType === undefined) {
+      const a = chooseDefaultAxis(spec.name, inputT, {
+        file: "<codegen>",
+        start: 0,
+        end: 0,
+      });
+      axis = a;
+    } else if (dimType.kind === "String" && dimType.exact === "all") {
+      axis = { kind: "all" };
+    } else if (isNumeric(dimType)) {
+      const v = exactDouble(dimType);
+      if (v === undefined) {
+        throw new Error(
+          `internal: ${spec.name} codegen reached with non-exact dim`
+        );
+      }
+      axis = { kind: "fixed", dim: v };
+    } else {
+      throw new Error(`internal: ${spec.name} codegen unexpected dim type`);
+    }
+    if (axis.kind === "all") {
+      return `mtoc2_${spec.name}_all(${argsC[0]})`;
+    }
+    // AxisFixed. If the lattice shows the result is scalar (every
+    // surviving dim collapses to one), prefer `_all` — it's the same
+    // result and skips the per-fiber loop.
+    if (inputT.shape !== undefined) {
+      const r = reduceConcreteShape(inputT.shape, axis.dim);
+      if (r.scalar) {
+        return `mtoc2_${spec.name}_all(${argsC[0]})`;
+      }
+    } else {
+      const r = reduceLatticeDims(inputT.dims, axis.dim);
+      if (r.scalar) {
+        return `mtoc2_${spec.name}_all(${argsC[0]})`;
+      }
+    }
+    return `mtoc2_${spec.name}_dim(${argsC[0]}, ${axis.dim})`;
+  };
+}
+
+// ── Builtin assembly helper ────────────────────────────────────────────
+
+/** Build a complete `Builtin` registration from a `KernelSpec`. */
+export function defineReducer(spec: KernelSpec): Builtin {
+  const isMinMax = spec.dimArgIndex === 2;
+  return {
+    name: spec.name,
+    arity: isMinMax ? { min: 1, max: 3 } : { min: 1, max: 2 },
+    transfer(argTypes, span) {
+      return reductionTransfer(argTypes, span, spec);
+    },
+    codegenC: reductionCodegen({
+      name: spec.name,
+      dimArgIndex: spec.dimArgIndex,
+      outputElem: spec.outputElem,
+    }),
+    runtimeDeps: [`mtoc2_${spec.name}_all`, `mtoc2_${spec.name}_dim`],
+  };
+}
+
+// ── Per-op sign rules (shared by the registrations) ────────────────────
+
+export function sumSign(t: NumericType, nonEmpty: boolean): Sign {
+  // sum returns 0 on empty input (numbl semantics). So a "positive"
+  // input on a maybe-empty fiber still has 0 as a possible value.
+  switch (t.sign) {
+    case "positive":
+      return nonEmpty ? "positive" : "nonneg";
+    case "nonneg":
+    case "zero":
+      return "nonneg";
+    case "negative":
+      return nonEmpty ? "negative" : "nonpositive";
+    case "nonpositive":
+      return "nonpositive";
+    default:
+      return "unknown";
+  }
+}
+
+export function meanSign(t: NumericType, nonEmpty: boolean): Sign {
+  // mean of an empty fiber is NaN (unknown sign). If non-empty, the
+  // mean preserves the input's bound.
+  if (!nonEmpty) return "unknown";
+  switch (t.sign) {
+    case "positive":
+      return "positive";
+    case "nonneg":
+    case "zero":
+      return "nonneg";
+    case "negative":
+      return "negative";
+    case "nonpositive":
+      return "nonpositive";
+    default:
+      return "unknown";
+  }
+}
+
+export function prodSign(t: NumericType, nonEmpty: boolean): Sign {
+  // prod returns 1 on empty input.
+  switch (t.sign) {
+    case "positive":
+      return "positive"; // 1 or positive — both positive.
+    case "nonneg":
+      return "nonneg"; // 1 (positive) or nonneg.
+    case "zero":
+      return nonEmpty ? "zero" : "unknown"; // empty → 1, non-empty → 0.
+    default:
+      return "unknown"; // sign-mixing can flip everything.
+  }
+}
+
+export function minMaxSign(
+  which: "min" | "max",
+  t: NumericType,
+  nonEmpty: boolean
+): Sign {
+  // Empty min/max → NaN → unknown sign.
+  if (!nonEmpty) return "unknown";
+  if (which === "min") {
+    switch (t.sign) {
+      case "positive":
+        return "positive";
+      case "nonneg":
+      case "zero":
+        return "nonneg";
+      case "negative":
+        return "negative";
+      case "nonpositive":
+        return "nonpositive";
+      default:
+        return "unknown";
+    }
+  }
+  // max
+  switch (t.sign) {
+    case "positive":
+      return "positive";
+    case "nonneg":
+    case "zero":
+      return "nonneg";
+    case "negative":
+      return "negative";
+    case "nonpositive":
+      return "nonpositive";
+    default:
+      return "unknown";
+  }
+}

@@ -85,10 +85,29 @@ mtoc2 is a _static_ translator. Anything outside the supported subset raises
   emits a per-op runtime helper call
   (`mtoc2_tensor_<op>_tt` / `_ts` / `_st`). Matrix `*` `/` (i.e.
   `mtimes` / `mrdivide` between two tensors) is not yet supported.
-- **Reduction**: `sum` on vectors via `mtoc2_sum`; matrix→row-vector
-  reduction deferred. `length` / `numel` emit `mtoc2_length` /
-  `mtoc2_numel` runtime calls (for scalar args, codegen emits the
-  literal `1.0` directly since the C arg is a bare `double`).
+- **Reductions** (`sum`, `prod`, `mean`, `min`, `max`, `any`, `all`)
+  on real-numeric scalars / vectors / matrices / N-D tensors. Three
+  call forms per op: default (`sum(A)` — first non-singleton dim
+  via `chooseDefaultAxis` on mtoc2's `DimInfo` lattice plus
+  concrete shape when set); explicit dim (`sum(A, dim)`, or
+  `min(A, [], dim)` / `max(A, [], dim)` because of MATLAB's slot
+  layout); and the literal `'all'` flag that collapses every axis
+  to a single scalar. Shared transfer/codegen lives in
+  `src/lowering/builtins/reduction/_shape.ts`; the C-side helpers
+  are macro-generated into `src/codegen/runtime/tensor_reduce_real.h`,
+  defining one `mtoc2_<name>_all` (scalar return) and one
+  `mtoc2_<name>_dim` (tensor return) per op. The transfer folds
+  exact tensors up to `EXACT_ARRAY_MAX_ELEMENTS`; above the cap (or
+  on opaque input) codegen routes to the runtime. Deferred: the
+  elementwise 2-arg form `min(A, B)` / `max(A, B)`, the multi-
+  output `[v, i] = min(x)` index-returning form, the
+  `'omitnan'` / `'includenan'` flag, complex input, runtime
+  (non-exact) integer `dim`, and reducers on a genuinely
+  ambiguous lattice (`[notOne, unknown]` without an explicit
+  `dim`). `length` / `numel` are not reducers and stay routed
+  through `mtoc2_length` / `mtoc2_numel` (codegen emits the
+  literal `1.0` for scalar args since the C arg is a bare
+  `double`).
 - **disp** routes on shape: scalar → `mtoc2_disp_double`,
   multi-element tensor → `mtoc2_disp_tensor`.
 - **Indexing & slicing** — scalar reads/writes (`v(i)`, `M(i,j)`,
