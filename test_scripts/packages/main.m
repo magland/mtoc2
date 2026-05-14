@@ -5,6 +5,7 @@ test_two_packages_same_basename();
 test_pkg_func_handle();
 test_pkg_handle_through_local();
 test_pkg_multi_assign();
+test_anon_captures_through_pkg_call();
 
 function test_basic_pkg_call()
   % pkg.foo lives in +pkg/foo.m
@@ -51,4 +52,15 @@ function test_pkg_multi_assign()
   [a, b] = pkg.pair(5);
   disp(a);
   disp(b);
+end
+
+function test_anon_captures_through_pkg_call()
+  % An anonymous function body that calls a package function
+  % (`pkg.foo`) must still discover captures referenced inside the
+  % MethodCall args. Previously `collectAnonCaptures` had no
+  % `MethodCall` case, so `a` was missed → body-lowering errored
+  % "undefined variable 'a'".
+  a = 100;
+  f = @(x) pkg.takes2(x, a);
+  disp(f(3));
 end

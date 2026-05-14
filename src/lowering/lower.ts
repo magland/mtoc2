@@ -3291,6 +3291,20 @@ function collectAnonCaptures(
         collectAnonCaptures(outerEnv, idx, params, names, seen);
       }
       return;
+    case "MethodCall":
+      // `pkg.foo(args)` and `obj.method(args)` both parse as
+      // MethodCall. The base chain may reference a captured variable
+      // (the leftmost ident of `obj.method(...)`) or a workspace name
+      // (the leftmost ident of `pkg.foo(...)`) — `register` filters
+      // out workspace names because they aren't bound in outerEnv.
+      collectAnonCaptures(outerEnv, e.base, params, names, seen);
+      for (const a of e.args)
+        collectAnonCaptures(outerEnv, a, params, names, seen);
+      return;
+    case "SuperMethodCall":
+      for (const a of e.args)
+        collectAnonCaptures(outerEnv, a, params, names, seen);
+      return;
     default:
       // Other expression kinds remaining (literals, etc.) carry no
       // captures; any unsupported expression in the body fails when
