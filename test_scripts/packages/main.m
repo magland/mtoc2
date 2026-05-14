@@ -7,6 +7,7 @@ test_pkg_handle_through_local();
 test_pkg_multi_assign();
 test_anon_captures_through_pkg_call();
 test_pkg_multi_drop_all();
+test_handle_unify_distinguishes_qualified_targets();
 
 function test_basic_pkg_call()
   % pkg.foo lives in +pkg/foo.m
@@ -53,6 +54,24 @@ function test_pkg_multi_assign()
   [a, b] = pkg.pair(5);
   disp(a);
   disp(b);
+end
+
+function test_handle_unify_distinguishes_qualified_targets()
+  % Two handles to package functions with the same BASENAME (foo)
+  % but different QUALIFIED names (pkg.foo vs other.foo). Passing
+  % them through `apply` must produce two distinct specializations
+  % so each call routes to its own target. Previously
+  % `HandleType.targetName` was set to the basename
+  % (`target.ast.name`), so both handles canonicalized to the same
+  % type, the spec key matched, and the second `apply` call reused
+  % the first's spec body — silently calling pkg.foo where the
+  % source asked for other.foo.
+  disp(apply_handle(@pkg.foo, 5));   % pkg.foo(5)   = 51
+  disp(apply_handle(@other.foo, 5)); % other.foo(5) = 4997
+end
+
+function y = apply_handle(h, x)
+  y = h(x);
 end
 
 function test_pkg_multi_drop_all()

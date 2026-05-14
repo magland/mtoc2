@@ -2688,7 +2688,11 @@ export class Lowerer {
         e.span
       );
     }
-    const ty = handleType(target.ast.name, target.ast, []);
+    // Use the source-level reference name (e.g. `pkg.foo`, `sq`) — NOT
+    // `target.ast.name` (the basename) — so two handles to differently-
+    // qualified functions with the same basename (`@pkg.foo` vs
+    // `@other.foo`) produce distinct canonical types and don't unify.
+    const ty = handleType(e.name, target.ast, []);
     return { kind: "HandleLit", captures: [], ty, span: e.span };
   }
 
