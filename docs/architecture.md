@@ -81,12 +81,16 @@ Two tensor IR nodes, split by exactness:
   `mtoc2_tensor_from_matrix` (R×C) with a C99 compound-literal
   `(double[]){...}` of the per-element expressions.
 
-`Assign` carries a `materialize: boolean` flag in addition to
-`declare`. `materialize: false` marks a compile-time-only assignment
-(today: `TensorLit` RHS) that updates the env's type but emits no C.
-`materialize: true` always emits — for owned types via
+Every `Assign` emits C. For owned types via
 `mtoc2_tensor_assign(&v, rhs)`, for scalars via `<cType> v = rhs;`
-(declare) or `v = rhs;` (reassign).
+(declare) or `v = rhs;` (reassign). Exact-`TensorLit` RHS materializes
+at the Assign site via `mtoc2_tensor_from_row` / `_from_matrix` —
+the data was computed at compile time but is realized as a live C
+tensor. The env's type still carries the `exact` for downstream
+folding, but the variable always holds the runtime value too. This
+"always-materialize" rule is the simple-correct policy; elision of
+redundant materialization (when every consumer fully folds) is a
+future optimization.
 
 ### Builtins (`builtins.ts`)
 

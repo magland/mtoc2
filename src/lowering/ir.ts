@@ -123,11 +123,6 @@ export interface Assign {
    *  every Assign uses the assign helper, so this flag is ignored
    *  for owned types. */
   declare: boolean;
-  /** True iff this Assign produces any C output. False when the RHS
-   *  is purely compile-time (a TensorLit or a value otherwise
-   *  fully-folded), in which case the env's type update is the only
-   *  effect of the statement. */
-  materialize: boolean;
   ty: Type;
   expr: IRExpr;
   span: Span;

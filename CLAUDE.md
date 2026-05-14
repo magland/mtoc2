@@ -133,6 +133,34 @@ Tensors (and future owned types: strings, structs, classes) follow mtoc's
   allocates fresh, so elementwise IS owned-producing here. (Inline
   iter-loop fusion is a future optimization.)
 
+### Materialize every tensor Assign
+
+Every tensor Assign emits C — including when the RHS is an exact
+`TensorLit`. The lit's data is materialized via `mtoc2_tensor_from_row`
+or `mtoc2_tensor_from_matrix` at the assignment site. The exact value
+also stays in the env's type for downstream folding (subsequent
+arithmetic, `length`/`numel`/`sum` reductions, scalar Ident-read
+literalization), but the C variable always holds the runtime value too.
+
+Why always-materialize: a tensor Assign with `TensorLit` RHS used to be
+skipped at emit, with reads substituting to TensorLit. That broke when
+the variable was later mutated (loop body) or had its exact stripped by
+`%!numbl:opaque` — subsequent reads found an uninitialized empty tensor
+and produced NaN. Always-materializing is the simple-correct rule.
+Eliding redundant materialization (when every consumer fully folds)
+is a future optimization.
+
+### Scalar exact still substitutes at Ident-read
+
+For scalar reals, Ident reads with `exact: number` still substitute to a
+`NumLit` at the read site so the C output contains the literal value
+where the variable would have appeared. This lets the C compiler
+constant-fold downstream (e.g. `mtoc2_disp_double(5.0)` rather than
+`mtoc2_disp_double(x)`). Tensor exact does NOT substitute at Ident
+reads — the runtime variable holds the value, and downstream folding
+still works because builtin `transfer` functions read `.exact` from
+`argTypes` rather than from the IR node kind.
+
 ## Testing-only directive
 
 `%!numbl:opaque <var> [<var>...]` strips `exact` from each named

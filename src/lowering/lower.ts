@@ -135,9 +135,8 @@ export class Lowerer {
    *    so cross-runner output is unaffected. */
   private lowerDirective(
     s: Extract<Stmt, { type: "Directive" }>
-  ): IRStmt | IRStmt[] | null {
+  ): IRStmt | null {
     if (s.directive === "opaque") {
-      const out: IRStmt[] = [];
       for (const name of s.args) {
         const entry = this.env.get(name);
         if (entry === undefined) {
@@ -146,48 +145,10 @@ export class Lowerer {
             s.span
           );
         }
-        // For exact tensors, the value lived purely in the type
-        // env — there's no C-side declaration yet. We synthesize an
-        // Assign that materializes the data as a TensorBuild so
-        // subsequent reads can reference a real C variable. (Scalar
-        // exact assigns are always materialized as `double x = …;`
-        // by the current path, so stripping env is enough there.)
-        if (
-          entry.ty.kind === "Numeric" &&
-          entry.ty.exact instanceof Float64Array &&
-          entry.ty.shape !== undefined
-        ) {
-          const data = entry.ty.exact;
-          const shape = entry.ty.shape;
-          const elements: IRExpr[] = [];
-          for (let i = 0; i < data.length; i++) {
-            elements.push({
-              kind: "NumLit",
-              value: data[i],
-              ty: scalarDouble(signFromNumber(data[i]), data[i]),
-              span: s.span,
-            });
-          }
-          const newTy = tensorDouble(shape);
-          out.push({
-            kind: "Assign",
-            name,
-            cName: entry.cName,
-            declare: false,
-            materialize: true,
-            ty: newTy,
-            expr: {
-              kind: "TensorBuild",
-              elements,
-              shape: shape.slice(),
-              ty: newTy,
-              span: s.span,
-            },
-            span: s.span,
-          });
-          this.env.set(name, { cName: entry.cName, ty: newTy });
-          continue;
-        }
+        // Strip exact from the env. The variable's prior Assign
+        // already materialized in C (always-materialize), so the
+        // runtime path can read its current buffer contents — no
+        // synthetic re-assignment needed here.
         if (entry.ty.kind === "Numeric" && entry.ty.exact !== undefined) {
           const { exact: _e, ...rest } = entry.ty;
           void _e;
@@ -199,7 +160,7 @@ export class Lowerer {
           });
         }
       }
-      return out.length === 0 ? null : out;
+      return null;
     }
     // Unknown directives are silently ignored — keeps mtoc2 forward-
     // compatible with numbl directives that don't translate (e.g.
@@ -290,7 +251,6 @@ export class Lowerer {
       name: tempName,
       cName: tempName,
       declare: true,
-      materialize: true,
       ty: e.ty,
       expr: e,
       span: e.span,
@@ -349,15 +309,11 @@ export class Lowerer {
     this.declared.add(name);
     const cName = existing?.cName ?? name;
     this.env.set(name, { cName, ty: expr.ty });
-    // A TensorLit RHS is purely compile-time: env's type update is
-    // the only side effect; emit can drop the statement.
-    const materialize = expr.kind !== "TensorLit";
     return {
       kind: "Assign",
       name,
       cName,
       declare,
-      materialize,
       ty: expr.ty,
       expr,
       span,
@@ -588,25 +544,24 @@ export class Lowerer {
         e.span
       );
     }
-    // Substitute Var → literal when exact is set.
-    if (isNumeric(entry.ty) && entry.ty.exact !== undefined) {
-      if (typeof entry.ty.exact === "number" && isScalarRealNumeric(entry.ty)) {
-        return {
-          kind: "NumLit",
-          value: entry.ty.exact,
-          ty: entry.ty,
-          span: e.span,
-        };
-      }
-      if (entry.ty.exact instanceof Float64Array && entry.ty.shape) {
-        return {
-          kind: "TensorLit",
-          data: entry.ty.exact,
-          shape: entry.ty.shape.slice(),
-          ty: entry.ty,
-          span: e.span,
-        };
-      }
+    // Substitute scalar-real Var → NumLit when exact is set. This emits
+    // a literal in C where the variable would have appeared, letting the
+    // C compiler constant-fold downstream. Tensor exact intentionally
+    // does NOT substitute at Ident-read sites: we always materialize
+    // tensors in C, and downstream folding still works because builtins'
+    // `transfer` reads `.exact` from `argTypes` (it doesn't need the IR
+    // node to be a literal).
+    if (
+      isNumeric(entry.ty) &&
+      typeof entry.ty.exact === "number" &&
+      isScalarRealNumeric(entry.ty)
+    ) {
+      return {
+        kind: "NumLit",
+        value: entry.ty.exact,
+        ty: entry.ty,
+        span: e.span,
+      };
     }
     return {
       kind: "Var",

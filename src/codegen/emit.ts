@@ -127,12 +127,11 @@ function fnParamList(fn: IRFunc): string {
 }
 
 /** Walk the body and collect cNames of locals that need a tensor
- *  declaration at function top. A name is "owned" if any of its
- *  Assigns has materialize=true && isOwned(ty). Walks through If /
- *  While / For bodies — owned locals declared inside a block still
- *  live in the surrounding function's stack frame (mtoc puts every
- *  local declaration at function top to keep the free-on-exit walk
- *  simple). */
+ *  declaration at function top. Any Assign whose LHS is `isOwned(ty)`
+ *  marks the name. Walks through If / While / For bodies — owned
+ *  locals declared inside a block still live in the surrounding
+ *  function's stack frame (every local declaration is hoisted to
+ *  function top to keep the free-on-exit walk simple). */
 function collectOwnedLocals(stmts: IRStmt[]): string[] {
   const seen = new Set<string>();
   const order: string[] = [];
@@ -140,7 +139,7 @@ function collectOwnedLocals(stmts: IRStmt[]): string[] {
     for (const s of ss) {
       switch (s.kind) {
         case "Assign":
-          if (s.materialize && isOwned(s.ty) && !seen.has(s.cName)) {
+          if (isOwned(s.ty) && !seen.has(s.cName)) {
             seen.add(s.cName);
             order.push(s.cName);
           }
@@ -224,7 +223,6 @@ function emitStmt(
     case "ExprStmt":
       return `${indent}${emitExpr(s.expr, state)};`;
     case "Assign": {
-      if (!s.materialize) return null;
       if (isOwned(s.ty)) {
         useRuntimeByName(state, "mtoc2_tensor_assign");
         const rhs = emitTensorRhs(s.expr, state);
@@ -298,16 +296,37 @@ function emitStmt(
   }
 }
 
-/** Tensor-typed RHS for an Assign. Var reads of a tensor wrap in
- *  `mtoc2_tensor_copy` so the receiver gets a freshly-owned value
- *  (the assign helper consumes it). TensorBuild / Call already
- *  produce freshly-owned tensors; pass through. */
+/** Tensor-typed RHS for an Assign. Each kind produces a freshly-owned
+ *  tensor that `mtoc2_tensor_assign` consumes:
+ *  - `Var`         → `mtoc2_tensor_copy(name)` (deep copy)
+ *  - `TensorLit`   → `mtoc2_tensor_from_row/_matrix(...)` materialized
+ *                    from the compile-time-known data
+ *  - everything else → `emitExpr` (TensorBuild + Binary/Unary/Call
+ *                    already emit fresh-allocating helpers) */
 function emitTensorRhs(e: IRExpr, state: RuntimeState): string {
   if (e.kind === "Var") {
     useRuntimeByName(state, "mtoc2_tensor_copy");
     return `mtoc2_tensor_copy(${e.cName})`;
   }
+  if (e.kind === "TensorLit") {
+    return emitTensorLitMaterialize(e.data, e.shape, state);
+  }
   return emitExpr(e, state);
+}
+
+function emitTensorLitMaterialize(
+  data: Float64Array,
+  shape: number[],
+  state: RuntimeState
+): string {
+  const [rows, cols] = shape;
+  const flat = Array.from(data).map(formatDouble).join(", ");
+  if (rows === 1) {
+    useRuntimeByName(state, "mtoc2_tensor_from_row");
+    return `mtoc2_tensor_from_row((double[]){${flat}}, ${cols})`;
+  }
+  useRuntimeByName(state, "mtoc2_tensor_from_matrix");
+  return `mtoc2_tensor_from_matrix((double[]){${flat}}, ${rows}, ${cols})`;
 }
 
 function emitExpr(e: IRExpr, state: RuntimeState): string {

@@ -110,13 +110,26 @@ work with.
 
 Three rules govern how types thread through the lowerer.
 
-### 1. Ident reads substitute literals
+### 1. Scalar Ident reads substitute literals
 
 When the lowerer looks up `x` in env and finds `ty.exact` is a
-scalar-real number, it returns a `NumLit` IR node instead of a `Var`.
-Effectively, every read of a known variable is rewritten to its
-literal value. Downstream binary ops see two `NumLit`s and the
-builtin's transfer folds them.
+scalar-real `number`, it returns a `NumLit` IR node instead of a `Var`.
+The C output then contains the literal value where the variable would
+have appeared (`mtoc2_disp_double(5.0)` rather than
+`mtoc2_disp_double(x)`), letting the C compiler constant-fold
+downstream.
+
+Tensor exact does NOT substitute at Ident-read sites — the runtime
+variable holds the value (always-materialize), and downstream folding
+still works because builtin `transfer` functions read `.exact` from
+`argTypes` rather than from the IR node kind. So `b = a + 1` where
+`a` has tensor exact still folds the elementwise add at compile time
+(the transfer sees both operands' exacts), but `disp(a)` emits
+`mtoc2_disp_tensor(a)` using the materialized variable — except that
+disp's `codegenC` checks `argTypes[0].exact` and emits a compile-time
+`fputs(...)` when the exact is known, ignoring the materialized
+variable. Both paths are correct; the difference is whether the C
+compiler or our lowerer does the constant work.
 
 ### 2. Control-flow joins drop exact (unless both sides agree)
 
