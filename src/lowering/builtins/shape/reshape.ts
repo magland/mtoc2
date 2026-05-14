@@ -207,8 +207,9 @@ export const reshape: Builtin = {
 
     // Element-count check when the input shape is statically known.
     // (When `shape` is undefined — e.g. a tensor field whose layout the
-    // type system only tracks per-axis as `notOne`/`unknown` — we defer
-    // the check to the runtime helper, which aborts on mismatch.)
+    // type system only tracks per-axis with at least one `unknown` —
+    // we defer the check to the runtime helper, which aborts on
+    // mismatch.)
     if (a.shape !== undefined) {
       const inTotal = a.shape.reduce((p, d) => p * d, 1);
       if (inTotal !== newTotal) {
@@ -221,7 +222,7 @@ export const reshape: Builtin = {
     }
 
     // Output type. When new shape is all-ones the output is a scalar at
-    // the type level (every dim is "one"); otherwise it's a tensor.
+    // the type level (every dim is exact 1); otherwise it's a tensor.
     if (newShape.every(d => d === 1)) {
       // Scalar output. Propagate exact:
       //   - scalar input with exact: number → carry the value directly.

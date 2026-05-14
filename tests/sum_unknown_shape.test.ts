@@ -2,9 +2,9 @@
  * Regression suite for reducer lowering at the edges of the
  * `DimInfo` lattice — specifically: a `sum(t)` whose input has at
  * least one `unknown`-lattice dim. The reducer family's transfer
- * function (see `src/lowering/builtins/reduction/_shape.ts`)
- * uses the per-axis `notOne`/`one`/`unknown` info plus the
- * concrete `shape` (when present) to pick the reduction axis.
+ * function (see `src/lowering/builtins/reduction/_shape.ts`) uses
+ * the per-axis `exact` / `unknown` info plus the concrete `shape`
+ * (when present) to pick the reduction axis.
  *
  * Cross-runner can't validate translate-time rejections (numbl
  * accepts the same source), so the genuinely-ambiguous case
@@ -63,11 +63,12 @@ describe("sum on a shape-unknown tensor", () => {
   });
 
   it("rejects an ambiguous-lattice tensor with no explicit dim", () => {
-    // A genuinely ambiguous lattice — dims are `[notOne, unknown]`
-    // (e.g. a struct field declared with a notOne row but an unknown
-    // column). With no explicit dim arg the reducer can't pick an
-    // axis (numbl's `firstReduceDim` would pick the leading notOne,
-    // but only because it can see the actual shape at runtime).
+    // A genuinely ambiguous lattice — e.g. dims `[exact 3, unknown]`
+    // (a struct field declared with a known leading row but an
+    // unknown column count). With no explicit dim arg the reducer
+    // can't pick an axis (numbl's `firstReduceDim` would pick the
+    // leading non-1, but only because it can see the actual shape
+    // at runtime).
     let caught: unknown = null;
     try {
       lower(`

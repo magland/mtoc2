@@ -1352,13 +1352,12 @@ export class Lowerer {
       if (n === 1) return start;
       resultTy = tensorDouble([1, n]);
     } else {
-      resultTy = tensorDouble([1, 1]); // placeholder; will be overridden
       // Build a dim-only type when length is runtime.
       resultTy = {
         kind: "Numeric",
         elem: "double",
         isComplex: false,
-        dims: [{ kind: "one" }, { kind: "notOne" }],
+        dims: [{ kind: "exact", value: 1 }, { kind: "unknown" }],
         sign: "unknown",
       };
     }

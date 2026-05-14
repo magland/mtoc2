@@ -28,8 +28,8 @@ function elemwiseResultShape(
   name: string,
   span: Span
 ): number[] | null {
-  const aMulti = a.dims.some(d => d.kind !== "one");
-  const bMulti = b.dims.some(d => d.kind !== "one");
+  const aMulti = isMultiElement(a);
+  const bMulti = isMultiElement(b);
   if (!aMulti && !bMulti) return null; // scalar OP scalar
   if (!aMulti) return b.shape ? b.shape.slice() : null;
   if (!bMulti) return a.shape ? a.shape.slice() : null;

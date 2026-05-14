@@ -25,6 +25,7 @@ import {
   scalarDouble,
   signFromNumber,
   isNumeric,
+  isScalar,
 } from "../../types.js";
 import type { Type } from "../../types.js";
 import type { Builtin } from "../registry.js";
@@ -56,7 +57,7 @@ function resolveShape(
       );
     }
     // Shape arg must be a real scalar — every axis statically 1.
-    if (!a.dims.every(d => d.kind === "one")) {
+    if (!isScalar(a)) {
       throw new TypeError(
         `'${name}' arg ${i + 1} must be a scalar real double (got tensor)`,
         span

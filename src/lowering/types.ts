@@ -93,17 +93,21 @@ export function flipSign(s: Sign): Sign {
 
 // ── Dimensions ──────────────────────────────────────────────────────────
 
-/** Per-axis dimension knowledge.
- *  - "one" : statically known to be 1 along this axis (i.e. scalar/row/col).
- *  - "notOne" : statically known to be > 1.
- *  - "unknown" : no info.
- */
-export type DimInfo =
-  | { kind: "one" }
-  | { kind: "notOne" }
-  | { kind: "unknown" };
+/** Per-axis dimension knowledge. Either the exact non-negative integer
+ *  size is known, or we have no info. There's no separate ">1" lattice
+ *  state — call sites that previously cared about "definitely > 1"
+ *  now check `d.kind === "exact" && d.value !== 1` (or `value > 1`,
+ *  depending on whether a zero-sized axis should count).
+ *  When all entries in a `dims` array are `exact`, the surrounding
+ *  `NumericType.shape` is also set; the two views never disagree. */
+export type DimInfo = { kind: "exact"; value: number } | { kind: "unknown" };
 
-export const DIM_ONE: DimInfo = { kind: "one" };
+export const DIM_ONE: DimInfo = { kind: "exact", value: 1 };
+
+/** Convenience: does this `DimInfo` statically pin the axis to 1? */
+export function isDimOne(d: DimInfo): boolean {
+  return d.kind === "exact" && d.value === 1;
+}
 
 // ── Exact value (for scalars; arrays later, capped) ─────────────────────
 
@@ -127,13 +131,14 @@ export interface NumericType {
   kind: "Numeric";
   elem: NumericElem;
   isComplex: boolean;
-  /** Abstract per-axis lattice: one / notOne / unknown. Always present.
-   *  Length 2 for scalars (`[{one},{one}]`); same length as `shape`
-   *  when `shape` is set. */
+  /** Per-axis dim info: each axis is either `{exact, value}` or
+   *  `unknown`. Always present. Length 2 for scalars
+   *  (`[{exact,1},{exact,1}]`); same length as `shape` when `shape`
+   *  is set. */
   dims: DimInfo[];
-  /** Statically-known integer shape, when available (always set for
-   *  exact tensors; usually set when `exact` is set on a scalar too).
-   *  `shape[i] === 1` ↔ `dims[i].kind === "one"`. */
+  /** Statically-known integer shape, when available (always set when
+   *  every entry in `dims` is `exact`; mirrors those values).
+   *  `shape[i]` equals `dims[i].value` for every axis. */
   shape?: number[];
   sign: Sign;
   exact?: NumericExact;
@@ -264,32 +269,34 @@ export function scalarLogical(exact?: boolean): NumericType {
 
 /** Real-double tensor built from a per-axis `dims` lattice. Used by
  *  slice-read result typing when the slot pattern leaves at least one
- *  axis with a runtime-only length (a `Range` slot whose count isn't a
- *  static literal). When every dim is statically known to be `1` or
- *  `>1`, callers should prefer `tensorDouble(shape)` (concrete shape)
- *  so downstream elementwise ops can use static shape matching.
+ *  axis with a runtime-only length (an `unknown` `DimInfo`). When every
+ *  dim turns out to be `exact`, this function also populates `shape`
+ *  so downstream code can take the concrete-shape paths uniformly.
  *
  *  Trailing singletons in `dims` are stripped subject to a 2-axis
  *  minimum, matching numbl's tensor shape-normalization rule. */
 export function tensorDoubleFromDims(dims: DimInfo[]): NumericType {
   const trimmed = dims.slice();
-  while (trimmed.length > 2 && trimmed[trimmed.length - 1].kind === "one") {
+  while (trimmed.length > 2 && isDimOne(trimmed[trimmed.length - 1])) {
     trimmed.pop();
   }
-  return {
+  const t: NumericType = {
     kind: "Numeric",
     elem: "double",
     isComplex: false,
     dims: trimmed,
     sign: "unknown",
   };
+  if (trimmed.every(d => d.kind === "exact")) {
+    t.shape = trimmed.map(d => (d as { kind: "exact"; value: number }).value);
+  }
+  return t;
 }
 
 /** Real-double tensor with statically-known shape. `dims` is derived
- *  from `shape` (axis of length 1 → `{kind:"one"}`, else
- *  `{kind:"notOne"}`). When `exact` is provided, its length must equal
- *  the shape's product; the layout is column-major (matching numbl's
- *  `RuntimeTensor.data`).
+ *  from `shape` (`{kind:"exact", value: s}` per axis). When `exact` is
+ *  provided, its length must equal the shape's product; the layout is
+ *  column-major (matching numbl's `RuntimeTensor.data`).
  *
  *  When `exact` is provided, `sign` is derived from the actual values
  *  via `signFromExactArray`. This is what lets `sqrt([0 1 4 9])` pass
@@ -302,7 +309,7 @@ export function tensorDouble(
   exact?: Float64Array
 ): NumericType {
   const dims: DimInfo[] = shape.map(s =>
-    s === 1 ? DIM_ONE : { kind: "notOne" }
+    s === 1 ? DIM_ONE : { kind: "exact", value: s }
   );
   const t: NumericType = {
     kind: "Numeric",
@@ -395,7 +402,7 @@ export function fieldType(t: Type, name: string): Type | undefined {
 
 export function isScalar(t: Type): boolean {
   if (!isNumeric(t)) return false;
-  return t.dims.every(d => d.kind === "one");
+  return t.dims.every(isDimOne);
 }
 
 export function isScalarRealDouble(t: Type): boolean {
@@ -413,24 +420,26 @@ export function isScalarRealNumeric(t: Type): boolean {
   );
 }
 
-/** True when any axis is statically known to be > 1 (or unknown).
+/** True when any axis is statically known to be ≠ 1 (or unknown).
  *  Drives the scalar/tensor split in codegen: scalars compile to bare
- *  `double`; multi-element values compile to `mtoc2_tensor_t`. */
+ *  `double`; multi-element values compile to `mtoc2_tensor_t`. A
+ *  zero-sized axis (`{exact, 0}`) also returns true — an empty tensor
+ *  still needs tensor storage. */
 export function isMultiElement(t: Type): boolean {
-  return isNumeric(t) && t.dims.some(d => d.kind !== "one");
+  return isNumeric(t) && t.dims.some(d => !isDimOne(d));
 }
 
-/** Statically provable to contain at least one element. True iff
- *  every dim is statically known (no `unknown` lattice slots) AND, if
- *  a concrete `shape` is set, every entry is > 0. Used by reductions
- *  to decide whether the empty-input edge case (sum→0, prod→1,
- *  min/max→NaN, mean→NaN) is reachable; tighter sign rules apply
- *  only on the provably-non-empty branch. */
+/** Statically provable to contain at least one element. True iff every
+ *  dim is `exact` with a positive value (equivalently, when `shape` is
+ *  set, every entry is > 0). Used by reductions to decide whether the
+ *  empty-input edge case (sum→0, prod→1, min/max→NaN, mean→NaN) is
+ *  reachable; tighter sign rules apply only on the provably-non-empty
+ *  branch. */
 export function provablyNonEmpty(t: NumericType): boolean {
   if (t.shape !== undefined) {
     return t.shape.every(s => s > 0);
   }
-  return t.dims.every(d => d.kind !== "unknown");
+  return t.dims.every(d => d.kind === "exact" && d.value > 0);
 }
 
 /** Owned-heap-value types — i.e. types whose C representation holds a
@@ -622,7 +631,8 @@ export function unify(a: Type, b: Type): Type {
 }
 
 function unifyDim(a: DimInfo, b: DimInfo): DimInfo {
-  if (a.kind === b.kind) return a;
+  if (a.kind === "exact" && b.kind === "exact" && a.value === b.value) return a;
+  if (a.kind === "unknown" && b.kind === "unknown") return a;
   return { kind: "unknown" };
 }
 
@@ -643,9 +653,7 @@ export function typeToString(t: Type): string {
         t.shape !== undefined
           ? t.shape.join("×")
           : t.dims
-              .map(d =>
-                d.kind === "one" ? "1" : d.kind === "notOne" ? ">1" : "?"
-              )
+              .map(d => (d.kind === "exact" ? String(d.value) : "?"))
               .join("×");
       s += `[${dimsStr}]`;
       if (t.sign !== "unknown") s += `:${t.sign}`;
@@ -738,7 +746,7 @@ function canon(t: Type): unknown {
         k: "N",
         e: t.elem,
         c: t.isComplex,
-        d: t.dims.map(d => d.kind),
+        d: t.dims.map(d => (d.kind === "exact" ? d.value : "?")),
         s: t.sign,
       };
       if (t.shape !== undefined) out.sh = t.shape;

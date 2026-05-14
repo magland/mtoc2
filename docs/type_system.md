@@ -73,12 +73,16 @@ type Type =
 - `elem` is the underlying element type. Today's path uses `double`
   (and `logical` for comparison results).
 - `isComplex` is a separate axis from `elem` so the lattice stays flat.
-- `dims` is a per-axis lattice — `{kind: "one"}` (scalar along that
-  axis), `{kind: "notOne"}` (length ≥ 2, statically known), or
-  `{kind: "unknown"}`. Scalars carry `[{one}, {one}]`.
+- `dims` is a per-axis lattice — each entry is either
+  `{kind: "exact", value: n}` (the axis length is statically known to
+  be the non-negative integer `n`) or `{kind: "unknown"}` (no static
+  info). Scalars carry `[{exact, 1}, {exact, 1}]`. The convenience
+  predicate `isDimOne(d)` covers the common "statically 1" check; call
+  sites that need "definitely > 1" inline
+  `d.kind === "exact" && d.value > 1`.
 - `shape` is the statically-known integer shape when available
-  (always set for exact tensors, and for scalars via the factories).
-  Consistent with `dims`: `shape[i] === 1` ↔ `dims[i].kind === "one"`.
+  (always set when every `dims[i]` is `exact`, and for scalars via the
+  factories). When set, `shape[i]` equals `dims[i].value`.
 - Both `dims` and `shape` are variable-length, capped at the same
   `MTOC2_MAX_NDIM = 8` axes that the C runtime allows. ND tensors
   (rank > 2) are constructed via the `zeros` / `ones` builtins;
@@ -87,9 +91,9 @@ type Type =
 - `provablyNonEmpty(t: NumericType)` is the lattice-aware
   "definitely contains ≥ 1 element" predicate the reducer family
   uses to refine sign / exact bounds (empty `sum → 0`, `prod → 1`,
-  `min/max → NaN`, etc.). True iff `shape` is concrete with no
-  zeros, or — with no concrete shape — every `dims[i].kind !==
-"unknown"`. Scalars are always provably non-empty.
+  `min/max → NaN`, etc.). True iff every `dims[i]` is `exact` with a
+  positive value (equivalently: `shape` is concrete with no zeros).
+  Scalars are always provably non-empty.
 - `sign` is one of `positive | nonneg | negative | nonpositive | zero
 | nonzero | unknown`. Coarser than exact but useful when exact isn't
   available (e.g. `unifySign("positive", "positive") === "positive"`).

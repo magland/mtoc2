@@ -9,8 +9,8 @@
  *
  * Scalars never use this struct — real scalars are bare `double`,
  * complex scalars are `double _Complex`. Anything the type system
- * classifies as multi-element (any axis is `notOne`) gets one
- * `mtoc2_tensor_t` value. The data buffers are column-major to match
+ * classifies as multi-element (any axis is not statically 1) gets
+ * one `mtoc2_tensor_t` value. The data buffers are column-major to match
  * MATLAB / LAPACK.
  *
  * Shape: `ndim` axes with sizes `dims[0..ndim-1]`. The minimum

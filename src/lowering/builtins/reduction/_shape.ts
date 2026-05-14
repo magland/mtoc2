@@ -6,18 +6,15 @@
  *
  * Numbl is the dialect oracle (see `../numbl/src/numbl-core/interpreter/
  * builtins/reductions.ts`). The shape rules here mirror numbl's
- * `shapeAfterReduction` against mtoc2's three-state DimInfo lattice
- * (`one` / `notOne` / `unknown`) plus concrete `shape` when set.
+ * `shapeAfterReduction` against mtoc2's `DimInfo` lattice
+ * (`{exact, value}` / `unknown`) plus concrete `shape` when set.
  *
- * The lattice analysis is sharper than numbl's static type pass in two
- * places worth flagging:
- *   - A `(unknown, one, ..., one)` shape signature (e.g. a slice
+ * The lattice analysis is sharper than numbl's static type pass in one
+ * place worth flagging:
+ *   - A `(unknown, 1, ..., 1)` dims signature (e.g. a slice
  *     `M(:, 2:3)` of a known-row-vector `M`) proves the output is
  *     scalar even though the leading dim's runtime length is unknown,
  *     because every later axis is statically `1`.
- *   - Per-axis `notOne` lattice slots let elementwise transfer fns
- *     keep tensor-vs-scalar dispatch precise even without a concrete
- *     `shape`.
  *
  * Folding: when every input element is exact (scalar `t.exact: number`
  * or tensor `t.exact: Float64Array`), the transfer computes the
@@ -35,6 +32,7 @@ import { UnsupportedConstruct, TypeError } from "../../errors.js";
 import {
   DIM_ONE,
   EXACT_ARRAY_MAX_ELEMENTS,
+  isDimOne,
   isNumeric,
   isScalar,
   provablyNonEmpty,
@@ -150,7 +148,7 @@ function classifyDimArg(
  *  Returns `all` for the degenerate `(1, 1, ...)` case (matches
  *  scalar input), `fixed(k)` for a clearly chosen axis, or throws
  *  for the genuinely ambiguous case (`unknown` leading dim followed
- *  by at least one `notOne` or another `unknown`). */
+ *  by at least one known-non-1 or another `unknown`). */
 function chooseDefaultAxis(
   name: string,
   t: NumericType,
@@ -164,31 +162,32 @@ function chooseDefaultAxis(
     if (nonSingleton === -1) return { kind: "all" };
     return { kind: "fixed", dim: nonSingleton + 1 };
   }
-  // Lattice walk. First `notOne` wins.
+  // Lattice walk. First dim known to be ≠ 1 wins; an `unknown` before
+  // any non-1 exact dim is ambiguous unless every later dim is `1`.
   for (let i = 0; i < t.dims.length; i++) {
     const d = t.dims[i];
-    if (d.kind === "notOne") {
+    if (d.kind === "exact" && d.value !== 1) {
       return { kind: "fixed", dim: i + 1 };
     }
     if (d.kind === "unknown") {
-      // Hit `unknown` before any `notOne`. If every later dim is
-      // `one`, the leading axis is the only candidate — output is
-      // scalar regardless of its runtime length (whether 1×… or N×1×…
-      // both reduce to a single scalar).
-      if (t.dims.slice(i + 1).every(later => later.kind === "one")) {
+      // Hit `unknown` before any known-non-1 dim. If every later dim
+      // is statically 1, the leading axis is the only candidate —
+      // output is scalar regardless of its runtime length (whether
+      // 1×… or N×1×… both reduce to a single scalar).
+      if (t.dims.slice(i + 1).every(isDimOne)) {
         return { kind: "all" };
       }
       throw new UnsupportedConstruct(
         `'${name}' on a tensor with ambiguous lattice ` +
-          `(${t.dims.map(d => d.kind).join("×")}): can't deduce the ` +
+          `(${t.dims.map(d => (d.kind === "exact" ? String(d.value) : "?")).join("×")}): can't deduce the ` +
           `reduction axis — pass an explicit dim (e.g. ` +
           `${name}(A, 1)) or 'all'`,
         span
       );
     }
-    // `one`: skip, no contribution.
+    // exact value 1: skip, no contribution.
   }
-  // All dims are `one`: scalar.
+  // All dims are statically 1: scalar.
   return { kind: "all" };
 }
 
@@ -227,13 +226,13 @@ function reduceLatticeDims(
   dim: number
 ): { scalar: true } | { scalar: false; dims: DimInfo[] } {
   if (dim > dims.length) {
-    if (dims.every(d => d.kind === "one")) return { scalar: true };
+    if (dims.every(isDimOne)) return { scalar: true };
     return { scalar: false, dims: dims.slice() };
   }
   const out = dims.slice();
   out[dim - 1] = DIM_ONE;
-  const squeezed = squeezeTrailing(out, d => d.kind === "one");
-  if (squeezed.every(d => d.kind === "one")) return { scalar: true };
+  const squeezed = squeezeTrailing(out, isDimOne);
+  if (squeezed.every(isDimOne)) return { scalar: true };
   return { scalar: false, dims: squeezed };
 }
 

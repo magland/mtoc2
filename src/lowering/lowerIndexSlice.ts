@@ -13,14 +13,16 @@
  *   single-slot Range, col-vec base     → col vector, count(range)
  *   single-slot Range, matrix / N-D base → row vector, count(range)
  *   multi-slot Colon at axis k          → base.dims[k]
- *   multi-slot Range at axis k          → {kind:"notOne"} (count is runtime)
- *   multi-slot Scalar at axis k         → {kind:"one"}
+ *   multi-slot Range at axis k          → exact count when statically
+ *                                          derivable, else unknown
+ *   multi-slot Scalar at axis k         → exact 1
  */
 
 import type { Expr, Span } from "../parser/index.js";
 import { TypeError, UnsupportedConstruct } from "./errors.js";
 import type { IRExpr, IndexSliceArg } from "./ir.js";
 import {
+  isDimOne,
   isScalarRealNumeric,
   isNumeric,
   tensorDouble,
@@ -32,6 +34,50 @@ import {
 } from "./types.js";
 import type { Lowerer } from "./lower.js";
 import { resolveIndexBase } from "./indexResolve.js";
+
+/** Compute the static element count of an `IndexSliceArg` (or
+ *  `undefined` if it can't be known at compile time). For a Range slot
+ *  every endpoint must have an exact numeric value (the step is always
+ *  a NumLit by lowerSliceArg's check), and the same `floor + 1 + ulp`
+ *  formula as MakeRange / mtoc2_loop_count applies. */
+function exactRangeCount(slot: IndexSliceArg): number | undefined {
+  if (slot.kind !== "Range") return undefined;
+  const sExact =
+    isNumeric(slot.start.ty) && typeof slot.start.ty.exact === "number"
+      ? slot.start.ty.exact
+      : undefined;
+  const eExact =
+    isNumeric(slot.end.ty) && typeof slot.end.ty.exact === "number"
+      ? slot.end.ty.exact
+      : undefined;
+  // lowerSliceArg already required step to be a NumLit; read its value.
+  if (slot.step.kind !== "NumLit") return undefined;
+  const tExact = slot.step.value;
+  if (sExact === undefined || eExact === undefined) return undefined;
+  if (tExact === 0) return undefined;
+  if (
+    !Number.isFinite(sExact) ||
+    !Number.isFinite(tExact) ||
+    !Number.isFinite(eExact)
+  ) {
+    return undefined;
+  }
+  const raw = Math.floor((eExact - sExact) / tExact + 1 + 1e-10);
+  return raw > 0 ? raw : 0;
+}
+
+/** Per-slot result-dim kind, used by the multi-slot path. Colon takes
+ *  its dim from the base; Range derives an exact dim when endpoints
+ *  are statically known, else `unknown`; Scalar contributes exactly 1.
+ *  Mirrors the doc-block table above. */
+function resultDimForSlot(slot: IndexSliceArg, baseDim: DimInfo): DimInfo {
+  if (slot.kind === "Colon") return baseDim;
+  if (slot.kind === "Range") {
+    const n = exactRangeCount(slot);
+    return n === undefined ? { kind: "unknown" } : { kind: "exact", value: n };
+  }
+  return { kind: "exact", value: 1 };
+}
 
 export function lowerIndexSlice(
   this: Lowerer,
@@ -59,25 +105,35 @@ export function lowerIndexSlice(
     const slot = slots[0];
     if (slot.kind === "Colon") {
       // Column vector of length numel(base). If every base dim is
-      // statically known, build a concrete shape; otherwise build a
-      // dim-only type with `notOne × one`.
+      // statically known, build a concrete shape; otherwise the
+      // leading axis is runtime-only.
       if (baseTy.shape !== undefined) {
         const n = baseTy.shape.reduce((a, b) => a * b, 1);
         resultTy = tensorDouble([n, 1]);
       } else {
-        resultTy = tensorDoubleFromDims([{ kind: "notOne" }, { kind: "one" }]);
+        resultTy = tensorDoubleFromDims([
+          { kind: "unknown" },
+          { kind: "exact", value: 1 },
+        ]);
       }
     } else if (slot.kind === "Range") {
       // For an index slot the parser-side range step must be a NumLit,
-      // enforced by lowerSliceArg. The range count is generally runtime;
-      // shape stays in dim-only form.
+      // enforced by lowerSliceArg. The range count is known when the
+      // endpoints are exact; otherwise the runtime axis stays unknown.
       const isRowVec = isRowVecTy(baseTy);
       const isColVec = isColVecTy(baseTy);
+      const countDim: DimInfo = (() => {
+        const n = exactRangeCount(slot);
+        return n === undefined
+          ? { kind: "unknown" }
+          : { kind: "exact", value: n };
+      })();
+      const oneDim: DimInfo = { kind: "exact", value: 1 };
       const resultDims: DimInfo[] = isColVec
-        ? [{ kind: "notOne" }, { kind: "one" }]
+        ? [countDim, oneDim]
         : isRowVec
-          ? [{ kind: "one" }, { kind: "notOne" }]
-          : [{ kind: "one" }, { kind: "notOne" }];
+          ? [oneDim, countDim]
+          : [oneDim, countDim];
       resultTy = tensorDoubleFromDims(resultDims);
     } else {
       throw new UnsupportedConstruct(
@@ -87,13 +143,11 @@ export function lowerIndexSlice(
       );
     }
   } else {
-    // Multi-slot: one result axis per slot. Try to keep `shape` set when
-    // every slot's count is statically derivable (no Range with notOne).
-    const resultDims: DimInfo[] = slots.map((slot, k) => {
-      if (slot.kind === "Colon") return baseTy.dims[k];
-      if (slot.kind === "Range") return { kind: "notOne" };
-      return { kind: "one" };
-    });
+    // Multi-slot: one result axis per slot. `tensorDoubleFromDims` will
+    // populate `shape` automatically when every slot pins an exact dim.
+    const resultDims: DimInfo[] = slots.map((slot, k) =>
+      resultDimForSlot(slot, baseTy.dims[k])
+    );
     resultTy = tensorDoubleFromDims(resultDims);
   }
 
@@ -151,7 +205,10 @@ export function lowerSliceArg(
           kind: "Numeric",
           elem: "double",
           isComplex: false,
-          dims: [{ kind: "one" }, { kind: "one" }],
+          dims: [
+            { kind: "exact", value: 1 },
+            { kind: "exact", value: 1 },
+          ],
           shape: [1, 1],
           sign: "positive",
           exact: 1,
@@ -204,16 +261,18 @@ export function lowerSliceArg(
 function isRowVecTy(t: NumericType): boolean {
   return (
     t.dims.length === 2 &&
-    t.dims[0].kind === "one" &&
-    t.dims[1].kind === "notOne"
+    isDimOne(t.dims[0]) &&
+    t.dims[1].kind === "exact" &&
+    t.dims[1].value !== 1
   );
 }
 
 function isColVecTy(t: NumericType): boolean {
   return (
     t.dims.length === 2 &&
-    t.dims[0].kind === "notOne" &&
-    t.dims[1].kind === "one"
+    t.dims[0].kind === "exact" &&
+    t.dims[0].value !== 1 &&
+    isDimOne(t.dims[1])
   );
 }
 

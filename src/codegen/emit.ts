@@ -27,6 +27,7 @@ import { getBuiltin } from "../lowering/builtins/index.js";
 import {
   classTypedefName,
   handleTypedefName,
+  isDimOne,
   isHandle,
   isMultiElement,
   isNumeric,
@@ -1290,8 +1291,9 @@ function emitIndexSliceProducer(
       const isColVec =
         e.base.ty.kind === "Numeric" &&
         e.base.ty.dims.length === 2 &&
-        e.base.ty.dims[0].kind === "notOne" &&
-        e.base.ty.dims[1].kind === "one";
+        e.base.ty.dims[0].kind === "exact" &&
+        e.base.ty.dims[0].value > 1 &&
+        isDimOne(e.base.ty.dims[1]);
       if (isColVec) {
         resultRows = "_mtoc2_n";
         resultCols = "1";
@@ -1360,7 +1362,7 @@ function emitIndexSliceStore(
 ): string {
   const baseCName = s.base.cName;
   const rhsIsScalar =
-    s.rhs.ty.kind === "Numeric" && s.rhs.ty.dims.every(d => d.kind === "one");
+    s.rhs.ty.kind === "Numeric" && s.rhs.ty.dims.every(isDimOne);
   const lines: string[] = [];
   lines.push(`${indent}{`);
 

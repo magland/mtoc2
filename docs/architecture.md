@@ -259,9 +259,9 @@ Today's builtins:
   split: when the input shape is statically known, the lowerer
   enforces `prod(input.dims) == prod(newShape)` at translate time
   with a span-attributed `TypeError`; when the shape is only
-  tracked per-axis as `notOne`/`unknown` (e.g. an unshaped tensor
-  field), the check is deferred to `mtoc2_reshape_nd`, which
-  aborts on mismatch. Codegen always emits the runtime helper
+  tracked per-axis with at least one `unknown` slot (e.g. an
+  unshaped tensor field), the check is deferred to
+  `mtoc2_reshape_nd`, which aborts on mismatch. Codegen always emits the runtime helper
   (no fold-at-codegen rule); when the input has an exact
   `Float64Array` and the result fits the exact-array cap, the
   output type carries the same buffer (column-major reinterpret)
