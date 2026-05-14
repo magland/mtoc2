@@ -119,6 +119,18 @@ const REGISTRY: ReadonlyMap<string, RuntimeSnippet> = new Map<
     "mtoc2_disp_tensor",
     loadSnippet("disp_tensor.h", ["mtoc2_tensor_t", "mtoc2_format_double"]),
   ],
+
+  // ── Elementwise binary/unary on real tensors ──────────────────────
+  // One snippet covers all 11 funcs (4×_tt, 4×_ts, 2×_st, 1×uminus).
+  // Builtins activate by op-specific synthetic name; all map to the
+  // same underlying snippet via dep, so dedupe is automatic.
+  [
+    "mtoc2_tensor_elemwise_real",
+    loadSnippet("tensor_elemwise_real.h", ["mtoc2_tensor_t", "mtoc2_alloc"]),
+  ],
+
+  // ── sum (reduce real tensor to scalar) ────────────────────────────
+  ["mtoc2_sum", loadSnippet("sum.h", ["mtoc2_tensor_t"])],
 ]);
 
 export function getRuntimeSnippet(name: string): RuntimeSnippet {

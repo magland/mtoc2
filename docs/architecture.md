@@ -104,17 +104,30 @@ Each builtin is a fused (transfer + codegenC) pair:
 
 Today's builtins:
 
-- Scalar arithmetic + unary: `plus`, `minus`, `times`, `rdivide`,
-  `uminus`.
-- Comparisons (return scalar logical): `eq`, `ne`, `lt`, `le`, `gt`,
-  `ge`.
-- I/O: `disp` — three paths picked by argument shape/exactness:
+- **Elementwise arithmetic** — `plus`, `minus`, `times` (`.*`),
+  `rdivide` (`./`), `uminus`. Each handles all four shape combos:
+  - scalar OP scalar → inline `(a cOp b)` in C
+  - tensor OP scalar / scalar OP tensor → `mtoc2_tensor_<op>_ts` (or
+    `_st` for non-commutative ops)
+  - tensor OP tensor (same statically-known shape) →
+    `mtoc2_tensor_<op>_tt`
+    Folds at compile time when every input has `exact` (scalar
+    `number` or tensor `Float64Array`). General broadcast for
+    mismatched non-scalar shapes is not yet supported.
+- **Matrix `*` / `/`** — `mtimes`, `mrdivide`. Fall through to the
+  elementwise siblings when at least one arg is scalar; throw
+  `UnsupportedConstruct` for the both-tensor case (matrix
+  multiplication and right-division are not yet implemented).
+- **Comparisons** (return scalar logical): `eq`, `ne`, `lt`, `le`,
+  `gt`, `ge`.
+- **I/O**: `disp` — three paths picked by argument shape/exactness:
   scalar real → `mtoc2_disp_double(x)`; exact tensor →
   compile-time-formatted `fputs("…\n", stdout)`; runtime tensor →
   `mtoc2_disp_tensor(t)`.
-- Tensor introspection / reduction: `length`, `numel` — fold from
+- **Introspection / reduction**: `length`, `numel` — fold from
   `t.shape`, always compile-time. `sum` — folds when input is exact;
-  runtime path deferred until tensor arithmetic lands.
+  runtime vectors emit `mtoc2_sum(t)`. Matrix → row-vector reduction
+  deferred.
 
 Operator-to-builtin maps live alongside the registry.
 
@@ -143,12 +156,38 @@ isOwned(ty)`. `If`/`While`/`For` bodies are walked too, so inner
 4. At end-of-body / before each `mtoc2_return:` label, emits
    `mtoc2_tensor_free(&v)` for every owned local.
 
-For `disp([x 1 2])` and similar cases where a freshly-allocating
-tensor expression is passed as a builtin/function-call arg, the
-**lowerer hoists** the TensorBuild to a fresh temp Assign before the
-call (`_mtoc2_t1 = [x 1 2]; disp(_mtoc2_t1);`). This ties the
-allocated tensor's lifetime to a named local that the scope-exit
-free walk releases — no leaked temporaries.
+### A-normalization (ANF) pass
+
+Every owned-producing non-Var sub-expression is hoisted to a fresh
+`_mtoc2_t<N>` temp Assign at lowering time. After ANF, owned-
+producing expressions appear only as direct Assign RHSs at owned
+consume sites — every other position holds a Var read. This single
+rule keeps the codegen consume-site logic uniform and ties each
+freshly-allocated tensor's lifetime to a named local the scope-exit
+free walk releases.
+
+Owned-producing in mtoc2 is: `TensorBuild`, or any
+`Binary`/`Unary`/`Call` whose result is a multi-element tensor.
+`TensorLit` is excluded — it's compile-time only and never
+materializes in C.
+
+Example: `disp(a + b + c)` (all tensors) lowers to
+
+```
+_mtoc2_t1 = a + b;        // mtoc2_tensor_assign(&_mtoc2_t1, mtoc2_tensor_plus_tt(a, b))
+_mtoc2_t2 = _mtoc2_t1 + c;
+disp(_mtoc2_t2);
+```
+
+with `_mtoc2_t1` and `_mtoc2_t2` both pre-declared at function top
+and freed at scope exit. No leaks, no aliasing.
+
+The implementation is in `Lowerer.anfChildren` /
+`Lowerer.anfRequireScalarOrVar` and runs at `lowerExprStmt` and
+`lowerAssign` time. (mtoc's `anf.ts` is the model — mtoc2 differs in
+that elementwise ops _are_ owned producers here, because we emit
+per-op runtime helpers that allocate fresh; mtoc fuses them into the
+parent's iter loop instead.)
 
 ### Lowerer (`lower.ts`)
 

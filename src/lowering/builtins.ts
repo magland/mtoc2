@@ -23,12 +23,15 @@ import {
   type Sign,
   scalarDouble,
   scalarLogical,
+  tensorDouble,
   signFromNumber,
   flipSign,
   isScalarRealDouble,
   isScalarRealNumeric,
+  isMultiElement,
   isNumeric,
   isScalar,
+  EXACT_ARRAY_MAX_ELEMENTS,
 } from "./types.js";
 import { formatNumber, formatTensor2D } from "./formatNumber.js";
 
@@ -84,11 +87,69 @@ function exactDouble(t: Type): number | undefined {
   return undefined;
 }
 
-// ── Arithmetic (real scalar) ────────────────────────────────────────────
+// ── Arithmetic (real, elementwise) ──────────────────────────────────────
 
-function defineRealBinary(
+/** Shape-compat check for elementwise binary. Same-shape only — broadcast
+ *  beyond scalar-on-one-side stays a future slope. Returns the result
+ *  shape (or `null` if both args are scalar — caller handles). Throws
+ *  on incompatible shapes. */
+function elemwiseResultShape(
+  a: NumericType,
+  b: NumericType,
+  name: string,
+  span: Span
+): number[] | null {
+  const aMulti = a.dims.some(d => d.kind !== "one");
+  const bMulti = b.dims.some(d => d.kind !== "one");
+  if (!aMulti && !bMulti) return null; // scalar OP scalar
+  if (!aMulti) return b.shape ? b.shape.slice() : null;
+  if (!bMulti) return a.shape ? a.shape.slice() : null;
+  // both tensor — require identical statically-known shape
+  if (!a.shape || !b.shape) {
+    throw new UnsupportedConstruct(
+      `'${name}' on tensors of unknown shape not yet supported`,
+      span
+    );
+  }
+  if (
+    a.shape.length !== b.shape.length ||
+    !a.shape.every((s, i) => s === b.shape![i])
+  ) {
+    throw new UnsupportedConstruct(
+      `'${name}' shape mismatch (${a.shape.join("×")} vs ${b.shape.join("×")}); broadcast beyond scalar-on-one-side is not yet supported`,
+      span
+    );
+  }
+  return a.shape.slice();
+}
+
+function exactRealArray(t: Type): Float64Array | undefined {
+  if (!isNumeric(t)) return undefined;
+  if (t.exact instanceof Float64Array) return t.exact;
+  return undefined;
+}
+
+/** Define a real elementwise binary builtin: scalar, scalar+tensor,
+ *  tensor+scalar, tensor+tensor. Folds when every input is exact.
+ *  `helperBase` names the matching set of C runtime helpers
+ *  (mtoc2_tensor_<helperBase>_tt / _ts / _st). Commutative ops set
+ *  `commutative=true` so the scalar-first path reuses `_ts` with
+ *  swapped operands.
+ *
+ *  The four shape combos and what they emit:
+ *
+ *  | a       | b       | C output                                   |
+ *  |---------|---------|--------------------------------------------|
+ *  | scalar  | scalar  | `(argsC[0] cOp argsC[1])`                  |
+ *  | tensor  | scalar  | `mtoc2_tensor_<helperBase>_ts(a, b)`       |
+ *  | scalar  | tensor  | commutative → `_ts(b, a)`; else `_st(a,b)` |
+ *  | tensor  | tensor  | `mtoc2_tensor_<helperBase>_tt(a, b)`       |
+ */
+function defineElemwiseRealBinary(
   name: string,
   cOp: string,
+  helperBase: string,
+  commutative: boolean,
   fold: (a: number, b: number) => number,
   signRule: (a: NumericType, b: NumericType) => Sign
 ): void {
@@ -96,22 +157,82 @@ function defineRealBinary(
     name,
     arity: 2,
     transfer(argTypes, span) {
-      requireScalarRealDouble(argTypes[0], `'${name}' arg 1`, span);
-      requireScalarRealDouble(argTypes[1], `'${name}' arg 2`, span);
-      const a = argTypes[0] as NumericType;
-      const b = argTypes[1] as NumericType;
-      const ax = exactDouble(a);
-      const bx = exactDouble(b);
-      if (ax !== undefined && bx !== undefined) {
-        const v = fold(ax, bx);
-        if (Number.isFinite(v)) return scalarDouble(signFromNumber(v), v);
+      const a = argTypes[0];
+      const b = argTypes[1];
+      requireRealDouble(a, `'${name}' arg 1`, span);
+      requireRealDouble(b, `'${name}' arg 2`, span);
+      const aN = a as NumericType;
+      const bN = b as NumericType;
+      const outShape = elemwiseResultShape(aN, bN, name, span);
+
+      if (outShape === null) {
+        // Pure scalar op — fold if exact.
+        const ax = exactDouble(aN);
+        const bx = exactDouble(bN);
+        if (ax !== undefined && bx !== undefined) {
+          const v = fold(ax, bx);
+          if (Number.isFinite(v)) return scalarDouble(signFromNumber(v), v);
+        }
+        return scalarDouble(signRule(aN, bN));
       }
-      return scalarDouble(signRule(a, b));
+
+      // Tensor result. Try to fold when every input is exact.
+      const aArr = exactRealArray(aN);
+      const bArr = exactRealArray(bN);
+      const ax = exactDouble(aN);
+      const bx = exactDouble(bN);
+      const aIsExact = aArr !== undefined || ax !== undefined;
+      const bIsExact = bArr !== undefined || bx !== undefined;
+      if (
+        aIsExact &&
+        bIsExact &&
+        outShape.reduce((p, q) => p * q, 1) <= EXACT_ARRAY_MAX_ELEMENTS
+      ) {
+        const n = outShape.reduce((p, q) => p * q, 1);
+        const data = new Float64Array(n);
+        for (let i = 0; i < n; i++) {
+          const av = aArr ? aArr[i] : (ax as number);
+          const bv = bArr ? bArr[i] : (bx as number);
+          data[i] = fold(av, bv);
+        }
+        return tensorDouble(outShape, data);
+      }
+      return tensorDouble(outShape);
     },
-    codegenC(argsC) {
-      return `(${argsC[0]} ${cOp} ${argsC[1]})`;
+    codegenC(argsC, argTypes) {
+      const aMulti = isMultiElement(argTypes[0]);
+      const bMulti = isMultiElement(argTypes[1]);
+      if (!aMulti && !bMulti) {
+        return `(${argsC[0]} ${cOp} ${argsC[1]})`;
+      }
+      if (aMulti && bMulti) {
+        return `mtoc2_tensor_${helperBase}_tt(${argsC[0]}, ${argsC[1]})`;
+      }
+      if (aMulti) {
+        return `mtoc2_tensor_${helperBase}_ts(${argsC[0]}, ${argsC[1]})`;
+      }
+      // scalar OP tensor
+      if (commutative) {
+        return `mtoc2_tensor_${helperBase}_ts(${argsC[1]}, ${argsC[0]})`;
+      }
+      return `mtoc2_tensor_${helperBase}_st(${argsC[0]}, ${argsC[1]})`;
     },
+    runtimeDeps: ["mtoc2_tensor_elemwise_real"],
   });
+}
+
+/** Like `requireScalarRealDouble` but accepts non-scalar real doubles
+ *  (the elemwise path). Logical also accepted (stored as double in C). */
+function requireRealDouble(t: Type, what: string, span: Span): void {
+  if (!isNumeric(t) || t.isComplex) {
+    throw new TypeError(`${what} must be a real numeric (got ${t.kind})`, span);
+  }
+  if (t.elem !== "double" && t.elem !== "logical") {
+    throw new TypeError(
+      `${what} must be double or logical (got ${t.elem})`,
+      span
+    );
+  }
 }
 
 function signSum(a: NumericType, b: NumericType): Sign {
@@ -155,10 +276,78 @@ function signProd(a: NumericType, b: NumericType): Sign {
   return "unknown";
 }
 
-defineRealBinary("plus", "+", (a, b) => a + b, signSum);
-defineRealBinary("minus", "-", (a, b) => a - b, signDiff);
-defineRealBinary("times", "*", (a, b) => a * b, signProd);
-defineRealBinary("rdivide", "/", (a, b) => a / b, signProd);
+defineElemwiseRealBinary("plus", "+", "plus", true, (a, b) => a + b, signSum);
+defineElemwiseRealBinary(
+  "minus",
+  "-",
+  "minus",
+  false,
+  (a, b) => a - b,
+  signDiff
+);
+defineElemwiseRealBinary(
+  "times",
+  "*",
+  "times",
+  true,
+  (a, b) => a * b,
+  signProd
+);
+defineElemwiseRealBinary(
+  "rdivide",
+  "/",
+  "rdivide",
+  false,
+  (a, b) => a / b,
+  signProd
+);
+
+// `mtimes` / `mrdivide` (matrix * and /): mirror their elementwise
+// siblings when at least one arg is scalar; reject the both-tensor
+// case until matrix multiplication / division is implemented.
+registerBuiltin({
+  name: "mtimes",
+  arity: 2,
+  transfer(argTypes, span) {
+    const a = argTypes[0];
+    const b = argTypes[1];
+    requireRealDouble(a, `'mtimes' arg 1`, span);
+    requireRealDouble(b, `'mtimes' arg 2`, span);
+    if (isMultiElement(a) && isMultiElement(b)) {
+      throw new UnsupportedConstruct(
+        `matrix multiplication (a*b on two tensors) is not yet supported; use '.*' for elementwise`,
+        span
+      );
+    }
+    return getBuiltin("times")!.transfer(argTypes, span);
+  },
+  codegenC(argsC, argTypes) {
+    return getBuiltin("times")!.codegenC(argsC, argTypes);
+  },
+  runtimeDeps: ["mtoc2_tensor_elemwise_real"],
+});
+
+registerBuiltin({
+  name: "mrdivide",
+  arity: 2,
+  transfer(argTypes, span) {
+    const a = argTypes[0];
+    const b = argTypes[1];
+    requireRealDouble(a, `'mrdivide' arg 1`, span);
+    requireRealDouble(b, `'mrdivide' arg 2`, span);
+    if (isMultiElement(a) && isMultiElement(b)) {
+      throw new UnsupportedConstruct(
+        `matrix right-division (a/b on two tensors) is not yet supported; use './' for elementwise`,
+        span
+      );
+    }
+    return getBuiltin("rdivide")!.transfer(argTypes, span);
+  },
+  codegenC(argsC, argTypes) {
+    return getBuiltin("rdivide")!.codegenC(argsC, argTypes);
+  },
+  runtimeDeps: ["mtoc2_tensor_elemwise_real"],
+});
 
 // ── Unary minus ─────────────────────────────────────────────────────────
 
@@ -166,18 +355,38 @@ registerBuiltin({
   name: "uminus",
   arity: 1,
   transfer(argTypes, span) {
-    requireScalarRealDouble(argTypes[0], `'uminus' arg`, span);
+    requireRealDouble(argTypes[0], `'uminus' arg`, span);
     const a = argTypes[0] as NumericType;
-    const ax = exactDouble(a);
-    if (ax !== undefined) {
-      const v = -ax;
-      return scalarDouble(signFromNumber(v), v);
+    if (isScalar(a)) {
+      const ax = exactDouble(a);
+      if (ax !== undefined) {
+        const v = -ax;
+        return scalarDouble(signFromNumber(v), v);
+      }
+      return scalarDouble(flipSign(a.sign));
     }
-    return scalarDouble(flipSign(a.sign));
+    // Tensor uminus: fold when exact, else runtime.
+    const arr = exactRealArray(a);
+    if (arr !== undefined && a.shape !== undefined) {
+      const out = new Float64Array(arr.length);
+      for (let i = 0; i < arr.length; i++) out[i] = -arr[i];
+      return tensorDouble(a.shape, out);
+    }
+    if (a.shape === undefined) {
+      throw new UnsupportedConstruct(
+        `'uminus' on a tensor of unknown shape not yet supported`,
+        span
+      );
+    }
+    return tensorDouble(a.shape);
   },
-  codegenC(argsC) {
+  codegenC(argsC, argTypes) {
+    if (isMultiElement(argTypes[0])) {
+      return `mtoc2_tensor_uminus(${argsC[0]})`;
+    }
     return `(-${argsC[0]})`;
   },
+  runtimeDeps: ["mtoc2_tensor_elemwise_real"],
 });
 
 // ── Comparisons (return logical 0/1, emitted as double for MVP) ─────────
@@ -337,7 +546,7 @@ registerBuiltin({
     const t = argTypes[0];
     if (!isNumeric(t) || t.isComplex) {
       throw new TypeError(
-        `'sum' arg must be a real numeric (slope-1; got ${t.kind})`,
+        `'sum' arg must be a real numeric (got ${t.kind})`,
         span
       );
     }
@@ -348,13 +557,13 @@ registerBuiltin({
       }
       return scalarDouble(t.sign);
     }
-    // Tensor input: fold over the exact array when present. (MATLAB's
-    // `sum` of a column vector or 1-D row is the total; of a matrix it
-    // sums each column, returning a row. Slope 1 only folds the vector
-    // case — for matrices we leave it unsupported for now.)
-    if (!(t.exact instanceof Float64Array) || t.shape === undefined) {
+    // Tensor input. MATLAB's `sum` of a vector (1×N or N×1) returns a
+    // scalar; of a matrix it sums each column, returning a row. We
+    // handle the vector case for now (compile-time fold when exact;
+    // mtoc2_sum at runtime otherwise) and reject the matrix case.
+    if (t.shape === undefined) {
       throw new UnsupportedConstruct(
-        `'sum' on a tensor of unknown values not yet supported`,
+        `'sum' on a tensor of unknown shape not yet supported`,
         span
       );
     }
@@ -362,17 +571,27 @@ registerBuiltin({
       t.shape.length === 2 && (t.shape[0] === 1 || t.shape[1] === 1);
     if (!isVector) {
       throw new UnsupportedConstruct(
-        `'sum' on a non-vector tensor not yet supported (slope-1 limitation)`,
+        `'sum' on a non-vector tensor (matrix → row-vector reduction) is not yet supported`,
         span
       );
     }
-    let acc = 0;
-    for (let i = 0; i < t.exact.length; i++) acc += t.exact[i];
-    return scalarDouble(signFromNumber(acc), acc);
+    if (t.exact instanceof Float64Array) {
+      let acc = 0;
+      for (let i = 0; i < t.exact.length; i++) acc += t.exact[i];
+      return scalarDouble(signFromNumber(acc), acc);
+    }
+    return scalarDouble("unknown");
   },
-  codegenC() {
-    throw new Error("internal: sum should have folded at lowering");
+  codegenC(argsC, argTypes) {
+    const t = argTypes[0];
+    if (!isNumeric(t) || isScalar(t)) {
+      // Scalar fall-through (sum(x) === x). Should have folded; if it
+      // reaches codegen the input had no exact, so emit identity.
+      return argsC[0];
+    }
+    return `mtoc2_sum(${argsC[0]})`;
   },
+  runtimeDeps: ["mtoc2_sum"],
 });
 
 /** Escape a JS string into a C string literal (double-quoted). */
@@ -402,9 +621,11 @@ export function binaryOpBuiltin(op: BinaryOperation): string {
     case BinaryOperation.Sub:
       return "minus";
     case BinaryOperation.Mul:
+      return "mtimes";
     case BinaryOperation.ElemMul:
       return "times";
     case BinaryOperation.Div:
+      return "mrdivide";
     case BinaryOperation.ElemDiv:
       return "rdivide";
     case BinaryOperation.Equal:

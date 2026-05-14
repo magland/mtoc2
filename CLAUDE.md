@@ -46,14 +46,23 @@ mtoc2 is a _static_ translator. Anything outside the supported subset raises
 - **Real tensors** — both exact (compile-time fold path) and runtime
   (mtoc-style "always-copy" model: `mtoc2_tensor_t` struct with
   `mtoc2_tensor_assign` / `mtoc2_tensor_copy` / `mtoc2_tensor_free`; no
-  refcount, no COW). Builtins: `disp`, `length`, `numel`, `sum`. Tensor
-  construction via literals (`[1 2 3]`, `[1 2; 3 4]`), Var-read copies,
-  pass-by-value to `disp`. Exact-array cap: 256 elements
-  (`EXACT_ARRAY_MAX_ELEMENTS`).
+  refcount, no COW).
+- **Tensor arithmetic** — elementwise `+` `-` `.*` `./` `-` (unary)
+  on same-shape tensors and tensor-with-scalar-broadcast. Mixes via
+  per-op runtime helpers (`mtoc2_tensor_<op>_tt` / `_ts` / `_st`).
+  Folds at compile time when every input has `exact`. Matrix `*` `/`
+  (i.e. `mtimes` / `mrdivide` between two tensors) is not yet
+  supported.
+- **Reduction**: `sum` on vectors via `mtoc2_sum`; matrix→row-vector
+  reduction deferred. `length` / `numel` always fold from `shape`.
+- **disp** routes on shape/exactness: scalar runtime → `mtoc2_disp_double`,
+  exact tensor → compile-time-formatted `fputs`, runtime tensor →
+  `mtoc2_disp_tensor`.
 
-Not yet supported: tensor arithmetic, indexing, runtime-shape constructors
-(`zeros(n)`), complex, strings, chars, structs, classes, most builtins
-beyond the list above. Expanding scope is gated by the cross-runner.
+Not yet supported: matrix multiplication / division, indexing
+(`a(k)`), runtime-shape constructors (`zeros(n)`), general broadcast
+(non-scalar mismatched shapes), complex, strings, chars, structs,
+classes. Expanding scope is gated by the cross-runner.
 
 ## Docs are part of the change
 
@@ -112,10 +121,17 @@ Tensors (and future owned types: strings, structs, classes) follow mtoc's
   (e.g. `disp` arg) passes the struct bare — no buffer copy.
 - Scope exit / before every `ReturnFromFunction` emits
   `mtoc2_tensor_free(&v)` for each owned local.
-- An exact-allocating tensor arg of a top-level Call (e.g.
-  `disp([x 1 2])`) is **hoisted** at lowering time to a temp Assign
-  before the call, so its lifetime is tied to a named local the free
-  walk releases.
+- An owned-producing sub-expression (TensorBuild, tensor-typed
+  Binary/Unary/Call) inside any larger expression is **A-normalized**
+  at lowering time: hoisted to a fresh `_mtoc2_t<N>` temp Assign and
+  replaced with a Var of the temp. After ANF the IR invariant is:
+  owned-producing expressions appear only as direct Assign RHSs at
+  owned consume sites; everywhere else they're Var reads. Mirrors
+  mtoc's anf.ts pattern; the difference is that mtoc's elementwise
+  ops fuse into a parent iter loop and aren't classified as owned
+  producers, whereas mtoc2 always emits a per-op runtime helper that
+  allocates fresh, so elementwise IS owned-producing here. (Inline
+  iter-loop fusion is a future optimization.)
 
 ## Testing-only directive
 

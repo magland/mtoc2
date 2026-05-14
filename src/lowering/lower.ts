@@ -213,53 +213,95 @@ export class Lowerer {
     const expr = this.lowerExpr(s.expr);
     // If the expression is a folded literal with no side effect, drop it.
     if (expr.kind === "NumLit") return null;
-    // Hoist any TensorBuild args inside a top-level Call to a temp
-    // Assign, so the tensor's lifetime is tied to a named local
-    // (which the scope-exit free walk releases). Without this,
-    // `disp([x 1 2])` would leak the freshly-allocated tensor.
+    // A-normalize: hoist every owned-producing non-Var sub-expression
+    // to a fresh temp Assign. After ANF, owned-producing expressions
+    // appear only as Assign RHSs (so codegen has a single uniform
+    // consume site), and every freshly-allocated tensor's lifetime is
+    // tied to a named local that the scope-exit free walk releases.
     const hoists: IRStmt[] = [];
-    const hoisted = this.hoistOwnedArgs(expr, hoists);
+    const hoisted = this.anfRequireScalarOrVar(expr, hoists);
     if (hoists.length > 0) {
       return [...hoists, { kind: "ExprStmt", expr: hoisted, span: s.span }];
     }
     return { kind: "ExprStmt", expr, span: s.span };
   }
 
-  /** When an IR Call has any TensorBuild arg, hoist each such arg to
-   *  a fresh temp Assign and replace the arg with a Var of the temp.
-   *  Returns the (possibly rewritten) expr; pushed Assigns go into
-   *  `hoists` for the caller to splice in before the consuming stmt. */
-  private hoistOwnedArgs(e: IRExpr, hoists: IRStmt[]): IRExpr {
-    if (e.kind !== "Call") return e;
-    let changed = false;
-    const newArgs = e.args.map(a => {
-      if (a.kind === "TensorBuild") {
-        const tempName = this.freshTempName();
-        this.declared.add(tempName);
-        this.env.set(tempName, { cName: tempName, ty: a.ty });
-        hoists.push({
-          kind: "Assign",
-          name: tempName,
-          cName: tempName,
-          declare: true,
-          materialize: true,
-          ty: a.ty,
-          expr: a,
-          span: a.span,
-        });
-        changed = true;
+  // ── ANF (owned-producing-expression hoisting) ─────────────────────────
+
+  /** Recursively rewrite sub-expressions of `e`, hoisting any owned-
+   *  producing non-Var sub-expression to a fresh temp Assign. The
+   *  top-level `e` itself is NOT hoisted by this function — the caller
+   *  decides what context `e` sits in (Assign RHS at an owned consume
+   *  site can keep an owned producer; everywhere else requires
+   *  `anfRequireScalarOrVar`). */
+  private anfChildren(e: IRExpr, hoists: IRStmt[]): IRExpr {
+    switch (e.kind) {
+      case "NumLit":
+      case "TensorLit":
+      case "Var":
+        return e;
+      case "TensorBuild":
         return {
-          kind: "Var" as const,
-          name: tempName,
-          cName: tempName,
-          ty: a.ty,
-          span: a.span,
+          ...e,
+          elements: e.elements.map(el =>
+            this.anfRequireScalarOrVar(el, hoists)
+          ),
         };
-      }
-      return a;
+      case "Binary":
+        return {
+          ...e,
+          left: this.anfRequireScalarOrVar(e.left, hoists),
+          right: this.anfRequireScalarOrVar(e.right, hoists),
+        };
+      case "Unary":
+        return {
+          ...e,
+          operand: this.anfRequireScalarOrVar(e.operand, hoists),
+        };
+      case "Call":
+        return {
+          ...e,
+          args: e.args.map(a => this.anfRequireScalarOrVar(a, hoists)),
+        };
+    }
+  }
+
+  /** Walk `e` and ensure the returned expression is either scalar or a
+   *  Var. Recursively ANFs children; if `e` itself is owned-producing
+   *  (multi-element non-Var, non-TensorLit), hoist it. */
+  private anfRequireScalarOrVar(e: IRExpr, hoists: IRStmt[]): IRExpr {
+    const rewritten = this.anfChildren(e, hoists);
+    if (
+      isMultiElement(rewritten.ty) &&
+      rewritten.kind !== "Var" &&
+      rewritten.kind !== "TensorLit"
+    ) {
+      return this.hoistToTemp(rewritten, hoists);
+    }
+    return rewritten;
+  }
+
+  private hoistToTemp(e: IRExpr, hoists: IRStmt[]): IRExpr {
+    const tempName = this.freshTempName();
+    this.declared.add(tempName);
+    this.env.set(tempName, { cName: tempName, ty: e.ty });
+    hoists.push({
+      kind: "Assign",
+      name: tempName,
+      cName: tempName,
+      declare: true,
+      materialize: true,
+      ty: e.ty,
+      expr: e,
+      span: e.span,
     });
-    if (!changed) return e;
-    return { ...e, args: newArgs };
+    return {
+      kind: "Var",
+      name: tempName,
+      cName: tempName,
+      ty: e.ty,
+      span: e.span,
+    };
   }
 
   private freshTempName(): string {
@@ -267,9 +309,26 @@ export class Lowerer {
     return `_mtoc2_t${this.tempCounter}`;
   }
 
-  private lowerAssign(s: Extract<Stmt, { type: "Assign" }>): IRStmt {
+  private lowerAssign(s: Extract<Stmt, { type: "Assign" }>): IRStmt | IRStmt[] {
     const expr = this.lowerExpr(s.expr);
-    return this.recordAssignment(s.name, expr, s.span);
+    // ANF the RHS. When the RHS is itself owned-producing and the
+    // LHS is also owned, the RHS is at a direct consume site — recurse
+    // into its CHILDREN only (the top stays as the Assign's RHS).
+    // Otherwise the RHS lands at a non-consume site (scalar Assign,
+    // mismatched ownership) and the top-level itself may need hoisting.
+    const hoists: IRStmt[] = [];
+    const lhsOwned = isMultiElement(expr.ty);
+    const rhsOwnedDirectProducer =
+      isMultiElement(expr.ty) &&
+      expr.kind !== "Var" &&
+      expr.kind !== "TensorLit";
+    const newExpr =
+      lhsOwned && rhsOwnedDirectProducer
+        ? this.anfChildren(expr, hoists)
+        : this.anfRequireScalarOrVar(expr, hoists);
+    const main = this.recordAssignment(s.name, newExpr, s.span);
+    if (hoists.length === 0) return main;
+    return [...hoists, main];
   }
 
   private recordAssignment(name: string, expr: IRExpr, span: Span): IRStmt {
@@ -653,18 +712,8 @@ export class Lowerer {
       );
     }
     const ty = b.transfer([left.ty, right.ty], e.span);
-    if (
-      isNumeric(ty) &&
-      typeof ty.exact === "number" &&
-      isScalarRealDouble(ty)
-    ) {
-      return {
-        kind: "NumLit",
-        value: ty.exact,
-        ty,
-        span: e.span,
-      };
-    }
+    const folded = foldedLiteralFromType(ty, e.span);
+    if (folded !== null) return folded;
     return {
       kind: "Binary",
       builtin: name,
@@ -687,18 +736,8 @@ export class Lowerer {
       );
     }
     const ty = b.transfer([operand.ty], e.span);
-    if (
-      isNumeric(ty) &&
-      typeof ty.exact === "number" &&
-      isScalarRealDouble(ty)
-    ) {
-      return {
-        kind: "NumLit",
-        value: ty.exact,
-        ty,
-        span: e.span,
-      };
-    }
+    const folded = foldedLiteralFromType(ty, e.span);
+    if (folded !== null) return folded;
     return {
       kind: "Unary",
       builtin: name,
@@ -723,18 +762,8 @@ export class Lowerer {
         );
       }
       const ty = b.transfer(argTypes, e.span);
-      if (
-        isNumeric(ty) &&
-        typeof ty.exact === "number" &&
-        isScalarRealDouble(ty)
-      ) {
-        return {
-          kind: "NumLit",
-          value: ty.exact,
-          ty,
-          span: e.span,
-        };
-      }
+      const folded = foldedLiteralFromType(ty, e.span);
+      if (folded !== null) return folded;
       return {
         kind: "Call",
         cName: e.name, // builtins use their bare name in C (mtoc2_<name> via codegen)
@@ -752,18 +781,8 @@ export class Lowerer {
     }
     const spec = this.specializeUserFunction(decl, argTypes);
     const ty = spec.outputTypes[0] ?? { kind: "Unknown" };
-    if (
-      isNumeric(ty) &&
-      typeof ty.exact === "number" &&
-      isScalarRealDouble(ty)
-    ) {
-      return {
-        kind: "NumLit",
-        value: ty.exact,
-        ty,
-        span: e.span,
-      };
-    }
+    const folded = foldedLiteralFromType(ty, e.span);
+    if (folded !== null) return folded;
     return {
       kind: "Call",
       cName: spec.cName,
@@ -898,6 +917,30 @@ export class Lowerer {
 }
 
 // ── Helpers (free functions) ────────────────────────────────────────────
+
+/** When `ty` is a fully-foldable result (scalar real with `number`
+ *  exact, or a tensor with Float64Array `exact` + known shape),
+ *  return the corresponding literal IR node. Returns null otherwise
+ *  — caller emits a runtime Binary/Unary/Call node in that case.
+ *
+ *  Centralized so lowerBinary / lowerUnary / lowerFuncCall all use
+ *  the same post-transfer fold rule and stay in sync. */
+function foldedLiteralFromType(ty: Type, span: Span): IRExpr | null {
+  if (!isNumeric(ty)) return null;
+  if (typeof ty.exact === "number" && isScalarRealDouble(ty)) {
+    return { kind: "NumLit", value: ty.exact, ty, span };
+  }
+  if (ty.exact instanceof Float64Array && ty.shape !== undefined) {
+    return {
+      kind: "TensorLit",
+      data: ty.exact,
+      shape: ty.shape.slice(),
+      ty,
+      span,
+    };
+  }
+  return null;
+}
 
 /** Returns true/false if `cond` is a literal logical value, null otherwise. */
 function condToBool(cond: IRExpr): boolean | null {
