@@ -103,7 +103,11 @@ const REGISTRY: ReadonlyMap<string, RuntimeSnippet> = new Map<
   ["mtoc2_tensor_empty", loadSnippet("tensor_empty.h", ["mtoc2_tensor_t"])],
   [
     "mtoc2_tensor_copy",
-    loadSnippet("tensor_copy.h", ["mtoc2_tensor_t", "mtoc2_alloc"]),
+    loadSnippet("tensor_copy.h", [
+      "mtoc2_tensor_t",
+      "mtoc2_alloc",
+      "mtoc2_tensor_empty",
+    ]),
   ],
   ["mtoc2_tensor_assign", loadSnippet("tensor_assign.h", ["mtoc2_tensor_t"])],
   ["mtoc2_tensor_free", loadSnippet("tensor_free.h", ["mtoc2_tensor_t"])],

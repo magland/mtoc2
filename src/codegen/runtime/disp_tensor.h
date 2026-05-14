@@ -64,6 +64,15 @@ static void mtoc2__disp_real_slice(const double *data, long rows, long cols) {
 }
 
 static void mtoc2_disp_tensor(mtoc2_tensor_t t) {
+  if (t.ndim == 0 || t.real == NULL) {
+    /* `mtoc2_tensor_empty()` placeholder — same rendering as a
+     * genuinely empty tensor. Reaches here when a conditionally-
+     * assigned tensor is `disp`ed on a path the conditional didn't
+     * fire. The defaulted rows = cols = 1 would otherwise read from
+     * NULL. */
+    printf("[]\n");
+    return;
+  }
   long rows = t.ndim >= 1 ? t.dims[0] : 1;
   long cols = t.ndim >= 2 ? t.dims[1] : 1;
   if (rows <= 0 || cols <= 0) {
