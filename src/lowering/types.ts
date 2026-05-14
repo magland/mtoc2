@@ -744,6 +744,22 @@ export function storageEquivalent(a: Type, b: Type): boolean {
   }
 }
 
+/** Serialize an `exact` numeric value for the canonical spec key.
+ *  `JSON.stringify` renders NaN, ±Infinity, and -0 ambiguously (NaN and
+ *  both infinities all collapse to `"null"`; -0 prints as `0`), which
+ *  lets distinct exact values collide on the spec key. Round-trip each
+ *  through a tagged string when the bit pattern wouldn't survive a
+ *  JSON round-trip; finite non-zero numbers (including ordinary
+ *  negative values) pass through as-is so the common path stays
+ *  identical to the previous encoding. */
+function encodeExactNumber(v: number): unknown {
+  if (Number.isNaN(v)) return "nan";
+  if (v === Infinity) return "+inf";
+  if (v === -Infinity) return "-inf";
+  if (v === 0 && Object.is(v, -0)) return "-0";
+  return v;
+}
+
 function canon(t: Type): unknown {
   switch (t.kind) {
     case "Unknown":
@@ -763,9 +779,15 @@ function canon(t: Type): unknown {
       if (t.shape !== undefined) out.sh = t.shape;
       if (t.exact !== undefined) {
         if (t.exact instanceof Float64Array) {
-          out.x = Array.from(t.exact);
+          out.x = Array.from(t.exact, encodeExactNumber);
+        } else if (typeof t.exact === "number") {
+          out.x = encodeExactNumber(t.exact);
         } else {
-          out.x = t.exact;
+          // Complex { re, im } — sanitize each component.
+          out.x = {
+            re: encodeExactNumber(t.exact.re),
+            im: encodeExactNumber(t.exact.im),
+          };
         }
       }
       return out;
