@@ -192,6 +192,17 @@ export interface Continue {
   span: Span;
 }
 
+/** Pure annotation node produced by the `%!numbl:showtype` directive.
+ *  Carries a snapshot of `{name, cName, ty}` for each named variable
+ *  at the directive's source position. Walk / liveness / dataflow
+ *  treat it as a no-op; codegen renders one `/_ type ... _/` line
+ *  per entry (using real C comment delimiters). No runtime effect. */
+export interface TypeComment {
+  kind: "TypeComment";
+  entries: ReadonlyArray<{ name: string; cName: string; ty: Type }>;
+  span: Span;
+}
+
 export type IRStmt =
   | ExprStmt
   | Assign
@@ -200,7 +211,8 @@ export type IRStmt =
   | For
   | ReturnFromFunction
   | Break
-  | Continue;
+  | Continue
+  | TypeComment;
 
 // ── Functions ───────────────────────────────────────────────────────────
 

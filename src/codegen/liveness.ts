@@ -185,6 +185,10 @@ function touchStmt(
       }
       return out;
     }
+    case "TypeComment":
+      // Pure annotation — no uses, no defs, no effect on the
+      // future-touch set.
+      return new Set(futureAfter);
   }
 }
 
@@ -307,6 +311,9 @@ export function nullAtScopeExit(
       case "ReturnFromFunction":
         // Control jumps elsewhere; doesn't influence the fall-through
         // end-of-block. Leave `current` as-is.
+        break;
+      case "TypeComment":
+        // Pure annotation; no effect on null-at-exit dataflow.
         break;
     }
   }

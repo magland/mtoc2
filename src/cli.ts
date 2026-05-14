@@ -28,7 +28,7 @@ function usage(): never {
 function translate(scriptPath: string): string {
   const source = readFileSync(scriptPath, "utf8");
   const ast = parseMFile(source, scriptPath);
-  const lowerer = new Lowerer();
+  const lowerer = new Lowerer(source);
   try {
     const prog = lowerer.lowerProgram(ast);
     return emitProgram(prog);

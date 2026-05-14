@@ -73,7 +73,7 @@ export function translateProject(
   }
 
   try {
-    const lowerer = new Lowerer();
+    const lowerer = new Lowerer(active.source);
     const prog = lowerer.lowerProgram(ast);
     return { c: emitProgram(prog, { includeRuntime }) };
   } catch (e) {

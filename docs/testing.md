@@ -82,15 +82,38 @@ purely a type-system fact.)
 Use sparingly — production code should NOT rely on this. It's purely
 a testing aid.
 
+## Inspecting types: `%!numbl:showtype` and `%!numbl:printtype`
+
+Two debug directives that snapshot a variable's current `Type` and
+surface it without affecting semantics. Both fire once per
+specialization, so they reflect the lowerer's per-spec view (useful
+for sanity-checking exact propagation and dim/sign lattice changes).
+
+- `%!numbl:showtype <var> [<var>...]` emits a
+  `/* type <name> (<cName>) :: <type> */` comment in the generated C
+  at the directive's source position. Lives in the artifact.
+- `%!numbl:printtype <var> [<var>...]` writes the same snapshot to
+  stderr at compile time as `<file>:<line>:<col>: type <name> ::
+<type>`. Lives in the translator run.
+
+Both raise `UnsupportedConstruct` if any named variable is not in
+scope. Both reflect post-`opaque` stripping and loop-body widening
+because they read the env at the lowering point. Numbl ignores both
+directives, so cross-runner output is unaffected.
+
 ## Vitest (unit-level)
 
 Reserved for assertions that aren't ergonomic to express as `.m`
 scripts: emitted-C shape checks, type-lattice invariants, error-
 attribution coverage, edge cases in the canonicalize/hash pair.
 
-Not in use yet. When the first vitest case is worth writing, drop it
-in `tests/<area>.test.ts` and add a one-liner here describing the
-layout. Don't add per-script entries to vitest — the cross-runner
+Current cases live under `tests/`:
+
+- `tests/directives.test.ts` — pins the `showtype` comment shape
+  and the `printtype` stderr-line format (incl. per-spec firing
+  and error-on-unknown-name).
+
+Don't add per-script entries to vitest — the cross-runner
 parallelizes much better and stays the oracle.
 
 ## Pre-merge checklist

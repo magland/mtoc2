@@ -30,6 +30,7 @@ import {
   isMultiElement,
   isNumeric,
   isOwned,
+  typeToString,
   type HandleType,
   type Type,
 } from "../lowering/types.js";
@@ -486,6 +487,13 @@ function emitStmt(
       return `${indent}break;`;
     case "Continue":
       return `${indent}continue;`;
+    case "TypeComment": {
+      const lines = s.entries.map(
+        e =>
+          `${indent}/* type ${e.name} (${e.cName}) :: ${typeToString(e.ty)} */`
+      );
+      return lines.join("\n");
+    }
   }
 }
 

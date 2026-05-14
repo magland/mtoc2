@@ -23,6 +23,7 @@
  */
 
 import type { AbstractSyntaxTree, Expr, Stmt, Span } from "../parser/index.js";
+import { offsetToLineCol } from "../parser/sourceLoc.js";
 import { UnsupportedConstruct, TypeError } from "./errors.js";
 import {
   type Type,
@@ -44,6 +45,18 @@ import {
   stripExactFromEnv,
   specializationKey,
 } from "./types.js";
+
+/** Hook for the `%!numbl:printtype` directive's compile-time output.
+ *  Defaults to `console.error` (so emitted lines go to stderr and
+ *  don't mix with the cross-runner's stdout comparison). Tests
+ *  replace this with a capturing function. */
+export let printTypeSink: (line: string) => void = line => console.error(line);
+export function setPrintTypeSink(sink: (line: string) => void): void {
+  printTypeSink = sink;
+}
+export function resetPrintTypeSink(): void {
+  printTypeSink = line => console.error(line);
+}
 import { type IRExpr, type IRStmt, type IRFunc, type IRProgram } from "./ir.js";
 import {
   getBuiltin,
@@ -73,6 +86,12 @@ export class Lowerer {
    *  (`anon_0`, `anon_1`, ...). Shared across the whole program so two
    *  textually distinct `@(...)` expressions get distinct identities. */
   private anonCounter: number = 0;
+
+  /** Source text, retained for offset→line/col conversion when
+   *  rendering compile-time diagnostics such as the
+   *  `%!numbl:printtype` directive's output. Empty string is allowed
+   *  for callers that don't need positional output. */
+  constructor(private source: string = "") {}
 
   lowerProgram(ast: AbstractSyntaxTree): IRProgram {
     // Pre-scan: collect top-level function definitions.
@@ -152,8 +171,17 @@ export class Lowerer {
    *  - `%!numbl:opaque <var> [<var>...]` — strip `exact` from each
    *    named variable in the current env. Used in test scripts to
    *    force the runtime codegen path on values mtoc2 would otherwise
-   *    fold at compile time. Numbl-side this is a no-op directive,
-   *    so cross-runner output is unaffected. */
+   *    fold at compile time.
+   *  - `%!numbl:showtype <var> [<var>...]` — snapshot each variable's
+   *    type and emit a `/_ type ... _/` comment in the generated C
+   *    at this position. Debug aid; no runtime effect.
+   *  - `%!numbl:printtype <var> [<var>...]` — same snapshot, but
+   *    written to stderr (via `printTypeSink`) at compile time. Fires
+   *    once per function specialization. No IR node, no codegen
+   *    interaction.
+   *
+   *  Numbl ignores all three directives, so cross-runner output is
+   *  unaffected. */
   private lowerDirective(
     s: Extract<Stmt, { type: "Directive" }>
   ): IRStmt | null {
@@ -183,10 +211,47 @@ export class Lowerer {
       }
       return null;
     }
+    if (s.directive === "showtype") {
+      const entries = this.snapshotTypeEntries(s.args, s.span, "showtype");
+      return { kind: "TypeComment", entries, span: s.span };
+    }
+    if (s.directive === "printtype") {
+      const entries = this.snapshotTypeEntries(s.args, s.span, "printtype");
+      const { line, column } = offsetToLineCol(this.source, s.span.start);
+      for (const e of entries) {
+        printTypeSink(
+          `${s.span.file}:${line}:${column}: type ${e.name} :: ${typeToString(e.ty)}`
+        );
+      }
+      return null;
+    }
     // Unknown directives are silently ignored — keeps mtoc2 forward-
     // compatible with numbl directives that don't translate (e.g.
     // `assert_jit`).
     return null;
+  }
+
+  /** Look up each name in `args` in the current env, snapshotting its
+   *  `cName` and current `Type`. Throws `UnsupportedConstruct` with
+   *  the directive's span on the first unknown name. Used by the
+   *  `showtype` and `printtype` directive branches. */
+  private snapshotTypeEntries(
+    args: string[],
+    span: Span,
+    directiveName: string
+  ): { name: string; cName: string; ty: Type }[] {
+    const entries: { name: string; cName: string; ty: Type }[] = [];
+    for (const name of args) {
+      const entry = this.env.get(name);
+      if (entry === undefined) {
+        throw new UnsupportedConstruct(
+          `'%!numbl:${directiveName}' references unknown variable '${name}'`,
+          span
+        );
+      }
+      entries.push({ name, cName: entry.cName, ty: entry.ty });
+    }
+    return entries;
   }
 
   private lowerExprStmt(

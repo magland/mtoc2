@@ -148,6 +148,11 @@ export function irStmtHeader(s: IRStmt): string | null {
       return "break";
     case "Continue":
       return "continue";
+    case "TypeComment":
+      // The emitter renders TypeComment as its own `/_ type ... _/`
+      // lines; suppress the wrapper-comment-above-stmt that emitBody
+      // would otherwise add for every IR stmt.
+      return null;
   }
 }
 

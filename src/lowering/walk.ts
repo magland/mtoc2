@@ -67,6 +67,7 @@ export function forEachTopLevelExpr(
     case "ReturnFromFunction":
     case "Break":
     case "Continue":
+    case "TypeComment":
       return;
   }
 }

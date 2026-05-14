@@ -203,16 +203,37 @@ in `mtoc2_tensor_copy`; computed tensor RHSs (`Binary` / `Unary` /
 `Call`) emit their per-op runtime helper. The C variable always holds
 a freshly-owned tensor after the Assign.
 
-## Testing-only directive
+## Testing- and debug-only directives
 
-`%!numbl:opaque <var> [<var>...]` strips `exact` from each named
-variable in the current env. With the no-fold-at-codegen rule, this is
-mostly a no-op for variables holding tensors (the runtime path is the
-default), but it still matters for `if`-cond folding on scalar vars:
-`x = 5; %!numbl:opaque x; if x > 0` forces the if to emit as a runtime
-branch instead of being statically taken. Numbl's parser recognizes
-the directive but treats unknown directives as no-ops, so cross-runner
-output is unaffected.
+mtoc2 reuses numbl's `%!numbl:<name> <args>` directive AST as a
+channel for translator-side hints. Numbl silently ignores any
+unknown directive name, so cross-runner output is unaffected by all
+three below.
+
+- `%!numbl:opaque <var> [<var>...]` strips `exact` from each named
+  variable in the current env. With the no-fold-at-codegen rule
+  this is mostly a no-op for variables holding tensors (the runtime
+  path is the default), but it still matters for `if`-cond folding
+  on scalar vars: `x = 5; %!numbl:opaque x; if x > 0` forces the if
+  to emit as a runtime branch instead of being statically taken.
+
+- `%!numbl:showtype <var> [<var>...]` snapshots each variable's
+  current type and emits one `/_ type <name> (<cName>) :: <type> _/`
+  line in the generated C at the directive's source position. Debug
+  aid only; no runtime effect. Lowers to a `TypeComment` IR node;
+  walk / liveness / dataflow treat it as a no-op.
+
+- `%!numbl:printtype <var> [<var>...]` is the stderr counterpart of
+  `showtype`: same snapshot, written via the swappable
+  `printTypeSink` hook (defaulting to `console.error`) as
+  `<file>:<line>:<col>: type <name> :: <type>`. No IR node and no
+  effect on emitted C — fires at lowering time, once per function
+  specialization that the directive's body is lowered for.
+
+Both `showtype` and `printtype` raise `UnsupportedConstruct` with
+the directive's span if a named variable is not in scope. Both
+reflect post-`opaque` stripping and loop-body widening because they
+read the env at the lowering point.
 
 ## Architectural rules
 
