@@ -68,6 +68,7 @@ import {
   unify,
   storageEquivalent,
   stripExactFromEnv,
+  withoutExact,
   canonicalizeType,
   classMethodSpecSource,
 } from "./types.js";
@@ -122,10 +123,6 @@ export class Lowerer {
     baseTy: NumericType;
     axis: number | "linear";
   }> = [];
-  /** Per-scope set: names introduced (first-assignment) in current
-   *  function body. Used to decide `declare: true` on Assign. Reset
-   *  when entering a function specialization. */
-  private declared: Set<string> = new Set();
   /** Monotonic counter for synthesizing `_mtoc2_t1`, `_mtoc2_t2`, ...
    *  hoist-temp names. Reset per function specialization. */
   private tempCounter: number = 0;
@@ -535,13 +532,11 @@ export class Lowerer {
 
   private hoistToTemp(e: IRExpr, hoists: IRStmt[]): IRExpr {
     const tempName = this.freshTempName();
-    this.declared.add(tempName);
     this.env.set(tempName, { cName: tempName, ty: e.ty });
     hoists.push({
       kind: "Assign",
       name: tempName,
       cName: tempName,
-      declare: true,
       ty: e.ty,
       expr: e,
       span: e.span,
@@ -870,11 +865,11 @@ export class Lowerer {
 
     // N≥2 outputs. Build a MultiAssignCall. Output slots have one of
     // two shapes: named binding (routed through `recordAssignment` to
-    // register the env entry and pull the declare flag) or `null` for
-    // ignored / trailing-omitted slots.
+    // register the env entry and cName) or `null` for ignored /
+    // trailing-omitted slots.
     const outputs: {
       ty: Type;
-      binding: { name: string; cName: string; declare: boolean } | null;
+      binding: { name: string; cName: string } | null;
     }[] = [];
     for (let i = 0; i < spec.outputTypes.length; i++) {
       const slotTy = spec.outputTypes[i] ?? { kind: "Unknown" };
@@ -897,9 +892,9 @@ export class Lowerer {
         continue;
       }
       // Named slot. We reuse `recordAssignment` for its side effects
-      // (env update, declare flag, cName allocation). The synthetic
-      // Var expression it builds the Assign around is discarded — we
-      // only consume the returned cName + declare.
+      // (env update, cName allocation). The synthetic Var expression
+      // it builds the Assign around is discarded — we only consume the
+      // returned cName.
       const synthRhs: IRExpr = {
         kind: "Var",
         name: lv.name,
@@ -913,7 +908,7 @@ export class Lowerer {
       }
       outputs.push({
         ty: slotTy,
-        binding: { name: lv.name, cName: rec.cName, declare: rec.declare },
+        binding: { name: lv.name, cName: rec.cName },
       });
     }
     return {
@@ -940,15 +935,12 @@ export class Lowerer {
         );
       }
     }
-    const declare = !this.declared.has(name);
-    this.declared.add(name);
     const cName = existing?.cName ?? cIdentForUserName(name);
     this.env.set(name, { cName, ty: expr.ty });
     return {
       kind: "Assign",
       name,
       cName,
-      declare,
       ty: expr.ty,
       expr,
       span,
@@ -1134,7 +1126,6 @@ export class Lowerer {
     else kSign = loopVarSign;
 
     const cVar = cIdentForUserName(s.varName);
-    this.declared.add(s.varName);
     this.env.set(s.varName, {
       cName: cVar,
       ty: scalarDouble(kSign),
@@ -2215,11 +2206,9 @@ export class Lowerer {
     // RHSs in a fresh env that mirrors the constructor's entry state
     // (params bound, no other locals).
     const savedEnv = this.env;
-    const savedDeclared = this.declared;
     const savedTempCounter = this.tempCounter;
     const savedCurrentFile = this.currentFile;
     this.env = new Map();
-    this.declared = new Set();
     this.tempCounter = 0;
     this.currentFile = reg.file;
     for (let i = 0; i < decl.params.length; i++) {
@@ -2227,7 +2216,6 @@ export class Lowerer {
         cName: cIdentForUserName(decl.params[i]),
         ty: argTypes[i],
       });
-      this.declared.add(decl.params[i]);
     }
 
     const props: { name: string; ty: Type }[] = [];
@@ -2261,7 +2249,6 @@ export class Lowerer {
       }
     } finally {
       this.env = savedEnv;
-      this.declared = savedDeclared;
       this.tempCounter = savedTempCounter;
       this.currentFile = savedCurrentFile;
     }
@@ -2573,11 +2560,9 @@ export class Lowerer {
 
     // Save outer state.
     const savedEnv = this.env;
-    const savedDeclared = this.declared;
     const savedTempCounter = this.tempCounter;
     const savedCurrentFile = this.currentFile;
     this.env = new Map();
-    this.declared = new Set();
     this.tempCounter = 0;
     this.currentFile = file;
 
@@ -2587,17 +2572,12 @@ export class Lowerer {
     for (let i = 0; i < decl.params.length; i++) {
       const pName = decl.params[i];
       this.env.set(pName, { cName: cIdentForUserName(pName), ty: argTypes[i] });
-      this.declared.add(pName);
     }
-    // Outputs are declared but not yet assigned (the normal path).
-    // Class constructors pre-seed their output (the receiver) with
-    // the default-valued class instance via an injected first stmt,
-    // so the body can read `obj.x` / write `obj.x = ...` against an
-    // initialized slot from the very first source statement.
+    // Class constructors pre-seed their output (the receiver) with the
+    // default-valued class instance via an injected first stmt, so the
+    // body can read `obj.x` / write `obj.x = ...` against an initialized
+    // slot from the very first source statement.
     let initStmts: IRStmt[] = [];
-    for (const o of decl.outputs) {
-      this.declared.add(o);
-    }
     if (preSeedOutput !== undefined) {
       this.requireValueType(
         preSeedOutput.initExpr,
@@ -2627,7 +2607,6 @@ export class Lowerer {
 
     // Restore outer state.
     this.env = savedEnv;
-    this.declared = savedDeclared;
     this.tempCounter = savedTempCounter;
     this.currentFile = savedCurrentFile;
 
@@ -2663,19 +2642,30 @@ export class Lowerer {
   private mergeBranchEnvs(
     envs: Map<string, EnvEntry>[]
   ): Map<string, EnvEntry> {
-    // Collect all keys present in any branch.
+    // Collect all keys present in any branch. Variables assigned in
+    // only some branches stay in scope after the merge — MATLAB's rule
+    // is "declared if any path declared it; reading without that path
+    // having run is a runtime error". Codegen pre-declares such locals
+    // at function top (see `collectHoistedScalarLocals` in emit.ts) so
+    // a later C-level read survives the block's lexical scope.
     const allKeys = new Set<string>();
     for (const e of envs) for (const k of e.keys()) allKeys.add(k);
     const out = new Map<string, EnvEntry>();
     for (const k of allKeys) {
-      const entries = envs.map(e => e.get(k));
-      if (entries.some(x => x === undefined)) continue; // not in all branches
-      let ty: Type = (entries[0] as EnvEntry).ty;
-      for (let i = 1; i < entries.length; i++) {
-        ty = unify(ty, (entries[i] as EnvEntry).ty);
+      const present = envs
+        .map(e => e.get(k))
+        .filter((x): x is EnvEntry => x !== undefined);
+      if (present.length === 0) continue;
+      let ty: Type = present[0].ty;
+      for (let i = 1; i < present.length; i++) {
+        ty = unify(ty, present[i].ty);
       }
-      const cName = (entries[0] as EnvEntry).cName;
-      out.set(k, { cName, ty });
+      // Drop `exact` if the key is missing in any branch — the
+      // runtime value can't be guaranteed to match.
+      if (present.length < envs.length) {
+        ty = withoutExact(ty);
+      }
+      out.set(k, { cName: present[0].cName, ty });
     }
     return out;
   }

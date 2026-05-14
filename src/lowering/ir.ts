@@ -252,12 +252,6 @@ export interface Assign {
   name: string;
   /** Fresh C name allocated for this assignment. */
   cName: string;
-  /** True if the variable is newly introduced AND will emit a C-side
-   *  declaration (i.e. `double x = ...;` for scalars). For tensors,
-   *  declarations are hoisted to function top by the emitter and
-   *  every Assign uses the assign helper, so this flag is ignored
-   *  for owned types. */
-  declare: boolean;
   ty: Type;
   expr: IRExpr;
   span: Span;
@@ -364,12 +358,12 @@ export interface MultiAssignCall {
    *  discard temp for ignored slots). `binding === null` → ignored
    *  output; codegen synthesizes a discard temp. A non-null binding
    *  means "store the call's i-th output into <binding.cName>"; the
-   *  lowerer has already routed it through `recordAssignment`, so
-   *  the function-top declaration pipeline picks up `declare` like
-   *  any other Assign. */
+   *  binding's declaration is hoisted to function top by the emitter
+   *  (owned slots via `collectOwnedLocals`, scalar slots via
+   *  `collectHoistedScalarLocals`). */
   outputs: ReadonlyArray<{
     ty: Type;
-    binding: { name: string; cName: string; declare: boolean } | null;
+    binding: { name: string; cName: string } | null;
   }>;
   span: Span;
 }

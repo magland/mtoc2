@@ -32,6 +32,7 @@ import {
   isMultiElement,
   isNumeric,
   isOwned,
+  scalarDouble,
   structTypedefName,
   typeToString,
   type ClassType,
@@ -112,6 +113,9 @@ export function emitProgram(prog: IRProgram, opts: EmitOptions = {}): string {
     activateOwnedRuntime(o.ty, state);
     const h = ownedHelpersFor(o.ty);
     userParts.push(`  ${cTypeFor(o.ty)} ${o.cName} = ${h.empty}();`);
+  }
+  for (const o of collectHoistedScalarLocals(prog.topLevelStmts)) {
+    userParts.push(`  ${cTypeFor(o.ty)} ${o.cName} = ${defaultInitFor()};`);
   }
   const mainFutureTouches = computeFutureTouches(prog.topLevelStmts, null);
   const mainOwnedTypes = new Map<string, Type>(
@@ -447,6 +451,58 @@ function collectOwnedLocals(stmts: IRStmt[]): { cName: string; ty: Type }[] {
   return order.map(cName => ({ cName, ty: seen.get(cName)! }));
 }
 
+/** Walk the body and collect every non-owned local (scalars, including
+ *  For loop vars and multi-assign slot bindings) so they can be
+ *  pre-declared at function top with `double v = 0.0;`. Symmetric with
+ *  `collectOwnedLocals`: every local is declared at function top, every
+ *  Assign / loop-var rebinding is a plain `v = rhs;`. Without this,
+ *  inner-block declarations would scope to the block and a later read
+ *  (now reachable after the `mergeBranchEnvs` change that keeps
+ *  partial-branch variables in scope) would reference an undeclared C
+ *  variable. */
+function collectHoistedScalarLocals(
+  stmts: IRStmt[]
+): { cName: string; ty: Type }[] {
+  const seen = new Map<string, Type>();
+  const order: string[] = [];
+  const note = (cName: string, ty: Type): void => {
+    if (isOwned(ty)) return;
+    if (seen.has(cName)) return;
+    seen.set(cName, ty);
+    order.push(cName);
+  };
+  const visit = (ss: IRStmt[]): void => {
+    for (const s of ss) {
+      switch (s.kind) {
+        case "Assign":
+          note(s.cName, s.ty);
+          break;
+        case "MultiAssignCall":
+          for (const slot of s.outputs) {
+            if (slot.binding !== null) note(slot.binding.cName, slot.ty);
+          }
+          break;
+        case "If":
+          visit(s.thenBody);
+          visit(s.elseBody);
+          break;
+        case "While":
+          visit(s.body);
+          break;
+        case "For":
+          // Loop var is intrinsic to the For node (declared by
+          // `for (...) { double k = ...; ... }` in codegen); hoist it
+          // so reads after the loop see the last iteration's value.
+          note(s.cVar, scalarDouble());
+          visit(s.body);
+          break;
+      }
+    }
+  };
+  visit(stmts);
+  return order.map(cName => ({ cName, ty: seen.get(cName)! }));
+}
+
 function emitFunction(fn: IRFunc, state: RuntimeState): string {
   const lines: string[] = [];
   const retType = fnRetType(fn);
@@ -484,6 +540,18 @@ function emitFunction(fn: IRFunc, state: RuntimeState): string {
     activateOwnedRuntime(o.ty, state);
     const h = ownedHelpersFor(o.ty);
     lines.push(`  ${cTypeFor(o.ty)} ${o.cName} = ${h.empty}();`);
+  }
+  // Pre-declare non-owned locals (scalars, For loop vars, multi-assign
+  // slot bindings) at function top. Symmetric with the owned-locals
+  // pass above; ensures a later read of a variable first written inside
+  // an If / While / For body (now reachable thanks to mergeBranchEnvs
+  // keeping partial-branch keys) doesn't reference an out-of-scope C
+  // local.
+  const hoistedScalars = collectHoistedScalarLocals(fn.body).filter(
+    o => !outputCNames.has(o.cName) && !paramNames.has(o.cName)
+  );
+  for (const o of hoistedScalars) {
+    lines.push(`  ${cTypeFor(o.ty)} ${o.cName} = ${defaultInitFor()};`);
   }
   // Single-output owned: keep the output alive through the body so
   // the future-touch analysis doesn't emit a stray early-free of the
@@ -648,9 +716,6 @@ function emitStmt(
         return `${indent}${h.assign}(&${s.cName}, ${rhs});`;
       }
       const rhs = emitExpr(s.expr, state);
-      if (s.declare) {
-        return `${indent}${cTypeFor(s.ty)} ${s.cName} = ${rhs};`;
-      }
       return `${indent}${s.cName} = ${rhs};`;
     }
     case "MemberStore": {
@@ -752,10 +817,12 @@ function emitStmt(
       lines.push(
         `${indent}  for (long _mtoc2_for_i = 0; _mtoc2_for_i < _mtoc2_for_n; _mtoc2_for_i++) {`
       );
-      // The user may mutate the loop variable inside the body (the
-      // next iteration overrides it), so it stays non-const.
+      // The loop var is pre-declared at function top by
+      // `collectHoistedScalarLocals`, so the rebind here is a plain
+      // assignment. This lets reads after the loop see the final
+      // iteration's value (matching numbl).
       lines.push(
-        `${indent}    double ${s.cVar} = mtoc2_range_value(_mtoc2_for_start, ${stepC}, _mtoc2_for_end, _mtoc2_for_n, _mtoc2_for_i);`
+        `${indent}    ${s.cVar} = mtoc2_range_value(_mtoc2_for_start, ${stepC}, _mtoc2_for_end, _mtoc2_for_n, _mtoc2_for_i);`
       );
       const bodyText = emitBody(
         s.body,
@@ -784,9 +851,8 @@ function emitStmt(
     }
     case "MultiAssignCall": {
       // N≥2-output user-function call. Each named slot's `binding.cName`
-      // is either already pre-declared at function top (for owned-typed
-      // slots; v1 has none) or needs a one-shot `double <cName>;` here
-      // when `declare` is true (scalar slots — the only kind in v1).
+      // is pre-declared at function top — owned slots by
+      // `collectOwnedLocals`, scalar slots by `collectHoistedScalarLocals`.
       // Ignored slots become `_mtoc2_discard_<callIdx>_<i>` locals
       // scoped to the call's `{}` block.
       //
@@ -795,24 +861,8 @@ function emitStmt(
       const argStrs = s.args.map(a =>
         isOwned(a.ty) ? emitOwnedRhs(a, state) : emitExpr(a, state)
       );
-      // Pre-declare any scalar named slot whose declare flag is set.
-      // Owned-typed slots are predeclared at function top by the
-      // collectOwnedLocals pass — skip them here.
-      const preDecls: string[] = [];
-      for (const slot of s.outputs) {
-        if (
-          slot.binding !== null &&
-          slot.binding.declare &&
-          !isOwned(slot.ty)
-        ) {
-          preDecls.push(
-            `${indent}${cTypeFor(slot.ty)} ${slot.binding.cName} = ${defaultInitFor()};`
-          );
-        }
-      }
       const callIdx = state.multiAssignCallCounter++;
       const out: string[] = [];
-      for (const d of preDecls) out.push(d);
       out.push(`${indent}{`);
       const outArgs: string[] = [];
       for (let i = 0; i < s.outputs.length; i++) {

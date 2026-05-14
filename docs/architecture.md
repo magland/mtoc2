@@ -162,13 +162,29 @@ lowering: a 1×1 tensor literal `[x]` returns the inner scalar IR
 directly — MATLAB treats `[x]` and `x` as the same scalar.
 
 Every `Assign` emits C. For owned types via
-`mtoc2_tensor_assign(&v, rhs)`, for scalars via `<cType> v = rhs;`
-(declare) or `v = rhs;` (reassign). Every tensor RHS materializes
-freshly — `TensorBuild` via `from_row`/`from_matrix`, `Var` via
-`mtoc2_tensor_copy`, computed tensor RHSs via their per-op runtime
-helper. The type system still tracks `exact` (so specialization keys
-distinguish `f(2)` from `f(3)`), but the lowerer doesn't fold it into
-the IR — see the "Folding only at if-cond" section below.
+`mtoc2_tensor_assign(&v, rhs)`, for scalars via plain `v = rhs;`. Every
+local — owned or scalar, including For loop vars and multi-assign slot
+bindings — is pre-declared at function top by codegen, so the Assign
+site never carries the `<cType>` keyword. This matches MATLAB's
+"assigned in any branch → in scope after the merge" rule: a variable
+first written inside an `if` / `while` / `for` body remains readable
+after the block.
+
+> **Known divergence**: the pre-declaration is unconditional, so a
+> variable first written inside a block that never executes still
+> reads as the zero-initialized default (`0.0`) rather than raising
+> "Undefined function or variable" the way numbl does. Concretely,
+> `for k = 1:0; a = k; end; disp(a); disp(k);` prints `0` `0` under
+> mtoc2; numbl errors at the first `disp`. We accept this gap to
+> keep codegen straight-line; a future "definite assignment" guard
+> at lowering time could close it.
+
+Every tensor RHS materializes freshly — `TensorBuild` via
+`from_row`/`from_matrix`, `Var` via `mtoc2_tensor_copy`, computed
+tensor RHSs via their per-op runtime helper. The type system still
+tracks `exact` (so specialization keys distinguish `f(2)` from `f(3)`),
+but the lowerer doesn't fold it into the IR — see the "Folding only at
+if-cond" section below.
 
 ### Builtins (`builtins/`)
 
@@ -494,12 +510,18 @@ Concretely the emit pass:
    `isOwned(ty)`. `If`/`While`/`For` bodies are walked too, so inner
    declarations surface to the function-level free list. Owned-typed
    params count too: the caller wrapped them in `_copy`, so the
-   callee owns its arg and must free it at scope exit.
+   callee owns its arg and must free it at scope exit. In parallel,
+   `collectHoistedScalarLocals` runs the symmetric pass for non-owned
+   locals — every scalar `Assign` cName, every `For` loop var, every
+   multi-assign slot binding — so a variable first written inside a
+   nested block is still in C scope after the block ends.
 2. Emits a pre-declaration `<cType> v = <typedef>_empty();` at
    function top for each owned local (skipped for owned params,
    which the function signature already declared). The empty value
    has zeroed owned fields/buffers; the first `_assign` does a
-   no-op free and installs the value.
+   no-op free and installs the value. Non-owned scalar locals get a
+   plain `double v = 0.0;` at function top, so every Assign of a
+   scalar emits as a one-liner `v = rhs;`.
 3. For each owned Assign or `MemberStore` with an owned leaf, emits
    `<typedef>_assign(&slot, <rhs>)`. The RHS must be a freshly-owned
    value — `TensorBuild` / `StructLit` / tensor-op calls produce one
