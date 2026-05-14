@@ -252,6 +252,45 @@ export interface TypeComment {
   span: Span;
 }
 
+/** Multi-output / drop-all user-function call statement. Drives:
+ *    `[a, b] = foo(x);`        (N≥2 outputs, mix of named lvalues
+ *                               and ignored `~` slots; trailing
+ *                               outputs may be omitted)
+ *    `foo(x);`                 (N≥2-output bare statement; every
+ *                               output dropped via a discard temp)
+ *
+ *  1-output and 0-output user-function calls do NOT use this node —
+ *  they keep the simpler return-by-value (`Assign` / `ExprStmt`) and
+ *  `void`-returning (`ExprStmt(Call)`) shapes respectively, because
+ *  their existing C ABI doesn't need out-pointers.
+ *
+ *  Each entry of `outputs` is either a real binding (the slot's typed
+ *  destination — driven through `recordAssignment` like any other
+ *  Assign) or `null` for an ignored slot. Codegen wraps the call in a
+ *  `{ … }` block and declares one inline `_mtoc2_discard_<callIdx>_<i>`
+ *  per `null` slot so those temporaries stay scoped to the call. */
+export interface MultiAssignCall {
+  kind: "MultiAssignCall";
+  /** Mangled C identifier of the user-function specialization. */
+  cName: string;
+  /** Source-level name (for diagnostics). */
+  name: string;
+  args: IRExpr[];
+  /** One entry per output slot of the callee. `ty` is the slot's
+   *  static type (always populated so codegen can declare a typed
+   *  discard temp for ignored slots). `binding === null` → ignored
+   *  output; codegen synthesizes a discard temp. A non-null binding
+   *  means "store the call's i-th output into <binding.cName>"; the
+   *  lowerer has already routed it through `recordAssignment`, so
+   *  the function-top declaration pipeline picks up `declare` like
+   *  any other Assign. */
+  outputs: ReadonlyArray<{
+    ty: Type;
+    binding: { name: string; cName: string; declare: boolean } | null;
+  }>;
+  span: Span;
+}
+
 export type IRStmt =
   | ExprStmt
   | Assign
@@ -262,7 +301,8 @@ export type IRStmt =
   | Break
   | Continue
   | TypeComment
-  | MemberStore;
+  | MemberStore
+  | MultiAssignCall;
 
 // ── Functions ───────────────────────────────────────────────────────────
 
@@ -277,9 +317,11 @@ export interface IRFunc {
   cParams: string[];
   /** Per-parameter type at this specialization. */
   paramTypes: Type[];
-  /** Source output names (single output for MVP). */
+  /** Source output names. 0 outputs → C `void` return type; 1 output
+   *  → classic return-by-value; N≥2 outputs → C `void` return + one
+   *  trailing `T_i *_mtoc2_o<i>` parameter per output. */
   outputs: string[];
-  /** C names for outputs. */
+  /** C names for outputs (parallel to `outputs`). */
   cOutputs: string[];
   /** Output types after lowering. */
   outputTypes: Type[];

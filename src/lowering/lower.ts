@@ -32,7 +32,13 @@
  * `UnsupportedConstruct` with a span.
  */
 
-import type { AbstractSyntaxTree, Expr, Stmt, Span } from "../parser/index.js";
+import type {
+  AbstractSyntaxTree,
+  Expr,
+  LValue,
+  Stmt,
+  Span,
+} from "../parser/index.js";
 import { offsetToLineCol } from "../parser/sourceLoc.js";
 import { UnsupportedConstruct, TypeError } from "./errors.js";
 import {
@@ -178,6 +184,8 @@ export class Lowerer {
         return this.lowerAssign(s);
       case "AssignLValue":
         return this.lowerAssignLValue(s);
+      case "MultiAssign":
+        return this.lowerMultiAssign(s);
       case "If":
         return this.lowerIf(s);
       case "While":
@@ -295,6 +303,35 @@ export class Lowerer {
   private lowerExprStmt(
     s: Extract<Stmt, { type: "ExprStmt" }>
   ): IRStmt | IRStmt[] | null {
+    // Multi-output user-function bare-statement form: `foo(x);` where
+    // `foo` returns N≥2 outputs. The expression-position lowering of
+    // a multi-output user function is rejected (the C ABI is `void` +
+    // out-pointers, no return value to consume), so we peek at the
+    // resolver and route to `lowerMultiAssign` with zero lvalues —
+    // "drop every output" semantics, matching numbl. We use the
+    // empty-args resolver call (no arg types yet) since for a bare
+    // name the verdict doesn't depend on arg types.
+    if (s.expr.type === "FuncCall") {
+      const fc = s.expr;
+      const envEntry = this.env.get(fc.name);
+      if (envEntry === undefined && !this.workspace.isClass(fc.name)) {
+        const target = this.workspace.resolve(
+          fc.name,
+          [],
+          this.callSite(),
+          fc.span
+        );
+        if (target?.kind === "userFunction" && target.ast.outputs.length >= 2) {
+          return this.lowerMultiAssign({
+            type: "MultiAssign",
+            lvalues: [],
+            expr: fc,
+            suppressed: s.suppressed,
+            span: s.span,
+          });
+        }
+      }
+    }
     const expr = this.lowerExpr(s.expr);
     // If the expression is a folded literal with no side effect, drop it.
     if (expr.kind === "NumLit") return null;
@@ -582,6 +619,199 @@ export class Lowerer {
 
     if (hoists.length === 0) return store;
     return [...hoists, store];
+  }
+
+  /** `[a, b, ~] = foo(x);` — multi-output statement form. Also reached
+   *  from `lowerExprStmt` (with empty lvalues) for the drop-all bare
+   *  statement `foo(x);` where `foo` returns N≥2 outputs. Restrictions
+   *  for v1:
+   *
+   *    - RHS must be a `FuncCall` resolving to a user function (no
+   *      builtins, no handle dispatch — those don't have a multi-output
+   *      ABI in mtoc2 yet).
+   *    - Each lvalue must be a `Var` or `~` ignore.
+   *    - `lvalues.length <= callee.outputs.length`.
+   *    - For an N≥2-output callee, every output slot must be scalar
+   *      real numeric (the only type mtoc2 currently emits sret writes
+   *      for; tensor / struct / class / handle outputs are deferred).
+   *
+   *  When the callee has exactly 1 output the result routes to a plain
+   *  `Assign` (named lvalue) or `ExprStmt(Call)` (drop / ignore) — the
+   *  return-by-value ABI stays in play. Otherwise the result is a
+   *  `MultiAssignCall` IR node and the C ABI uses out-pointers. */
+  private lowerMultiAssign(
+    s: Extract<Stmt, { type: "MultiAssign" }>
+  ): IRStmt | IRStmt[] {
+    if (s.expr.type !== "FuncCall") {
+      throw new UnsupportedConstruct(
+        `multi-assign right-hand side must be a user-function call`,
+        s.span
+      );
+    }
+    const fc = s.expr;
+    const callName = fc.name;
+    // Validate lvalues up-front.
+    for (const lv of s.lvalues) {
+      if (lv.type !== "Var" && lv.type !== "Ignore") {
+        throw new UnsupportedConstruct(
+          `multi-assign lvalue must be a simple identifier or '~' ignore ` +
+            `(got '${lv.type}')`,
+          s.span
+        );
+      }
+    }
+    // Reject in-scope variable names and class names — only user
+    // functions can sit on the right of `[...] = ...` in v1.
+    if (this.env.get(callName) !== undefined) {
+      throw new UnsupportedConstruct(
+        `multi-assign of '${callName}': name resolves to an in-scope ` +
+          `variable, not a function`,
+        s.span
+      );
+    }
+    if (this.workspace.isClass(callName)) {
+      throw new UnsupportedConstruct(
+        `multi-assign of '${callName}': class constructors have a single ` +
+          `output`,
+        s.span
+      );
+    }
+    // Lower the args. Same pattern as `lowerFuncCall`.
+    const args = fc.args.map(a => this.lowerExpr(a));
+    for (const a of args) {
+      this.requireValueType(a, `argument to '${callName}'`);
+    }
+    const argTypes = args.map(a => a.ty);
+    const target = this.workspace.resolve(
+      callName,
+      argTypes,
+      this.callSite(),
+      fc.span
+    );
+    if (target?.kind !== "userFunction") {
+      throw new UnsupportedConstruct(
+        `multi-assign of '${callName}': only user-defined functions can ` +
+          `appear on the right of '[...] = ...' (or as a bare multi-output ` +
+          `statement)`,
+        s.span
+      );
+    }
+    const fnAst = target.ast;
+    const fnFile = target.file;
+    if (s.lvalues.length > fnAst.outputs.length) {
+      throw new UnsupportedConstruct(
+        `function '${callName}' returns ${fnAst.outputs.length} output(s) ` +
+          `but ${s.lvalues.length} were requested`,
+        s.span
+      );
+    }
+    if (fnAst.outputs.length === 0 && s.lvalues.length > 0) {
+      throw new UnsupportedConstruct(
+        `function '${callName}' has no outputs and cannot be assigned`,
+        s.span
+      );
+    }
+    const spec = this.specializeUserFunction(
+      fnAst,
+      argTypes,
+      undefined,
+      fnFile
+    );
+
+    // 1-output callee: route to the classic single-output ABI
+    // (return-by-value) so we don't introduce a redundant sret path.
+    if (fnAst.outputs.length === 1) {
+      const callExpr: IRExpr = {
+        kind: "Call",
+        cName: spec.cName,
+        name: callName,
+        args,
+        ty: spec.outputTypes[0] ?? { kind: "Unknown" },
+        span: s.span,
+      };
+      // 0 or 1 lvalues: lvalues.length === 0 → drop-all reached
+      // via the ExprStmt routing (caller passed empty lvalues for
+      // a bare 1-output call); lvalues.length === 1 → either named
+      // or `~`.
+      const lv = s.lvalues[0];
+      if (lv === undefined || lv.type !== "Var") {
+        return { kind: "ExprStmt", expr: callExpr, span: s.span };
+      }
+      return this.recordAssignment(lv.name, callExpr, s.span);
+    }
+
+    // 0-output callee with no lvalues: reached via the bare-statement
+    // routing path. Pass through as ExprStmt(Call) with Void type, the
+    // same shape `lowerFuncCall` would produce for any 0-output bare
+    // call.
+    if (fnAst.outputs.length === 0) {
+      const callExpr: IRExpr = {
+        kind: "Call",
+        cName: spec.cName,
+        name: callName,
+        args,
+        ty: VOID,
+        span: s.span,
+      };
+      return { kind: "ExprStmt", expr: callExpr, span: s.span };
+    }
+
+    // N≥2 outputs. Build a MultiAssignCall. Output slots have one of
+    // two shapes: named binding (routed through `recordAssignment` to
+    // register the env entry and pull the declare flag) or `null` for
+    // ignored / trailing-omitted slots.
+    const outputs: {
+      ty: Type;
+      binding: { name: string; cName: string; declare: boolean } | null;
+    }[] = [];
+    for (let i = 0; i < spec.outputTypes.length; i++) {
+      const slotTy = spec.outputTypes[i] ?? { kind: "Unknown" };
+      // v1 restriction: scalar real numeric outputs only for N≥2.
+      // Tensor / struct / class / handle sret slots aren't implemented
+      // (would need their owned-kind `_assign` helper on the callee
+      // side and discard-temp lifecycle on the call side).
+      if (!isScalarRealNumeric(slotTy)) {
+        throw new UnsupportedConstruct(
+          `multi-output function '${callName}': output ` +
+            `'${fnAst.outputs[i]}' has type ${typeToString(slotTy)}; ` +
+            `only scalar real numeric outputs are supported for ` +
+            `multi-output functions`,
+          s.span
+        );
+      }
+      const lv: LValue | undefined = s.lvalues[i];
+      if (lv === undefined || lv.type !== "Var") {
+        outputs.push({ ty: slotTy, binding: null });
+        continue;
+      }
+      // Named slot. We reuse `recordAssignment` for its side effects
+      // (env update, declare flag, cName allocation). The synthetic
+      // Var expression it builds the Assign around is discarded — we
+      // only consume the returned cName + declare.
+      const synthRhs: IRExpr = {
+        kind: "Var",
+        name: lv.name,
+        cName: "<placeholder>",
+        ty: slotTy,
+        span: s.span,
+      };
+      const rec = this.recordAssignment(lv.name, synthRhs, s.span);
+      if (rec.kind !== "Assign") {
+        throw new Error("internal: recordAssignment returned non-Assign");
+      }
+      outputs.push({
+        ty: slotTy,
+        binding: { name: lv.name, cName: rec.cName, declare: rec.declare },
+      });
+    }
+    return {
+      kind: "MultiAssignCall",
+      cName: spec.cName,
+      name: callName,
+      args,
+      outputs,
+      span: s.span,
+    };
   }
 
   private recordAssignment(name: string, expr: IRExpr, span: Span): IRStmt {
@@ -935,6 +1165,14 @@ export class Lowerer {
         e.span
       );
     }
+    if (method.outputs.length >= 2) {
+      throw new UnsupportedConstruct(
+        `class method '${target.className}.${target.methodName}' has ` +
+          `${method.outputs.length} outputs; multi-output methods are not ` +
+          `supported yet`,
+        e.span
+      );
+    }
     const allArgs: IRExpr[] = target.stripInstance ? args : [base, ...args];
     const argTypes = allArgs.map(a => a.ty);
     const spec = this.specializeUserFunction(
@@ -1006,6 +1244,14 @@ export class Lowerer {
       }
       throw new TypeError(
         `class '${target.className}' has no static method '${target.methodName}'`,
+        span
+      );
+    }
+    if (method.outputs.length >= 2) {
+      throw new UnsupportedConstruct(
+        `static class method '${target.className}.${target.methodName}' ` +
+          `has ${method.outputs.length} outputs; multi-output methods are ` +
+          `not supported yet`,
         span
       );
     }
@@ -1242,6 +1488,15 @@ export class Lowerer {
         };
       }
       case "userFunction": {
+        if (target.ast.outputs.length >= 2) {
+          throw new UnsupportedConstruct(
+            `function '${e.name}' has ${target.ast.outputs.length} outputs ` +
+              `and cannot be used in an expression position; assign via ` +
+              `'[a, b, ...] = ${e.name}(...)' or call as a bare statement ` +
+              `to drop all outputs`,
+            e.span
+          );
+        }
         const spec = this.specializeUserFunction(
           target.ast,
           argTypes,
@@ -1279,6 +1534,15 @@ export class Lowerer {
         if (method === undefined) {
           throw new TypeError(
             `class '${target.className}' has no ${target.stripInstance ? "static " : ""}method '${target.methodName}'`,
+            e.span
+          );
+        }
+        if (method.outputs.length >= 2) {
+          throw new UnsupportedConstruct(
+            `class method '${target.className}.${target.methodName}' has ` +
+              `${method.outputs.length} outputs; multi-output methods can ` +
+              `only be called via '[a, b, ...] = ...' (not yet supported ` +
+              `for class methods) or as a bare statement`,
             e.span
           );
         }
@@ -1746,6 +2010,14 @@ export class Lowerer {
     // The handle's stored AST carries its own source span, which
     // identifies the file the function was defined in — that's the
     // right file to salt the spec key with.
+    if (handleTy.ast.outputs.length >= 2) {
+      throw new UnsupportedConstruct(
+        `handle '${handleName}' targets '${handleTy.targetName}', which ` +
+          `has ${handleTy.ast.outputs.length} outputs; multi-output handle ` +
+          `dispatch is not supported yet`,
+        span
+      );
+    }
     const spec = this.specializeUserFunction(
       handleTy.ast,
       argTypes,
@@ -1799,12 +2071,6 @@ export class Lowerer {
     if (argTypes.length !== decl.params.length) {
       throw new TypeError(
         `function '${decl.name}' expects ${decl.params.length} arg(s), got ${argTypes.length}`,
-        decl.span
-      );
-    }
-    if (decl.outputs.length > 1) {
-      throw new UnsupportedConstruct(
-        `function '${decl.name}' has ${decl.outputs.length} outputs; only 0 or 1 are supported`,
         decl.span
       );
     }

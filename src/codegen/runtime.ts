@@ -165,10 +165,14 @@ export function getRuntimeSnippet(name: string): RuntimeSnippet {
 export interface RuntimeState {
   /** Insertion-ordered set of activated snippet names. */
   active: Set<string>;
+  /** Counter for `MultiAssignCall` discard-temp suffixes so adjacent
+   *  multi-output call sites don't collide on `_mtoc2_discard_<N>_<i>`
+   *  names. Incremented each time a multi-output call is emitted. */
+  multiAssignCallCounter: number;
 }
 
 export function newRuntimeState(): RuntimeState {
-  return { active: new Set() };
+  return { active: new Set(), multiAssignCallCounter: 0 };
 }
 
 /** Activate a snippet by its registered name. Pulls its `deps` in first

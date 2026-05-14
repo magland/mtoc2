@@ -48,9 +48,14 @@ mtoc2 is a _static_ translator. Anything outside the supported subset raises
 
 - **Scalar real `double`** — arithmetic, comparisons, `if`/`while`/`for`,
   user functions with type-tuple specialization. Functions may declare
-  0 or 1 outputs; a 0-output call returns the `Void` type and can only
-  appear as the expression of an `ExprStmt` (e.g. `foo();` at top
-  level or inside another function body).
+  0, 1, or N≥2 outputs. A 0-output call returns the `Void` type and
+  can only appear as the expression of an `ExprStmt` (e.g. `foo();`
+  at top level or inside another function body). A 1-output call uses
+  the return-by-value C ABI; an N≥2-output call uses `void` + one
+  `T *_mtoc2_o<i>` out-pointer per output and is invoked only via
+  `[a, b, ...] = foo(x)` or as a bare statement `foo(x);` (drop-all).
+  v1 restricts N≥2-output slots to scalar real numeric. Multi-output
+  class methods and handle dispatch are not yet supported.
 - **Real tensors** — mtoc-style "always-copy" model: `mtoc2_tensor_t`
   struct with `mtoc2_tensor_assign` / `mtoc2_tensor_copy` /
   `mtoc2_tensor_free`; no refcount, no COW. Every tensor source-literal

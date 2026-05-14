@@ -165,6 +165,13 @@ export function irStmtHeader(s: IRStmt): string | null {
       const lhs = [s.base.name, ...s.fieldPath].join(".");
       return `${lhs} = ${irExprToString(s.rhs)}`;
     }
+    case "MultiAssignCall": {
+      const slotsTxt = s.outputs
+        .map(slot => (slot.binding === null ? "~" : slot.binding.name))
+        .join(", ");
+      const argsTxt = s.args.map(irExprToString).join(", ");
+      return `[${slotsTxt}] = ${s.name}(${argsTxt})`;
+    }
   }
 }
 

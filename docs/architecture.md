@@ -289,7 +289,8 @@ for inferred properties) with span-carrying errors:
   handle) is rejected — supply an explicit default.
 - A class with pending properties must declare a constructor (no
   zero-arg / no-constructor path can produce a typed instance).
-- Methods must declare 0 or 1 outputs.
+- Methods must declare 0 or 1 outputs. (Multi-output methods are
+  rejected at call time — top-level user functions support N≥2.)
 - `disp(classInstance)` is rejected.
 
 **Codegen.** `src/codegen/emitNamedTypedef.ts` renders one block of
@@ -496,15 +497,33 @@ already contains every project file. Multifile test groups under
 `test_scripts/<subdir>/` follow the same flow: `main.m` is the
 entry, every other `.m` in the directory is a workspace sibling.
 
-Functions may declare 0 or 1 outputs. A 0-output call's IR type is
-`Void`; the lowerer accepts it only as the direct expression of an
-`ExprStmt` (every other use site — Assign RHS, sub-expression of a
-Binary / Unary / Call, tensor-literal element — calls
-`requireValueType`, which rejects Void with a clear span). The
-emitter renders 0-output specializations as `static void <name>(...)
-{ ... }` with no output slot and a bare `return;` (only emitted when
-the body needs the `mtoc2_return:` label, since a label can't sit
-directly before the closing brace).
+Functions may declare 0, 1, or N≥2 outputs. The C ABI splits three
+ways:
+
+- **0 outputs**: `static void <name>(args)`. The call's IR type is
+  `Void`; the lowerer accepts it only as the direct expression of an
+  `ExprStmt` (every other use site — Assign RHS, sub-expression of a
+  Binary / Unary / Call, tensor-literal element — calls
+  `requireValueType`, which rejects Void with a clear span). The
+  emitter renders the specialization with no output slot and a bare
+  `return;` only when the body needs the `mtoc2_return:` label,
+  since a label can't sit directly before the closing brace.
+- **1 output**: classic return-by-value. `static T <name>(args) {
+return cOut; }`.
+- **N≥2 outputs**: `static void <name>(args, T_0 *_mtoc2_o0, ..., T_n
+*_mtoc2_on)`. Each output is a function-top local; every return
+  point (explicit `return` via `goto mtoc2_return;` and the body's
+  fall-through end) writes `*_mtoc2_o<i> = <cOut_i>;` before any
+  scope-exit frees and returns `void`. Multi-output user-function
+  calls do NOT appear in expression position; they're invoked as the
+  RHS of a `MultiAssign` AST node (`[a, b, ~] = foo(x);`) or as a
+  bare drop-all statement (`foo(x);`). Both forms lower to a single
+  `MultiAssignCall` IR statement that wraps the call in `{ ... }` to
+  scope per-slot discard temps (`_mtoc2_discard_<callIdx>_<i>` for
+  ignored / trailing-omitted slots). v1 restricts N≥2-output slots
+  to scalar real numeric; multi-output class methods and
+  multi-output handle dispatch are rejected with a clean
+  `UnsupportedConstruct`.
 
 ## Stage 3: emit
 

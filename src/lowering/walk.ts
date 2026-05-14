@@ -82,5 +82,8 @@ export function forEachTopLevelExpr(
       visit(s.base);
       visit(s.rhs);
       return;
+    case "MultiAssignCall":
+      for (const a of s.args) visit(a);
+      return;
   }
 }

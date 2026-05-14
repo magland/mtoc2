@@ -442,17 +442,30 @@ function activateOwnedRuntime(t: Type, state: RuntimeState): void {
 }
 
 function fnRetType(fn: IRFunc): string {
-  if (fn.outputs.length === 0) return "void";
+  // 0 outputs → C `void`. 1 output → classic return-by-value. N≥2
+  // outputs → `void` return + out-pointer params (see `fnParamList`).
+  if (fn.outputs.length !== 1) return "void";
   const t = fn.outputTypes[0];
   if (!t) return "double";
   return cTypeFor(t);
 }
 
 function fnParamList(fn: IRFunc): string {
-  if (fn.params.length === 0) return "void";
-  return fn.cParams
-    .map((p, i) => `${cTypeFor(fn.paramTypes[i])} ${p}`)
-    .join(", ");
+  const parts: string[] = [];
+  for (let i = 0; i < fn.cParams.length; i++) {
+    parts.push(`${cTypeFor(fn.paramTypes[i])} ${fn.cParams[i]}`);
+  }
+  // Multi-output convention: append one `T_i *_mtoc2_o<i>` per output
+  // after the user params, in declaration order. The body's sret
+  // writes (emitted at every return point and at the function-end
+  // fall-through) target these pointers.
+  if (fn.outputs.length >= 2) {
+    for (let i = 0; i < fn.outputs.length; i++) {
+      const ty = fn.outputTypes[i] ?? { kind: "Unknown" as const };
+      parts.push(`${cTypeFor(ty)} *_mtoc2_o${i}`);
+    }
+  }
+  return parts.length === 0 ? "void" : parts.join(", ");
 }
 
 /** Walk the body and collect every owned local that needs a top-of-
@@ -475,6 +488,23 @@ function collectOwnedLocals(stmts: IRStmt[]): { cName: string; ty: Type }[] {
             order.push(s.cName);
           }
           break;
+        case "MultiAssignCall":
+          // Owned-typed N-output slot bindings need the same top-of-
+          // function predeclaration treatment as ordinary owned
+          // Assigns. v1 restricts slots to scalar real numeric, so
+          // this loop is structurally a no-op today — kept for the
+          // future-tensor-output extension.
+          for (const slot of s.outputs) {
+            if (
+              slot.binding !== null &&
+              isOwned(slot.ty) &&
+              !seen.has(slot.binding.cName)
+            ) {
+              seen.set(slot.binding.cName, slot.ty);
+              order.push(slot.binding.cName);
+            }
+          }
+          break;
         case "If":
           visit(s.thenBody);
           visit(s.elseBody);
@@ -495,41 +525,60 @@ function collectOwnedLocals(stmts: IRStmt[]): { cName: string; ty: Type }[] {
 function emitFunction(fn: IRFunc, state: RuntimeState): string {
   const lines: string[] = [];
   const retType = fnRetType(fn);
-  const isVoidFn = fn.outputs.length === 0;
+  const nOutputs = fn.outputs.length;
+  const isVoidFn = nOutputs === 0;
+  const isMulti = nOutputs >= 2;
   lines.push(irFuncDocComment(fn));
   lines.push(`static ${retType} ${fn.cName}(${fnParamList(fn)}) {`);
-  // Pre-declare the scalar/tensor output slot (skip for void functions).
-  const cOut = isVoidFn ? null : fn.cOutputs[0];
-  const outTy = isVoidFn ? null : fn.outputTypes[0];
   const paramNames = new Set(fn.cParams);
-  if (cOut !== null && !paramNames.has(cOut)) {
+  // Pre-declare each declared output slot (skip any that share a
+  // C-name with a param — a vacuous shadowing case kept for symmetry
+  // with the existing single-output code path).
+  const outputCNames = new Set<string>();
+  for (let i = 0; i < nOutputs; i++) {
+    const cOut = fn.cOutputs[i];
+    const outTy = fn.outputTypes[i];
+    outputCNames.add(cOut);
+    if (paramNames.has(cOut)) continue;
     if (outTy && isOwned(outTy)) {
       activateOwnedRuntime(outTy, state);
       const h = ownedHelpersFor(outTy);
       lines.push(`  ${cTypeFor(outTy)} ${cOut} = ${h.empty}();`);
-    } else if (outTy !== null) {
+    } else if (outTy !== undefined) {
       lines.push(`  ${cTypeFor(outTy)} ${cOut} = ${defaultInitFor(outTy)};`);
     } else {
       lines.push(`  double ${cOut} = 0.0;`);
     }
   }
-  // Pre-declare owned locals (excluding the output, which we already
+  // Pre-declare owned locals (excluding outputs, which we already
   // handled above).
-  const owned = collectOwnedLocals(fn.body).filter(o => o.cName !== cOut);
+  const owned = collectOwnedLocals(fn.body).filter(
+    o => !outputCNames.has(o.cName)
+  );
   for (const o of owned) {
     activateOwnedRuntime(o.ty, state);
     const h = ownedHelpersFor(o.ty);
     lines.push(`  ${cTypeFor(o.ty)} ${o.cName} = ${h.empty}();`);
   }
+  // Single-output owned: keep the output alive through the body so
+  // the future-touch analysis doesn't emit a stray early-free of the
+  // value we're about to return. Multi-output and zero-output don't
+  // need this — the sret writes / void return have no value being
+  // carried out via the return statement itself.
   const ownedOutput =
-    cOut !== null && outTy && isOwned(outTy)
-      ? { cName: cOut, ty: outTy }
+    nOutputs === 1 &&
+    fn.outputTypes[0] !== undefined &&
+    isOwned(fn.outputTypes[0])
+      ? { cName: fn.cOutputs[0], ty: fn.outputTypes[0] }
       : null;
   const futureTouches = computeFutureTouches(fn.body, ownedOutput);
   const fnOwnedTypes = new Map<string, Type>();
   for (const o of owned) fnOwnedTypes.set(o.cName, o.ty);
-  if (cOut !== null && outTy && isOwned(outTy)) {
-    fnOwnedTypes.set(cOut, outTy);
+  for (let i = 0; i < nOutputs; i++) {
+    const outTy = fn.outputTypes[i];
+    if (outTy && isOwned(outTy)) {
+      fnOwnedTypes.set(fn.cOutputs[i], outTy);
+    }
   }
   // Owned-typed params: the caller wrapped them in `_copy` so the
   // callee owns its arg. Track them so early-free / scope-exit free
@@ -548,6 +597,15 @@ function emitFunction(fn: IRFunc, state: RuntimeState): string {
   if (bodyText.length > 0) lines.push(bodyText);
   const hasRet = bodyHasReturn(fn.body);
   if (hasRet) lines.push(`mtoc2_return:`);
+  // Multi-output: write each output through its sret pointer. This
+  // happens BEFORE the scope-exit free walk so the writes can read
+  // the live locals before any tensor frees would zero them. For v1
+  // outputs are scalar, but the ordering still matches mtoc's pattern.
+  if (isMulti) {
+    for (let i = 0; i < nOutputs; i++) {
+      lines.push(`  *_mtoc2_o${i} = ${fn.cOutputs[i]};`);
+    }
+  }
   // Scope-exit frees: skip owned locals that nullAtScopeExit proves
   // are NULL on every reaching path (already early-freed).
   const scopeExitNames = new Set<string>([
@@ -557,8 +615,9 @@ function emitFunction(fn: IRFunc, state: RuntimeState): string {
   const fnNullAtExit = nullAtScopeExit(fn.body, scopeExitNames, futureTouches);
   for (const o of [...owned, ...ownedParams]) {
     if (fnNullAtExit.has(o.cName)) continue;
-    // Skip freeing the output — it's the value we're returning.
-    if (o.cName === cOut) continue;
+    // Skip freeing the single-output return value — its buffer is
+    // about to transfer to the caller via return-by-value.
+    if (nOutputs === 1 && o.cName === fn.cOutputs[0]) continue;
     activateOwnedRuntime(o.ty, state);
     const h = ownedHelpersFor(o.ty);
     lines.push(`  ${h.free}(&${o.cName});`);
@@ -568,8 +627,13 @@ function emitFunction(fn: IRFunc, state: RuntimeState): string {
     // `goto mtoc2_return;` label so the label can't sit at the close
     // brace (which would be a syntax error in C).
     if (hasRet) lines.push(`  return;`);
+  } else if (isMulti) {
+    // Multi-output sret writes already emitted above; just `return;`.
+    // Always emit it so the `mtoc2_return:` label (if present) has a
+    // statement to head.
+    lines.push(`  return;`);
   } else {
-    lines.push(`  return ${cOut};`);
+    lines.push(`  return ${fn.cOutputs[0]};`);
   }
   lines.push(`}`);
   return lines.join("\n");
@@ -745,6 +809,75 @@ function emitStmt(
           `${indent}/* type ${e.name} (${e.cName}) :: ${typeToString(e.ty)} */`
       );
       return lines.join("\n");
+    }
+    case "MultiAssignCall": {
+      // N≥2-output user-function call. Each named slot's `binding.cName`
+      // is either already pre-declared at function top (for owned-typed
+      // slots; v1 has none) or needs a one-shot `double <cName>;` here
+      // when `declare` is true (scalar slots — the only kind in v1).
+      // Ignored slots become `_mtoc2_discard_<callIdx>_<i>` locals
+      // scoped to the call's `{}` block.
+      //
+      // Owned arg-copy uses the same `emitOwnedRhs` wrapping as a
+      // regular `Call` so the callee owns its arg.
+      const argStrs = s.args.map(a =>
+        isOwned(a.ty) ? emitOwnedRhs(a, state) : emitExpr(a, state)
+      );
+      // Pre-declare any scalar named slot whose declare flag is set.
+      // Owned-typed slots are predeclared at function top by the
+      // collectOwnedLocals pass — skip them here.
+      const preDecls: string[] = [];
+      for (const slot of s.outputs) {
+        if (
+          slot.binding !== null &&
+          slot.binding.declare &&
+          !isOwned(slot.ty)
+        ) {
+          preDecls.push(
+            `${indent}${cTypeFor(slot.ty)} ${slot.binding.cName} = ${defaultInitFor(slot.ty)};`
+          );
+        }
+      }
+      const callIdx = state.multiAssignCallCounter++;
+      const out: string[] = [];
+      for (const d of preDecls) out.push(d);
+      out.push(`${indent}{`);
+      const outArgs: string[] = [];
+      for (let i = 0; i < s.outputs.length; i++) {
+        const slot = s.outputs[i];
+        if (slot.binding === null) {
+          const tmp = `_mtoc2_discard_${callIdx}_${i}`;
+          if (isOwned(slot.ty)) {
+            // (Unreachable in v1; kept for the future-tensor-output
+            // extension.) Initialize the discard temp to an empty
+            // handle so the callee's `_assign` sees a freeable slot.
+            activateOwnedRuntime(slot.ty, state);
+            const h = ownedHelpersFor(slot.ty);
+            out.push(`${indent}  ${cTypeFor(slot.ty)} ${tmp} = ${h.empty}();`);
+          } else {
+            out.push(
+              `${indent}  ${cTypeFor(slot.ty)} ${tmp} = ${defaultInitFor(slot.ty)};`
+            );
+          }
+          outArgs.push(`&${tmp}`);
+        } else {
+          outArgs.push(`&${slot.binding.cName}`);
+        }
+      }
+      const callArgs = [...argStrs, ...outArgs].join(", ");
+      out.push(`${indent}  ${s.cName}(${callArgs});`);
+      // Release any owned discard temps before closing the block.
+      // (Unreachable in v1; for symmetry with the future extension.)
+      for (let i = 0; i < s.outputs.length; i++) {
+        const slot = s.outputs[i];
+        if (slot.binding === null && isOwned(slot.ty)) {
+          activateOwnedRuntime(slot.ty, state);
+          const h = ownedHelpersFor(slot.ty);
+          out.push(`${indent}  ${h.free}(&_mtoc2_discard_${callIdx}_${i});`);
+        }
+      }
+      out.push(`${indent}}`);
+      return out.join("\n");
     }
   }
 }

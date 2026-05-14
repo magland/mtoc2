@@ -75,11 +75,19 @@ export function topLevelOwnedUses(s: IRStmt): Set<string> {
 }
 
 /** Top-level owned defs for a statement — `Assign` to an owned-typed
- *  LHS contributes. */
+ *  LHS contributes. `MultiAssignCall` slots with an owned binding also
+ *  contribute (each named slot is effectively an Assign of the call's
+ *  i-th output). */
 export function topLevelOwnedDefs(s: IRStmt): Set<string> {
   const out = new Set<string>();
   if (s.kind === "Assign" && isOwned(s.ty)) {
     out.add(s.cName);
+  } else if (s.kind === "MultiAssignCall") {
+    for (const slot of s.outputs) {
+      if (slot.binding !== null && isOwned(slot.ty)) {
+        out.add(slot.binding.cName);
+      }
+    }
   }
   return out;
 }
@@ -119,7 +127,8 @@ function touchStmt(
   switch (s.kind) {
     case "Assign":
     case "ExprStmt":
-    case "MemberStore": {
+    case "MemberStore":
+    case "MultiAssignCall": {
       const out = new Set(futureAfter);
       unionInto(out, topLevelOwnedUses(s));
       unionInto(out, topLevelOwnedDefs(s));
@@ -280,6 +289,27 @@ export function nullAtScopeExit(
         break;
       }
       case "ExprStmt": {
+        for (const v of earlyFreeCandidates(s, futureTouches)) {
+          current.add(v);
+        }
+        break;
+      }
+      case "MemberStore": {
+        for (const v of earlyFreeCandidates(s, futureTouches)) {
+          current.add(v);
+        }
+        break;
+      }
+      case "MultiAssignCall": {
+        // Each named owned slot is now non-NULL after the call (the
+        // callee wrote into it via the sret pointer). Ignored owned
+        // slots stay NULL because the discard temp is local to the
+        // call's `{}` block.
+        for (const slot of s.outputs) {
+          if (slot.binding !== null && isOwned(slot.ty)) {
+            current.delete(slot.binding.cName);
+          }
+        }
         for (const v of earlyFreeCandidates(s, futureTouches)) {
           current.add(v);
         }
