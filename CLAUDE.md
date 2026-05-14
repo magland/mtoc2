@@ -67,19 +67,27 @@ mtoc2 is a _static_ translator. Anything outside the supported subset raises
   exact-array cap, the literal's type carries an `exact: Float64Array`
   so downstream type-driven folding (e.g. `reshape`'s Form B dim
   vector, `sum` on a known-data vector) can use it. Rank-N tensors
-  (up to `MTOC2_MAX_NDIM = 8`) are constructed via `zeros` / `ones`
-  with statically-known dims; bracket syntax stays 2-D-only.
+  (up to `MTOC2_MAX_NDIM = 8`) are constructed via `zeros` / `ones`;
+  each shape arg may be exact (pins the axis at translate time, with
+  exact fill data when the result fits the cap) or a runtime scalar
+  (the corresponding axis is `unknown` in the result lattice and the
+  runtime helper takes the value via the emitted dim list). The
+  single-arg square form `zeros(n)` / `ones(n)` with a runtime `n`
+  routes through `mtoc2_tensor_<kind>_square` so the source
+  expression is evaluated exactly once. Bracket syntax stays 2-D-only.
 - **Reshape**: `reshape(A, d1, …, dN)` (Form A) and
-  `reshape(A, [d1, …, dN])` (Form B). Same dim discipline as
-  `zeros`/`ones` — each dim a statically-known finite non-negative
-  integer, 1..`MTOC2_MAX_NDIM` axes total, trailing singletons
-  stripped down to a 2-axis minimum. Element-count check at
-  translate time when the input shape is known; deferred to
-  `mtoc2_reshape_nd` (which aborts on mismatch) when not. Output
-  type carries the same `exact: Float64Array` (column-major
-  reinterpret) when input has it and the result fits the cap. The
-  `[]` auto-infer slot (`reshape(A, [], 3)`) is not yet supported
-  — specify all dims explicitly.
+  `reshape(A, [d1, …, dN])` (Form B). 1..`MTOC2_MAX_NDIM` axes total,
+  trailing exact singletons stripped down to a 2-axis minimum. Form
+  A dims may be exact or dynamic (same discipline as `zeros`/`ones`
+  — dynamic axes leave the result lattice's slot as `unknown`); Form
+  B's dim vector itself must still be statically known. Element-
+  count check at translate time when the input shape AND every new
+  dim is statically known; deferred to `mtoc2_reshape_nd` (which
+  aborts on mismatch) otherwise. Output type carries the same
+  `exact: Float64Array` (column-major reinterpret) when input has
+  it, the new shape is fully exact, and the result fits the cap.
+  The `[]` auto-infer slot (`reshape(A, [], 3)`) is not yet
+  supported — specify all dims explicitly.
 - **Tensor arithmetic** — elementwise `+` `-` `.*` `./` `-` (unary)
   on same-shape tensors and tensor-with-scalar-broadcast. Each op
   emits a per-op runtime helper call

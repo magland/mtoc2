@@ -1,48 +1,69 @@
 /**
- * `reshape` builtin. Two surface forms, both lowered identically:
+ * `reshape` builtin. Two surface forms:
  *
  *   Form A — variadic scalar dims:  reshape(A, d1, d2, …, dN)
  *   Form B — vector of dims:        reshape(A, [d1, d2, …, dN])
  *
  * Discipline (mirrors numbl's array-manipulation `reshape`, less
  * the `[]` auto-infer slot):
- *   - Each `di` must be a statically-known finite non-negative integer
- *     (scalar `exact: number` for Form A, vector `exact: Float64Array`
- *     for Form B). Same as `zeros`/`ones`.
- *   - 1 ≤ N ≤ MTOC2_MAX_NDIM (8). Trailing-singletons are stripped down
- *     to a 2-axis minimum (numbl: `while (s.length>2 && s.last===1) s.pop()`),
- *     then padded back up to 2 axes if N=1 was given (mtoc2 represents
- *     every tensor as min-2D).
+ *   - 1 ≤ N ≤ MTOC2_MAX_NDIM (8). Trailing-singletons are stripped
+ *     down to a 2-axis minimum (numbl:
+ *     `while (s.length>2 && s.last===1) s.pop()`), then padded back
+ *     up to 2 axes if N=1 was given (mtoc2 represents every tensor
+ *     as min-2D).
+ *   - Form A — each `di` is a scalar real double; statically-known
+ *     finite non-negative integers pin the corresponding axis, and
+ *     dynamic scalars (no `exact`) leave the axis as `unknown` in
+ *     the result lattice.
+ *   - Form B — the dim vector must be a statically-known
+ *     `Float64Array` of dims (runtime vectors are not yet supported).
  *   - Input `A` must be a real numeric (scalar or tensor); complex /
  *     handle / struct / class / void / string rejected with TypeError.
- *   - Element-count check at transfer time when the input shape is
- *     statically known; deferred to the runtime helper otherwise.
+ *   - Element-count check at transfer time when the input shape and
+ *     every new dim are statically known; deferred to the runtime
+ *     helper otherwise.
  *
  * The `[]` auto-infer slot (`reshape(A, [], 3)` etc.) is rejected with
  * a span-attributed UnsupportedConstruct in v1.
  *
  * Codegen routes through the per-op runtime helper `mtoc2_reshape_nd`
- * (declared in `src/codegen/runtime/tensor_reshape_nd.h`). The result
- * is freshly owned, so the standard ANF / scope-exit-free pipeline
- * carries it without changes.
+ * (declared in `src/codegen/runtime/tensor_reshape_nd.h`), which
+ * already accepts a runtime `(int ndim, const long *dims)` pair. The
+ * result is freshly owned, so the standard ANF / scope-exit-free
+ * pipeline carries it without changes.
  */
 
 import type { Span } from "../../../parser/index.js";
 import { TypeError, UnsupportedConstruct } from "../../errors.js";
 import {
+  DIM_ONE,
   EXACT_ARRAY_MAX_ELEMENTS,
   tensorDouble,
+  tensorDoubleFromDims,
   scalarDouble,
   signFromNumber,
   isNumeric,
   isScalar,
 } from "../../types.js";
-import type { Type } from "../../types.js";
+import type { DimInfo, Type } from "../../types.js";
 import type { Builtin } from "../registry.js";
 import { exactDouble, exactRealArray } from "../_shared.js";
 
 /** Mirror of `MTOC2_MAX_NDIM` in src/codegen/runtime/tensor.h. */
 const MTOC2_MAX_NDIM = 8;
+
+/** Per-axis resolution. `argIndex` (when present) refers to the index
+ *  into the original Form A dim arg list (i.e. `argTypes.slice(1)` —
+ *  argIndex 0 is `argsC[1]` in the full call's argsC array). Form B
+ *  always produces all-exact axes (the dim vector itself must be
+ *  statically known), so the argIndex is irrelevant there. */
+type ResolvedAxis =
+  | { kind: "exact"; value: number; argIndex?: number }
+  | { kind: "dynamic"; argIndex: number };
+
+interface ResolvedNewShape {
+  axes: ResolvedAxis[];
+}
 
 /** Detect numbl's `[]` placeholder: a multi-element numeric tensor with
  *  zero total elements (e.g. the empty `[]` literal lowers to a
@@ -54,10 +75,30 @@ function isEmptyPlaceholder(t: Type): boolean {
   return t.shape.reduce((a, b) => a * b, 1) === 0;
 }
 
-/** Resolve the dim args (i.e. `argTypes.slice(1)`) into a concrete
- *  shape. Handles Form A and Form B in one pass. Throws on any
- *  non-static / non-integer / out-of-range dim. */
-function resolveNewShape(dimArgTypes: Type[], span: Span): number[] {
+/** Apply numbl's strip / pad rules to a resolved axis list. Drops
+ *  trailing exact-1 axes subject to a 2-axis floor; never strips a
+ *  dynamic axis. Pads with trailing exact-1 axes if length < 2. */
+function normalizeAxes(axes: ResolvedAxis[]): ResolvedAxis[] {
+  const out = axes.slice();
+  while (
+    out.length > 2 &&
+    out[out.length - 1].kind === "exact" &&
+    (out[out.length - 1] as { value: number }).value === 1
+  ) {
+    out.pop();
+  }
+  while (out.length < 2) {
+    out.push({ kind: "exact", value: 1 });
+  }
+  return out;
+}
+
+/** Resolve the dim args (i.e. `argTypes.slice(1)`) into a per-axis
+ *  list. Handles Form A (variadic scalars) and Form B (exact vector)
+ *  in one pass. Form A dim args may be dynamic; Form B requires the
+ *  vector itself to be statically known. Throws on any out-of-range
+ *  or wrong-typed dim. */
+function resolveNewShape(dimArgTypes: Type[], span: Span): ResolvedNewShape {
   if (dimArgTypes.length < 1) {
     // Caught by the `arity` machinery upstream, but keep a clear error
     // for direct callers (e.g. codegenC re-resolving with synthetic span).
@@ -67,7 +108,7 @@ function resolveNewShape(dimArgTypes: Type[], span: Span): number[] {
     );
   }
 
-  let dims: number[];
+  let axes: ResolvedAxis[];
 
   // Form B: single multi-element tensor whose `exact` is a
   // Float64Array of dim sizes.
@@ -96,17 +137,13 @@ function resolveNewShape(dimArgTypes: Type[], span: Span): number[] {
         span
       );
     }
-    // Numbl restricts the Form B path to dim vectors > 1 element; a
-    // 1-element tensor would have collapsed to scalar at lowering in
-    // mtoc2 (the tensorLit fast-path), so we never see one here. Still,
-    // the check below keeps us safe if that representation ever changes.
     if (arr.length < 1 || arr.length > MTOC2_MAX_NDIM) {
       throw new UnsupportedConstruct(
         `'reshape' supports 1..${MTOC2_MAX_NDIM} output dims (got ${arr.length})`,
         span
       );
     }
-    dims = [];
+    axes = [];
     for (let i = 0; i < arr.length; i++) {
       const v = arr[i];
       if (!Number.isFinite(v) || !Number.isInteger(v) || v < 0) {
@@ -115,18 +152,18 @@ function resolveNewShape(dimArgTypes: Type[], span: Span): number[] {
           span
         );
       }
-      dims.push(v);
+      axes.push({ kind: "exact", value: v });
     }
   } else {
-    // Form A: every dim arg must be a scalar real double with a known
-    // non-negative integer `exact`.
+    // Form A: every dim arg must be a scalar real double. Exact values
+    // pin the axis; dynamic (no `exact`) defers to runtime.
     if (dimArgTypes.length > MTOC2_MAX_NDIM) {
       throw new UnsupportedConstruct(
         `'reshape' supports 1..${MTOC2_MAX_NDIM} output dims (got ${dimArgTypes.length})`,
         span
       );
     }
-    dims = [];
+    axes = [];
     for (let i = 0; i < dimArgTypes.length; i++) {
       const a = dimArgTypes[i];
       if (!isNumeric(a) || a.elem !== "double" || a.isComplex) {
@@ -149,10 +186,10 @@ function resolveNewShape(dimArgTypes: Type[], span: Span): number[] {
       }
       const v = exactDouble(a);
       if (v === undefined) {
-        throw new UnsupportedConstruct(
-          `'reshape' dim arguments must be statically-known constants in v1`,
-          span
-        );
+        // Dynamic dim — defer the value-range and element-count
+        // checks to the runtime helper.
+        axes.push({ kind: "dynamic", argIndex: i });
+        continue;
       }
       if (!Number.isFinite(v) || !Number.isInteger(v) || v < 0) {
         throw new TypeError(
@@ -160,23 +197,29 @@ function resolveNewShape(dimArgTypes: Type[], span: Span): number[] {
           span
         );
       }
-      dims.push(v);
+      axes.push({ kind: "exact", value: v, argIndex: i });
     }
   }
 
-  // Numbl strip rule: drop trailing singletons, but never below 2 axes.
-  while (dims.length > 2 && dims[dims.length - 1] === 1) {
-    dims.pop();
+  return { axes: normalizeAxes(axes) };
+}
+
+/** Concrete number[] shape iff every axis is exact, else undefined. */
+function exactShape(r: ResolvedNewShape): number[] | undefined {
+  const out: number[] = [];
+  for (const a of r.axes) {
+    if (a.kind !== "exact") return undefined;
+    out.push(a.value);
   }
-  // mtoc2 represents every tensor with ≥ 2 axes (matching the rest of
-  // the runtime helpers and the `mtoc2_tensor_t` "min logical 2-D"
-  // convention). Pad with trailing 1s. Numbl conceptually has 1-D
-  // tensors but renders [n] and [n, 1] identically in `disp`, so this
-  // padding doesn't change the byte-for-byte cross-runner output.
-  while (dims.length < 2) {
-    dims.push(1);
-  }
-  return dims;
+  return out;
+}
+
+/** Emit the C `long` expression for one axis. `dimArgsC` is sliced
+ *  from the full Call argsC so its index 0 maps to `axes[*].argIndex
+ *  = 0`. */
+function dimC(axis: ResolvedAxis, dimArgsC: string[]): string {
+  if (axis.kind === "exact") return `${axis.value}L`;
+  return `(long)(${dimArgsC[axis.argIndex]})`;
 }
 
 export const reshape: Builtin = {
@@ -202,79 +245,81 @@ export const reshape: Builtin = {
       );
     }
 
-    const newShape = resolveNewShape(argTypes.slice(1), span);
-    const newTotal = newShape.reduce((p, d) => p * d, 1);
+    const resolved = resolveNewShape(argTypes.slice(1), span);
+    const newShape = exactShape(resolved);
 
-    // Element-count check when the input shape is statically known.
-    // (When `shape` is undefined — e.g. a tensor field whose layout the
-    // type system only tracks per-axis with at least one `unknown` —
-    // we defer the check to the runtime helper, which aborts on
-    // mismatch.)
-    if (a.shape !== undefined) {
-      const inTotal = a.shape.reduce((p, d) => p * d, 1);
-      if (inTotal !== newTotal) {
-        throw new TypeError(
-          `'reshape' element count mismatch: input has ${inTotal} elements, ` +
-            `requested shape needs ${newTotal}`,
-          span
-        );
+    if (newShape !== undefined) {
+      const newTotal = newShape.reduce((p, d) => p * d, 1);
+      // Element-count check when the input shape is statically known.
+      if (a.shape !== undefined) {
+        const inTotal = a.shape.reduce((p, d) => p * d, 1);
+        if (inTotal !== newTotal) {
+          throw new TypeError(
+            `'reshape' element count mismatch: input has ${inTotal} elements, ` +
+              `requested shape needs ${newTotal}`,
+            span
+          );
+        }
       }
-    }
 
-    // Output type. When new shape is all-ones the output is a scalar at
-    // the type level (every dim is exact 1); otherwise it's a tensor.
-    if (newShape.every(d => d === 1)) {
-      // Scalar output. Propagate exact:
-      //   - scalar input with exact: number → carry the value directly.
-      //   - multi-element input with exact: Float64Array of length 1 →
-      //     unreachable in mtoc2 (1-element tensors collapse to scalar
-      //     at lowering); fall through to non-exact scalar.
-      if (typeof a.exact === "number") {
-        return scalarDouble(signFromNumber(a.exact), a.exact);
+      // Scalar output (every dim is exact 1). Propagate exact when
+      // input is an exact scalar.
+      if (newShape.every(d => d === 1)) {
+        if (typeof a.exact === "number") {
+          return scalarDouble(signFromNumber(a.exact), a.exact);
+        }
+        return scalarDouble("unknown");
       }
-      return scalarDouble("unknown");
-    }
 
-    // Multi-element output. Propagate exact when the input has a
-    // Float64Array exact AND the result fits the cap. The buffer is
-    // identical column-major data, just reinterpreted under a new
-    // shape, so we share the same Float64Array reference (matches
-    // tensorDouble's contract).
-    if (
-      a.exact instanceof Float64Array &&
-      newTotal <= EXACT_ARRAY_MAX_ELEMENTS
-    ) {
-      // Defensive: `tensorDouble` enforces `exact.length === prod(shape)`.
-      // We've already proven `inTotal === newTotal` and the input
-      // exact's length equals `inTotal` (since it's a known-shape
-      // exact tensor). So the reuse is safe.
-      if (a.exact.length === newTotal) {
+      // Multi-element output with all-exact shape.
+      if (
+        a.exact instanceof Float64Array &&
+        newTotal <= EXACT_ARRAY_MAX_ELEMENTS &&
+        a.exact.length === newTotal
+      ) {
         return tensorDouble(newShape, a.exact);
       }
+      return tensorDouble(newShape);
     }
-    return tensorDouble(newShape);
+
+    // At least one new dim is dynamic. Result is a tensor with a
+    // mixed exact/unknown dim lattice; element-count check is
+    // deferred to `mtoc2_reshape_nd` at runtime. Exact data on the
+    // input can't be carried (the destination shape isn't known).
+    const dims: DimInfo[] = resolved.axes.map(axis =>
+      axis.kind === "exact"
+        ? axis.value === 1
+          ? DIM_ONE
+          : { kind: "exact", value: axis.value }
+        : { kind: "unknown" }
+    );
+    return tensorDoubleFromDims(dims);
   },
   codegenC(argsC, argTypes) {
-    // Re-resolve the new shape from arg types (transfer succeeded, so
-    // the same call is guaranteed to succeed here).
-    const newShape = resolveNewShape(argTypes.slice(1), {
+    // Re-resolve from arg types (transfer succeeded, so the same
+    // call is guaranteed to succeed here).
+    const resolved = resolveNewShape(argTypes.slice(1), {
       file: "<codegen>",
       start: 0,
       end: 0,
     });
+    const newShape = exactShape(resolved);
 
     // Scalar-output fast path: the type system has already collapsed
     // the result to a `double`-typed scalar. The runtime helper would
     // return a tensor — incompatible with the scalar slot — so we just
     // pass the input through as identity. This is reachable only when
     // both input and output are scalar (1 element each), which is the
-    // `reshape(x, 1[, 1[, …]])` identity case.
-    if (newShape.every(d => d === 1)) {
+    // `reshape(x, 1[, 1[, …]])` identity case. Only reachable when
+    // every new dim is exact (a dynamic dim can't be proven 1 at
+    // compile time).
+    if (newShape !== undefined && newShape.every(d => d === 1)) {
       return argsC[0];
     }
 
-    const dimList = newShape.map(d => `${d}L`).join(", ");
-    return `mtoc2_reshape_nd(${argsC[0]}, ${newShape.length}, (long[]){${dimList}})`;
+    const dimArgsC = argsC.slice(1);
+    const dimList = resolved.axes.map(axis => dimC(axis, dimArgsC)).join(", ");
+    return `mtoc2_reshape_nd(${argsC[0]}, ${resolved.axes.length}, (long[]){${dimList}})`;
   },
   runtimeDeps: ["mtoc2_reshape_nd"],
 };

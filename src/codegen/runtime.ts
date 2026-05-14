@@ -130,6 +130,18 @@ const REGISTRY: ReadonlyMap<string, RuntimeSnippet> = new Map<
     "mtoc2_tensor_ones_nd",
     loadSnippet("tensor_ones_nd.h", ["mtoc2_tensor_alloc_nd"]),
   ],
+  // Single-eval companion to the `_nd` helpers for the
+  // `zeros(n)` / `ones(n)` n×n shorthand when `n` is a runtime
+  // expression. Taking the dim by parameter avoids duplicating any
+  // side-effecting source-level expression.
+  [
+    "mtoc2_tensor_zeros_square",
+    loadSnippet("tensor_zeros_square.h", ["mtoc2_tensor_zeros_nd"]),
+  ],
+  [
+    "mtoc2_tensor_ones_square",
+    loadSnippet("tensor_ones_square.h", ["mtoc2_tensor_ones_nd"]),
+  ],
   [
     "mtoc2_reshape_nd",
     loadSnippet("tensor_reshape_nd.h", ["mtoc2_tensor_alloc_nd"]),

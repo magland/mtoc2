@@ -256,34 +256,40 @@ Today's builtins:
   multi-output `[v, i] = min(x)` is rejected. The 2-arg elementwise
   form `min(A, B)` / `max(A, B)` is also rejected (separate slope).
 - **Rank-N constructors**: `zeros(d1, …, dN)` and `ones(d1, …, dN)`
-  (1..`MTOC2_MAX_NDIM` shape args, each a statically-known finite
-  non-negative integer). One-arg form means an n×n square (MATLAB
-  convention). The result type carries the shape and, when the
-  element count fits the exact-array cap, the fill data — but
-  codegen always materializes via the runtime helpers
-  `mtoc2_tensor_zeros_nd` / `mtoc2_tensor_ones_nd` rather than
-  introducing an ND tensor-literal emission path. ND values flow
-  through the rest of the pipeline (assign / copy / free / elemwise
-  / `disp`) unchanged.
+  (1..`MTOC2_MAX_NDIM` shape args). Each dim arg is a scalar real
+  double; exact (`exact: number`) values pin the corresponding axis
+  at translate time, and dynamic (runtime) scalars leave the axis as
+  `unknown` in the result lattice. One-arg form means an n×n square
+  (MATLAB convention); the dynamic variant routes through a
+  single-eval `mtoc2_tensor_<kind>_square(long n)` helper so a
+  side-effecting source like `zeros(myfun())` doesn't fire its arg
+  twice. When every axis is exact and the element count fits the
+  exact-array cap, the result type carries the fill data (used by
+  downstream exact-folding), but codegen always materializes via the
+  runtime helpers `mtoc2_tensor_zeros_nd` / `mtoc2_tensor_ones_nd`
+  rather than introducing an ND tensor-literal emission path. ND
+  values flow through the rest of the pipeline (assign / copy /
+  free / elemwise / `disp`) unchanged.
 - **Rank-N reshape**: `reshape(A, d1, …, dN)` (variadic scalar dims,
   Form A) and `reshape(A, [d1, …, dN])` (1-D dim vector, Form B).
-  Same dim discipline as `zeros`/`ones`: each dim is a statically-
-  known finite non-negative integer (scalar `exact: number` for
-  Form A, vector `exact: Float64Array` for Form B), 1..
-  `MTOC2_MAX_NDIM` axes total, trailing singletons stripped down
-  to a 2-axis minimum (mirroring numbl). Element-count check is
-  split: when the input shape is statically known, the lowerer
-  enforces `prod(input.dims) == prod(newShape)` at translate time
-  with a span-attributed `TypeError`; when the shape is only
-  tracked per-axis with at least one `unknown` slot (e.g. an
-  unshaped tensor field), the check is deferred to
-  `mtoc2_reshape_nd`, which aborts on mismatch. Codegen always emits the runtime helper
-  (no fold-at-codegen rule); when the input has an exact
-  `Float64Array` and the result fits the exact-array cap, the
-  output type carries the same buffer (column-major reinterpret)
-  so downstream consumers (e.g. `sum`) can fold against it. The
-  `[]` auto-infer slot (`reshape(A, [], 3)`) is rejected with a
-  span — specify all dims explicitly in v1.
+  1..`MTOC2_MAX_NDIM` axes total, trailing exact singletons stripped
+  down to a 2-axis minimum (mirroring numbl). Form A dims follow the
+  same discipline as `zeros`/`ones` — exact `number` `exact`s pin
+  the axis, dynamic scalars defer to runtime and surface as
+  `unknown` in the result lattice; Form B's dim vector itself must
+  still be a statically-known `Float64Array`. Element-count check is
+  split: when the input shape AND every new dim are statically
+  known, the lowerer enforces `prod(input.dims) == prod(newShape)`
+  at translate time with a span-attributed `TypeError`; otherwise
+  (unshaped input, or any dynamic new dim) the check is deferred to
+  `mtoc2_reshape_nd`, which aborts on mismatch. Codegen always emits
+  the runtime helper (no fold-at-codegen rule); when the input has
+  an exact `Float64Array`, every new dim is exact, and the result
+  fits the exact-array cap, the output type carries the same buffer
+  (column-major reinterpret) so downstream consumers (e.g. `sum`)
+  can fold against it. The `[]` auto-infer slot
+  (`reshape(A, [], 3)`) is rejected with a span — specify all dims
+  explicitly in v1.
 - **Wall-clock stopwatch**: `tic`, `toc` — both 0-arg; runtime
   `mtoc2_tic()` / `mtoc2_toc()` (snippet `mtoc2_tic_toc`, backed by
   POSIX `clock_gettime(CLOCK_MONOTONIC)`). The bare-`toc;` ExprStmt
