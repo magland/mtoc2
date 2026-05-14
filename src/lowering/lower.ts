@@ -1038,17 +1038,30 @@ export class Lowerer {
 
   private recordAssignment(name: string, expr: IRExpr, span: Span): IRStmt {
     const existing = this.env.get(name);
-    // Type-compat check: don't allow scalar ↔ tensor mid-flight.
-    // Catches reassignments that would invalidate the C-side
-    // declaration's type. Limited check; will need to grow alongside
-    // the type lattice.
-    if (existing) {
+    // Type-compat check: catch reassignments that would invalidate the
+    // C-side declaration. The function-top `collectOwnedLocals` walk
+    // records only the FIRST seen owned typedef per cName, so a later
+    // owned-typed reassignment of `name` with a different storage shape
+    // (different struct field set, different class, different handle
+    // capture-shape, scalar↔tensor, etc.) would emit a call to a
+    // `_assign` helper whose signature doesn't match the pre-declared
+    // local — i.e. a C compile error rather than a clean span-attributed
+    // translate-time error. `storageEquivalent` is the same predicate
+    // used for `MemberStore` writes — it compares `cFieldTypeStr` so
+    // it catches every C-level slot mismatch.
+    if (existing && !storageEquivalent(existing.ty, expr.ty)) {
       if (isMultiElement(existing.ty) !== isMultiElement(expr.ty)) {
         throw new UnsupportedConstruct(
           `cannot reassign '${name}' across scalar/tensor boundary`,
           span
         );
       }
+      throw new UnsupportedConstruct(
+        `cannot reassign '${name}': new value's C storage ` +
+          `(${typeToString(expr.ty)}) is incompatible with the ` +
+          `existing binding (${typeToString(existing.ty)})`,
+        span
+      );
     }
     const cName = existing?.cName ?? cIdentForUserName(name);
     this.env.set(name, { cName, ty: expr.ty });
