@@ -327,6 +327,34 @@ export class Lowerer {
   private lowerExprStmt(
     s: Extract<Stmt, { type: "ExprStmt" }>
   ): IRStmt | IRStmt[] | null {
+    // Special case: bare `toc;` (or `toc();`) ExprStmt routes to the
+    // printing form of toc. Numbl uses `nargout === 0` as the
+    // discriminator; mtoc2 uses "this Call is the sole expression of
+    // an ExprStmt". The shadow checks ensure a user `toc = 5; toc;`
+    // (reading a local) or a `classdef toc` (constructor call) doesn't
+    // get hijacked. We synthesize a Void-typed Call to the runtime
+    // helper directly so we don't go through builtin codegen at all.
+    if (
+      ((s.expr.type === "Ident" && s.expr.name === "toc") ||
+        (s.expr.type === "FuncCall" &&
+          s.expr.name === "toc" &&
+          s.expr.args.length === 0)) &&
+      this.env.get("toc") === undefined &&
+      !this.workspace.isClass("toc")
+    ) {
+      return {
+        kind: "ExprStmt",
+        expr: {
+          kind: "Call",
+          cName: "mtoc2_toc_print",
+          name: "toc_print",
+          args: [],
+          ty: VOID,
+          span: s.expr.span,
+        },
+        span: s.span,
+      };
+    }
     // Multi-output user-function bare-statement form: `foo(x);` where
     // `foo` returns N≥2 outputs. The expression-position lowering of
     // a multi-output user function is rejected (the C ABI is `void` +
@@ -1489,19 +1517,36 @@ export class Lowerer {
 
   private lowerIdent(e: Extract<Expr, { type: "Ident" }>): IRExpr {
     const entry = this.env.get(e.name);
-    if (entry === undefined) {
-      throw new UnsupportedConstruct(
-        `undefined variable '${e.name}' (or unsupported reference)`,
-        e.span
-      );
+    if (entry !== undefined) {
+      return {
+        kind: "Var",
+        name: e.name,
+        cName: entry.cName,
+        ty: entry.ty,
+        span: e.span,
+      };
     }
-    return {
-      kind: "Var",
-      name: e.name,
-      cName: entry.cName,
-      ty: entry.ty,
-      span: e.span,
-    };
+    // Identifier read of a builtin name with no parens. MATLAB treats
+    // this as a 0-arg call when the name isn't shadowed by a local.
+    // v1 supports this for the no-arg system builtins `tic` and `toc`
+    // only — user-function ident-as-call and class references are
+    // left to dedicated paths.
+    const b = getBuiltin(e.name);
+    if (b !== undefined && b.arity === 0) {
+      const ty = b.transfer([], e.span);
+      return {
+        kind: "Call",
+        cName: e.name,
+        name: e.name,
+        args: [],
+        ty,
+        span: e.span,
+      };
+    }
+    throw new UnsupportedConstruct(
+      `undefined variable '${e.name}' (or unsupported reference)`,
+      e.span
+    );
   }
 
   /** Lower an AST `Tensor` node (`[1 2; 3 4]`) to a TensorBuild IR node.

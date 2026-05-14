@@ -934,6 +934,15 @@ function emitExpr(e: IRExpr, state: RuntimeState): string {
           e.args.map(a => a.ty)
         );
       }
+      // Lowerer-synthesized bare-`toc;` print form. Not registered as
+      // a public builtin (the registry only knows about value-returning
+      // `toc`); the lowerer routes here for ExprStmt-position calls.
+      // Activate the tic/toc runtime snippet so `mtoc2_toc_print` is
+      // declared.
+      if (e.name === "toc_print" && e.cName === "mtoc2_toc_print") {
+        useRuntimeByName(state, "mtoc2_tic_toc");
+        return `mtoc2_toc_print()`;
+      }
       // User function call: owned args wrap in copy (callee owns).
       const args = e.args
         .map(a => (isOwned(a.ty) ? emitOwnedRhs(a, state) : emitExpr(a, state)))

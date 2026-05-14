@@ -227,6 +227,20 @@ Today's builtins:
   introducing an ND tensor-literal emission path. ND values flow
   through the rest of the pipeline (assign / copy / free / elemwise
   / `disp`) unchanged.
+- **Wall-clock stopwatch**: `tic`, `toc` — both 0-arg; runtime
+  `mtoc2_tic()` / `mtoc2_toc()` (snippet `mtoc2_tic_toc`, backed by
+  POSIX `clock_gettime(CLOCK_MONOTONIC)`). The bare-`toc;` ExprStmt
+  form is special-cased in the lowerer (see `lowerExprStmt`) to emit
+  `mtoc2_toc_print()` — printing `Elapsed time is %.6f seconds.\n`
+  the same way numbl's `nargout === 0` branch does — while the
+  value-returning forms (`t = toc`, `toc + 0`, etc.) route through
+  the standard builtin `codegenC`. The cross-runner's per-script
+  `% mtoc2-test-mask: <regex>` mechanism (see `docs/testing.md`)
+  normalizes the elapsed-seconds field so the byte-for-byte compare
+  still holds. The tic-handle form `toc(t0)` is rejected with a
+  span. Identifier reads of zero-arity builtins like `tic`/`toc`
+  are recognized in `lowerIdent` so source forms `tic;`, `t = tic`,
+  `t = toc`, and `toc;` all reach the right path.
 
 Operator-to-builtin maps live alongside the registry.
 

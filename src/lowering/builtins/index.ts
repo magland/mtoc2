@@ -33,6 +33,8 @@ import { numel } from "./reduction/numel.js";
 import { sum } from "./reduction/sum.js";
 import { zeros } from "./shape/zeros.js";
 import { ones } from "./shape/ones.js";
+import { tic } from "./system/tic.js";
+import { toc } from "./system/toc.js";
 
 for (const b of [
   plus,
@@ -54,6 +56,8 @@ for (const b of [
   sum,
   zeros,
   ones,
+  tic,
+  toc,
 ]) {
   registerBuiltin(b);
 }

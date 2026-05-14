@@ -52,6 +52,31 @@ fixed notation — any of those is a fail. That strictness is the
 whole point: we can't drift from numbl's semantics without somebody
 noticing.
 
+### Per-script output masking: `% mtoc2-test-mask:`
+
+A few builtins surface values that genuinely differ between runs
+(wall-clock time, PIDs, random samples — anything tied to the
+system's clock or entropy). Byte-for-byte comparison would fail
+even though both runners are behaving correctly. For those, a
+script can declare regex masks in a leading comment block:
+
+```matlab
+% mtoc2-test-mask: ^Elapsed time is [0-9.]+ seconds\.$
+tic;
+toc;   % prints "Elapsed time is X.XXXXXX seconds." (masked)
+disp(1);
+```
+
+The cross-runner scans the first 20 lines of each script for
+`^\s*%\s*mtoc2-test-mask:\s*(.*)$`, compiles each pattern with
+the `gm` flags, and applies them to both numbl's and mtoc2's
+stdouts (replacing matches with `[MASKED]`) before the byte-for-
+byte compare. Anything _not_ matched by a declared regex must
+still match exactly. The PASS line reports how many matches fired
+on each side; mismatched counts often surface a missed printing
+path. Use this sparingly — every mask is one less line under
+strict comparison.
+
 ### When mtoc2 and numbl disagree
 
 If the divergence is mtoc2's bug, fix mtoc2. If the divergence is a

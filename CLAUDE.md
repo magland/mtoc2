@@ -86,6 +86,21 @@ mtoc2 is a _static_ translator. Anything outside the supported subset raises
   count check on tensor RHS. Range-as-value lowers to a `MakeRange`
   IR node and emits via `mtoc2_tensor_make_range`. Logical/vector-of-
   indices indexing (`a(mask)`, `a(idx_vec)`) is not yet supported.
+- **Wall-clock stopwatch**: `tic` / `toc` (0-arg each) emit
+  `mtoc2_tic()` / `mtoc2_toc()` via the `mtoc2_tic_toc` runtime
+  snippet (POSIX `clock_gettime(CLOCK_MONOTONIC)`). The bare-`toc;`
+  ExprStmt is special-cased in `lowerExprStmt` to emit
+  `mtoc2_toc_print()`, which prints
+  `Elapsed time is %.6f seconds.\n` and matches numbl's
+  `nargout === 0` branch. Value-returning forms (`t = toc`,
+  `toc + 0`, etc.) take the standard builtin path. The cross-runner
+  honors a per-script `% mtoc2-test-mask: <regex>` comment block
+  so the elapsed-seconds line can be normalized before byte-for-
+  byte comparison (see [docs/testing.md](docs/testing.md)). The
+  tic-handle form `toc(t0)` is rejected with a span — use the
+  no-arg form. `lowerIdent` recognizes bare-name reads of 0-arity
+  builtins, so `tic`/`toc` work both as identifiers (`t = toc`)
+  and as zero-paren calls (`tic;`).
 - **Function handles** — `@user_func` (named) and `@(...) <body>`
   (anonymous). Dispatch is static: every `h(args)` call site reads
   the handle variable's `HandleType`, builds capture-args via

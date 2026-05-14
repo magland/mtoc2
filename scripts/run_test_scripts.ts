@@ -14,7 +14,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import { dirname, join, resolve } from "node:path";
-import { existsSync, readdirSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { cpus } from "node:os";
 
 const execFileAsync = promisify(execFile);
@@ -132,6 +132,62 @@ interface Result {
   name: string;
   status: "PASS" | "FAIL";
   detail: string | null;
+  /** One log line per mask that fired (rendered after the PASS/FAIL
+   *  status). Empty when no masks are declared by the script. */
+  maskNotes: string[];
+}
+
+/** Parse `% mtoc2-test-mask: <regex>` lines from the first 20 lines of
+ *  the script. Each match becomes a compiled `RegExp` with `gm` flags
+ *  so it can normalize multiple matches across stdout. Empty result
+ *  means "no masks declared" and the cross-runner falls back to plain
+ *  byte-for-byte comparison.
+ *
+ *  Invalid regex syntax raises at parse time (we want a noisy failure
+ *  so a typo doesn't silently disable the mask). The mask is only
+ *  honored for the script that declares it. */
+function parseMasks(scriptPath: string): RegExp[] {
+  let src: string;
+  try {
+    src = readFileSync(scriptPath, "utf8");
+  } catch {
+    return [];
+  }
+  const masks: RegExp[] = [];
+  const lines = src.split("\n").slice(0, 20);
+  for (const line of lines) {
+    const m = line.match(/^\s*%\s*mtoc2-test-mask:\s*(.*)$/);
+    if (!m) continue;
+    const pattern = m[1].trim();
+    if (pattern === "") continue;
+    masks.push(new RegExp(pattern, "gm"));
+  }
+  return masks;
+}
+
+/** Apply each mask to `stdout` and return the normalized text plus a
+ *  list of human-readable log lines describing what fired. Each match
+ *  is replaced with `[MASKED]`. */
+function applyMasks(
+  stdout: string,
+  masks: ReadonlyArray<RegExp>
+): { text: string; notes: string[] } {
+  if (masks.length === 0) return { text: stdout, notes: [] };
+  let text = stdout;
+  const notes: string[] = [];
+  for (const re of masks) {
+    let count = 0;
+    text = text.replace(re, () => {
+      count++;
+      return "[MASKED]";
+    });
+    if (count > 0) {
+      notes.push(
+        `  -> masked ${count} match${count === 1 ? "" : "es"} via ${re}`
+      );
+    }
+  }
+  return { text, notes };
 }
 
 async function runOne(scriptPath: string): Promise<Result> {
@@ -139,9 +195,11 @@ async function runOne(scriptPath: string): Promise<Result> {
     ? scriptPath.slice(repoRoot.length + 1)
     : scriptPath;
 
-  let expected: string;
+  const masks = parseMasks(scriptPath);
+
+  let expectedRaw: string;
   try {
-    expected = await captureStdout("npx", [
+    expectedRaw = await captureStdout("npx", [
       "tsx",
       numblCliPath,
       "run",
@@ -149,7 +207,12 @@ async function runOne(scriptPath: string): Promise<Result> {
     ]);
   } catch (e) {
     const msg = (e as Error).message.split("\n")[0];
-    return { name, status: "FAIL", detail: `numbl errored: ${msg}` };
+    return {
+      name,
+      status: "FAIL",
+      detail: `numbl errored: ${msg}`,
+      maskNotes: [],
+    };
   }
 
   let actual: Captured;
@@ -162,20 +225,36 @@ async function runOne(scriptPath: string): Promise<Result> {
     const detail = tail
       ? `mtoc2 errored: ${head}\n${tail}`
       : `mtoc2 errored: ${head}`;
-    return { name, status: "FAIL", detail };
+    return { name, status: "FAIL", detail, maskNotes: [] };
   }
 
-  if (actual.stdout !== expected) {
-    return { name, status: "FAIL", detail: diff(expected, actual.stdout) };
+  const expectedM = applyMasks(expectedRaw, masks);
+  const actualM = applyMasks(actual.stdout, masks);
+  // Surface combined notes (numbl-side then mtoc2-side) once per
+  // script. The two sides should fire the same number of masks for a
+  // well-written test — if they don't, the byte-for-byte compare will
+  // still flag the divergence on the unmasked lines.
+  const maskNotes: string[] = [];
+  for (const n of expectedM.notes) maskNotes.push(`  numbl${n}`);
+  for (const n of actualM.notes) maskNotes.push(`  mtoc2${n}`);
+
+  if (actualM.text !== expectedM.text) {
+    return {
+      name,
+      status: "FAIL",
+      detail: diff(expectedM.text, actualM.text),
+      maskNotes,
+    };
   }
   if (actual.stderr.includes("LeakSanitizer:")) {
     return {
       name,
       status: "FAIL",
       detail: `LeakSanitizer reported leaks:\n${actual.stderr.trim()}`,
+      maskNotes,
     };
   }
-  return { name, status: "PASS", detail: null };
+  return { name, status: "PASS", detail: null, maskNotes };
 }
 
 async function runPool<T, R>(
@@ -240,6 +319,7 @@ async function main(): Promise<void> {
       console.log(`FAIL ${r.name}`);
       if (r.detail) console.log(r.detail);
     }
+    for (const n of r.maskNotes) console.log(n);
   });
 
   console.log(

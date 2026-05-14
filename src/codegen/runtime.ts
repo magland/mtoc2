@@ -172,6 +172,13 @@ const REGISTRY: ReadonlyMap<string, RuntimeSnippet> = new Map<
       "mtoc2_range_value",
     ]),
   ],
+
+  // ── tic / toc (wall-clock stopwatch) ─────────────────────────────
+  // One snippet covers `mtoc2_tic`, `mtoc2_toc`, and the bare-`toc;`
+  // print form `mtoc2_toc_print`. Activated by the `tic`/`toc`
+  // builtins and (for the print form) by the lowerer when a bare
+  // `toc;` ExprStmt synthesizes a direct Call to `mtoc2_toc_print`.
+  ["mtoc2_tic_toc", loadSnippet("tictoc.h")],
 ]);
 
 export function getRuntimeSnippet(name: string): RuntimeSnippet {
