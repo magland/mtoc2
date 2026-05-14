@@ -149,6 +149,7 @@ const REGISTRY: ReadonlyMap<string, RuntimeSnippet> = new Map<
     loadSnippet("format_engine.h", ["mtoc2_text_view_t", "mtoc2_tensor_t"]),
   ],
   ["mtoc2_fprintf", loadSnippet("fprintf.h", ["mtoc2_format_engine"])],
+  ["mtoc2_error_fmt", loadSnippet("error_fmt.h", ["mtoc2_format_engine"])],
 
   // ── Tensor (real, multi-element) ──────────────────────────────────
   // Storage shape + alloc + the four "owned value" helpers (copy,
