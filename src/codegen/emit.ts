@@ -38,6 +38,12 @@ import {
   useRuntimeByName,
   type RuntimeState,
 } from "./runtime.js";
+import {
+  computeFutureTouches,
+  earlyFreeCandidates,
+  nullAtScopeExit,
+  type FutureTouchMap,
+} from "./liveness.js";
 
 export interface EmitOptions {
   /** Include the activated runtime helper bodies in the output.
@@ -70,13 +76,21 @@ export function emitProgram(prog: IRProgram, opts: EmitOptions = {}): string {
     useRuntimeByName(state, "mtoc2_tensor_empty");
     userParts.push(`  mtoc2_tensor_t ${o} = mtoc2_tensor_empty();`);
   }
-  for (const s of prog.topLevelStmts) {
-    const line = emitStmt(s, "  ", state);
-    if (line !== null) userParts.push(line);
-  }
+  const mainFutureTouches = computeFutureTouches(prog.topLevelStmts, null);
+  const mainBody = emitBody(prog.topLevelStmts, "  ", state, mainFutureTouches);
+  if (mainBody.length > 0) userParts.push(mainBody);
   const mainHasRet = bodyHasReturn(prog.topLevelStmts);
   if (mainHasRet) userParts.push(`mtoc2_return:`);
+  // Scope-exit free walk skips owned locals proven NULL at this point
+  // by the forward `nullAtScopeExit` dataflow — those buffers have
+  // already been released by an early-free along every reaching path.
+  const mainNullAtExit = nullAtScopeExit(
+    prog.topLevelStmts,
+    new Set(mainOwned),
+    mainFutureTouches
+  );
   for (const o of mainOwned) {
+    if (mainNullAtExit.has(o)) continue;
     useRuntimeByName(state, "mtoc2_tensor_free");
     userParts.push(`  mtoc2_tensor_free(&${o});`);
   }
@@ -184,16 +198,18 @@ function emitFunction(fn: IRFunc, state: RuntimeState): string {
     useRuntimeByName(state, "mtoc2_tensor_empty");
     lines.push(`  mtoc2_tensor_t ${o} = mtoc2_tensor_empty();`);
   }
-  for (const s of fn.body) {
-    const line = emitStmt(s, "  ", state);
-    if (line !== null) lines.push(line);
-  }
+  const ownedOutput =
+    outTy && isOwned(outTy) ? { cName: cOut, ty: outTy } : null;
+  const futureTouches = computeFutureTouches(fn.body, ownedOutput);
+  const bodyText = emitBody(fn.body, "  ", state, futureTouches);
+  if (bodyText.length > 0) lines.push(bodyText);
   const hasRet = bodyHasReturn(fn.body);
   if (hasRet) lines.push(`mtoc2_return:`);
-  // Free every owned local (and the output if it's owned but we're
-  // NOT returning it — for now we always return cOut, so skip its
-  // free; the caller takes ownership).
+  // Scope-exit frees: skip owned locals that nullAtScopeExit proves
+  // are NULL on every reaching path (already early-freed).
+  const fnNullAtExit = nullAtScopeExit(fn.body, new Set(owned), futureTouches);
   for (const o of owned) {
+    if (fnNullAtExit.has(o)) continue;
     useRuntimeByName(state, "mtoc2_tensor_free");
     lines.push(`  mtoc2_tensor_free(&${o});`);
   }
@@ -214,10 +230,38 @@ function bodyHasReturn(body: IRStmt[]): boolean {
   return false;
 }
 
+/** Emit a sequence of statements with their per-stmt early-frees.
+ *  After each stmt, owned C-names that aren't in the stmt's
+ *  futureTouchOut (i.e. their last use was at this stmt) get a
+ *  `mtoc2_tensor_free(&v);` call. Scope-exit frees still emit
+ *  unconditionally — they're no-ops for buffers already nulled by
+ *  the early-free. */
+function emitBody(
+  stmts: IRStmt[],
+  indent: string,
+  state: RuntimeState,
+  futureTouches: FutureTouchMap
+): string {
+  const out: string[] = [];
+  for (const s of stmts) {
+    const line = emitStmt(s, indent, state, futureTouches);
+    if (line !== null) out.push(line);
+    const freeNames = earlyFreeCandidates(s, futureTouches);
+    if (freeNames.size > 0) {
+      useRuntimeByName(state, "mtoc2_tensor_free");
+      for (const v of freeNames) {
+        out.push(`${indent}mtoc2_tensor_free(&${v});`);
+      }
+    }
+  }
+  return out.join("\n");
+}
+
 function emitStmt(
   s: IRStmt,
   indent: string,
-  state: RuntimeState
+  state: RuntimeState,
+  futureTouches: FutureTouchMap
 ): string | null {
   switch (s.kind) {
     case "ExprStmt":
@@ -237,22 +281,28 @@ function emitStmt(
     case "If": {
       const lines: string[] = [];
       lines.push(`${indent}if (${emitExpr(s.cond, state)} != 0.0) {`);
-      for (const t of s.thenBody) {
-        const line = emitStmt(t, indent + "  ", state);
-        if (line !== null) lines.push(line);
-      }
+      const thenText = emitBody(
+        s.thenBody,
+        indent + "  ",
+        state,
+        futureTouches
+      );
+      if (thenText.length > 0) lines.push(thenText);
       if (s.elseBody.length > 0) {
         if (s.elseBody.length === 1 && s.elseBody[0].kind === "If") {
-          const inner = emitStmt(s.elseBody[0], indent, state);
+          const inner = emitStmt(s.elseBody[0], indent, state, futureTouches);
           if (inner !== null)
             lines.push(`${indent}} else ${inner.trimStart()}`);
           else lines.push(`${indent}}`);
         } else {
           lines.push(`${indent}} else {`);
-          for (const e of s.elseBody) {
-            const line = emitStmt(e, indent + "  ", state);
-            if (line !== null) lines.push(line);
-          }
+          const elseText = emitBody(
+            s.elseBody,
+            indent + "  ",
+            state,
+            futureTouches
+          );
+          if (elseText.length > 0) lines.push(elseText);
           lines.push(`${indent}}`);
         }
       } else {
@@ -263,10 +313,8 @@ function emitStmt(
     case "While": {
       const lines: string[] = [];
       lines.push(`${indent}while (${emitExpr(s.cond, state)} != 0.0) {`);
-      for (const b of s.body) {
-        const line = emitStmt(b, indent + "  ", state);
-        if (line !== null) lines.push(line);
-      }
+      const bodyText = emitBody(s.body, indent + "  ", state, futureTouches);
+      if (bodyText.length > 0) lines.push(bodyText);
       lines.push(`${indent}}`);
       return lines.join("\n");
     }
@@ -280,10 +328,8 @@ function emitStmt(
       lines.push(
         `${indent}for (double ${s.cVar} = ${startC}; ${s.cVar} ${cmp} ${endC}; ${s.cVar} ${upd}) {`
       );
-      for (const b of s.body) {
-        const line = emitStmt(b, indent + "  ", state);
-        if (line !== null) lines.push(line);
-      }
+      const bodyText = emitBody(s.body, indent + "  ", state, futureTouches);
+      if (bodyText.length > 0) lines.push(bodyText);
       lines.push(`${indent}}`);
       return lines.join("\n");
     }

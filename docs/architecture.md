@@ -157,8 +157,22 @@ isOwned(ty)`. `If`/`While`/`For` bodies are walked too, so inner
    owned tensor — TensorBuild produces one via the alloc helper;
    `Var(otherVar)` wraps in `mtoc2_tensor_copy(otherVar)`. Other
    tensor-producing expressions follow the same invariant.
-4. At end-of-body / before each `mtoc2_return:` label, emits
-   `mtoc2_tensor_free(&v)` for every owned local.
+4. Walks the body and emits early-frees: after each stmt, every
+   owned name in `(uses ∪ defs)(s) − futureTouchOut(s)` gets a
+   `mtoc2_tensor_free(&v)`. The future-touch sets come from a
+   backward dataflow in `src/codegen/liveness.ts` (port of mtoc's
+   liveness analyzer, adapted for mtoc2's simpler IR). Reassignment
+   counts as a future touch, so reassigns suppress redundant early-
+   frees (the assign helper handles the prior buffer).
+5. At end-of-body / before each `mtoc2_return:` label, emits
+   `mtoc2_tensor_free(&v)` for every owned local **that
+   `nullAtScopeExit` can't prove is already NULL**. The
+   `nullAtScopeExit` forward dataflow walks the body computing per-
+   variable "guaranteed NULL" sets: Assign clears, early-free sets,
+   If intersects across arms, loops intersect (entry, body-end).
+   The scope-exit free walk skips proven-NULL names — so simple
+   straight-line code emits exactly one free per variable, at its
+   last touch.
 
 ### A-normalization (ANF) pass
 

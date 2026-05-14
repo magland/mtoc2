@@ -120,7 +120,20 @@ Tensors (and future owned types: strings, structs, classes) follow mtoc's
   assign helper can consume. A tensor `Var` read in a non-owning context
   (e.g. `disp` arg) passes the struct bare — no buffer copy.
 - Scope exit / before every `ReturnFromFunction` emits
-  `mtoc2_tensor_free(&v)` for each owned local.
+  `mtoc2_tensor_free(&v)` for each owned local — but **only when the
+  forward `nullAtScopeExit` dataflow can't prove the buffer is already
+  NULL** along every reaching path. Combined with the early-free
+  emission (see below), most variables get a single free at their
+  last use; scope-exit frees only fire when the analysis can't rule
+  out a live buffer (e.g., a tensor reassigned in a loop body whose
+  final iteration leaves an allocated buffer).
+- **Early-free**: a backward "future-touch" dataflow
+  (`src/codegen/liveness.ts`) computes per-stmt sets of owned C-names
+  that may be touched (read or written) at any successor. After each
+  stmt, owned names in `(uses ∪ defs)(s) − futureTouchOut(s)` get an
+  immediate `mtoc2_tensor_free(&v)`. Reassignment counts as a future
+  touch (the assign helper handles its own free), so an early-free
+  isn't emitted if the next interaction is a redef.
 - An owned-producing sub-expression (TensorBuild, tensor-typed
   Binary/Unary/Call) inside any larger expression is **A-normalized**
   at lowering time: hoisted to a fresh `_mtoc2_t<N>` temp Assign and
