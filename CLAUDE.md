@@ -91,8 +91,12 @@ mtoc2 is a _static_ translator. Anything outside the supported subset raises
 - **Tensor arithmetic** — elementwise `+` `-` `.*` `./` `-` (unary)
   on same-shape tensors and tensor-with-scalar-broadcast. Each op
   emits a per-op runtime helper call
-  (`mtoc2_tensor_<op>_tt` / `_ts` / `_st`). Matrix `*` `/` (i.e.
-  `mtimes` / `mrdivide` between two tensors) is not yet supported.
+  (`mtoc2_tensor_<op>_tt` / `_ts` / `_st`). Matrix `*` (`mtimes` on
+  two tensors) is supported for real 2-D operands via
+  `mtoc2_tensor_mtimes_real`; the 1×k \* k×1 inner-product case
+  routes through a scalar-returning variant so the type system's
+  scalar-result classification stays sound. Matrix `/`
+  (`mrdivide` between two tensors) is not yet supported.
 - **Reductions** (`sum`, `prod`, `mean`, `min`, `max`, `any`, `all`)
   on real-numeric scalars / vectors / matrices / N-D tensors. Three
   call forms per op: default (`sum(A)` — first non-singleton dim
@@ -179,8 +183,9 @@ mtoc2 is a _static_ translator. Anything outside the supported subset raises
   function handle. `import pkg.foo` / `import pkg.*` statements are
   not yet supported — calls must be fully qualified.
 
-Not yet supported: matrix multiplication / division, logical / vector-
-of-indices indexing (`a(mask)`, `a(idx_vec)`), member-rooted indexing
+Not yet supported: matrix division (`mrdivide` between two tensors),
+logical / vector-of-indices indexing (`a(mask)`, `a(idx_vec)`),
+member-rooted indexing
 (`obj.r(1, :, :)`, `obj.f(i) = rhs`), indexed-delete (`a(2:5) = []`),
 unknown-shape constructors (`zeros(n)` where `n` is a runtime-only
 scalar), general broadcast (non-scalar mismatched shapes), complex,

@@ -79,6 +79,16 @@ on each side; mismatched counts often surface a missed printing
 path. Use this sparingly — every mask is one less line under
 strict comparison.
 
+A sibling directive `% mtoc2-test-drop: <regex>` removes matched
+lines entirely (regex + trailing newline). Use it when only _one_
+runner emits a banner-style line — e.g. numbl's
+`[matmul] using bridge: native LAPACK addon` is printed on first
+matmul activation; mtoc2 doesn't emit anything similar, so masking
+would leave a `[MASKED]` placeholder while the other runner has
+no line at all and the compare still fails. `drop` collapses
+both sides to no-line. Same scan window and `gm` semantics as
+`mtoc2-test-mask`.
+
 ### When mtoc2 and numbl disagree
 
 If the divergence is mtoc2's bug, fix mtoc2. If the divergence is a

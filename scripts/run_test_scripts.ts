@@ -137,42 +137,61 @@ interface Result {
   maskNotes: string[];
 }
 
-/** Parse `% mtoc2-test-mask: <regex>` lines from the first 20 lines of
- *  the script. Each match becomes a compiled `RegExp` with `gm` flags
- *  so it can normalize multiple matches across stdout. Empty result
- *  means "no masks declared" and the cross-runner falls back to plain
- *  byte-for-byte comparison.
+/** Parse `% mtoc2-test-mask: <regex>` and `% mtoc2-test-drop: <regex>`
+ *  lines from the first 20 lines of the script.
  *
- *  Invalid regex syntax raises at parse time (we want a noisy failure
- *  so a typo doesn't silently disable the mask). The mask is only
- *  honored for the script that declares it. */
-function parseMasks(scriptPath: string): RegExp[] {
+ *  - `mask` replaces each match with `[MASKED]` (keeps the rest of
+ *    the line intact). Used when both runners produce a line but the
+ *    contents vary in a known way — e.g. an elapsed time.
+ *  - `drop` removes each matched line entirely (regex + trailing
+ *    newline). Used when only one runner emits a banner-style line
+ *    (e.g. numbl's `[matmul] using bridge: ...` printed on first
+ *    matmul activation) that mtoc2 doesn't produce.
+ *
+ *  Both compile with `gm` flags so they normalize multiple matches.
+ *  Invalid regex syntax raises at parse time. */
+function parseMasks(scriptPath: string): {
+  masks: RegExp[];
+  drops: RegExp[];
+} {
   let src: string;
   try {
     src = readFileSync(scriptPath, "utf8");
   } catch {
-    return [];
+    return { masks: [], drops: [] };
   }
   const masks: RegExp[] = [];
+  const drops: RegExp[] = [];
   const lines = src.split("\n").slice(0, 20);
   for (const line of lines) {
-    const m = line.match(/^\s*%\s*mtoc2-test-mask:\s*(.*)$/);
-    if (!m) continue;
-    const pattern = m[1].trim();
-    if (pattern === "") continue;
-    masks.push(new RegExp(pattern, "gm"));
+    const maskMatch = line.match(/^\s*%\s*mtoc2-test-mask:\s*(.*)$/);
+    if (maskMatch) {
+      const pattern = maskMatch[1].trim();
+      if (pattern !== "") masks.push(new RegExp(pattern, "gm"));
+      continue;
+    }
+    const dropMatch = line.match(/^\s*%\s*mtoc2-test-drop:\s*(.*)$/);
+    if (dropMatch) {
+      const pattern = dropMatch[1].trim();
+      if (pattern !== "") drops.push(new RegExp(pattern + "\\n?", "gm"));
+      continue;
+    }
   }
-  return masks;
+  return { masks, drops };
 }
 
-/** Apply each mask to `stdout` and return the normalized text plus a
- *  list of human-readable log lines describing what fired. Each match
- *  is replaced with `[MASKED]`. */
+/** Apply masks then drops to `stdout` and return the normalized text
+ *  plus a list of human-readable log lines describing what fired.
+ *  Masks replace each match with `[MASKED]`; drops remove the entire
+ *  matched line (including the trailing newline). */
 function applyMasks(
   stdout: string,
-  masks: ReadonlyArray<RegExp>
+  masks: ReadonlyArray<RegExp>,
+  drops: ReadonlyArray<RegExp>
 ): { text: string; notes: string[] } {
-  if (masks.length === 0) return { text: stdout, notes: [] };
+  if (masks.length === 0 && drops.length === 0) {
+    return { text: stdout, notes: [] };
+  }
   let text = stdout;
   const notes: string[] = [];
   for (const re of masks) {
@@ -187,6 +206,18 @@ function applyMasks(
       );
     }
   }
+  for (const re of drops) {
+    let count = 0;
+    text = text.replace(re, () => {
+      count++;
+      return "";
+    });
+    if (count > 0) {
+      notes.push(
+        `  -> dropped ${count} line${count === 1 ? "" : "s"} via ${re}`
+      );
+    }
+  }
   return { text, notes };
 }
 
@@ -195,7 +226,7 @@ async function runOne(scriptPath: string): Promise<Result> {
     ? scriptPath.slice(repoRoot.length + 1)
     : scriptPath;
 
-  const masks = parseMasks(scriptPath);
+  const { masks, drops } = parseMasks(scriptPath);
 
   let expectedRaw: string;
   try {
@@ -228,8 +259,8 @@ async function runOne(scriptPath: string): Promise<Result> {
     return { name, status: "FAIL", detail, maskNotes: [] };
   }
 
-  const expectedM = applyMasks(expectedRaw, masks);
-  const actualM = applyMasks(actual.stdout, masks);
+  const expectedM = applyMasks(expectedRaw, masks, drops);
+  const actualM = applyMasks(actual.stdout, masks, drops);
   // Surface combined notes (numbl-side then mtoc2-side) once per
   // script. The two sides should fire the same number of masks for a
   // well-written test — if they don't, the byte-for-byte compare will

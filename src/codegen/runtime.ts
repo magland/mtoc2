@@ -157,6 +157,13 @@ const REGISTRY: ReadonlyMap<string, RuntimeSnippet> = new Map<
     "mtoc2_tensor_transpose",
     loadSnippet("tensor_transpose.h", ["mtoc2_tensor_t", "mtoc2_alloc"]),
   ],
+  // Real 2-D matrix multiplication `A * B`. `mtimes` builtin
+  // activates this snippet when both operands are tensors; the scalar
+  // paths stay routed through the elementwise `times` snippet.
+  [
+    "mtoc2_tensor_mtimes_real",
+    loadSnippet("tensor_mtimes_real.h", ["mtoc2_tensor_t", "mtoc2_alloc"]),
+  ],
   // `size(t)` row-vector form. The `size(t, k)` scalar form emits
   // inline C; this snippet covers only the variadic-shape return.
   [
