@@ -22,7 +22,6 @@ import {
   scalarDouble,
   tensorDouble,
   signFromNumber,
-  isScalarRealDouble,
   isScalarRealNumeric,
   isMultiElement,
   isNumeric,
@@ -873,16 +872,22 @@ export class Lowerer {
 
 // ── Helpers (free functions) ────────────────────────────────────────────
 
-/** When `ty` is a fully-foldable result (scalar real with `number`
- *  exact, or a tensor with Float64Array `exact` + known shape),
- *  return the corresponding literal IR node. Returns null otherwise
- *  — caller emits a runtime Binary/Unary/Call node in that case.
+/** When `ty` is a fully-foldable result (scalar real numeric — double
+ *  or logical — with `number` exact, or a tensor with Float64Array
+ *  `exact` + known shape), return the corresponding literal IR node.
+ *  Returns null otherwise — caller emits a runtime Binary/Unary/Call
+ *  node in that case.
+ *
+ *  Accepting `logical` here matters for if-folds: comparison builtins
+ *  return scalarLogical with exact 0/1; without folding to a NumLit,
+ *  the if's cond stays a Binary IR and `condToBool` (which only
+ *  recognizes NumLit) misses the fold.
  *
  *  Centralized so lowerBinary / lowerUnary / lowerFuncCall all use
  *  the same post-transfer fold rule and stay in sync. */
 function foldedLiteralFromType(ty: Type, span: Span): IRExpr | null {
   if (!isNumeric(ty)) return null;
-  if (typeof ty.exact === "number" && isScalarRealDouble(ty)) {
+  if (typeof ty.exact === "number" && isScalarRealNumeric(ty)) {
     return { kind: "NumLit", value: ty.exact, ty, span };
   }
   if (ty.exact instanceof Float64Array && ty.shape !== undefined) {
