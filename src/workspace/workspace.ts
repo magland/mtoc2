@@ -25,6 +25,7 @@ import { LoweringContext } from "../../../numbl/src/numbl-core/lowering/lowering
 import { resolveFunction } from "../../../numbl/src/numbl-core/functionResolve.js";
 import type { CallSite } from "../../../numbl/src/numbl-core/runtime/runtimeHelpers.js";
 import type { ItemType } from "../../../numbl/src/numbl-core/lowering/itemTypes.js";
+import type { ClassInfo } from "../../../numbl/src/numbl-core/lowering/classInfo.js";
 
 import { UnsupportedConstruct } from "../lowering/errors.js";
 import type { Type } from "../lowering/types.js";
@@ -168,8 +169,22 @@ export class Workspace {
     // has the AST attached) to apply mtoc2's stricter validation —
     // class attributes / inheritance / events / etc. all reject at
     // this point, before any constructor specialization runs.
+    //
+    // `@ClassName/<methodName>.m` external method files are already
+    // discovered and parsed by numbl during `registerWorkspaceFiles`
+    // (they live in `info.externalMethodFiles`, with their ASTs in
+    // `ctx.fileASTCache`). We pluck out each file's primary Function
+    // statement and feed them into `registerClassDef` so they join
+    // the same validation pipeline as in-body methods.
     for (const [name, info] of this.ctx.registry.classesByName) {
-      this.classes.set(name, registerClassDef(info.ast, info.fileName));
+      this.classes.set(
+        name,
+        registerClassDef(
+          info.ast,
+          info.fileName,
+          this.collectExternalMethods(info)
+        )
+      );
     }
     for (const [name, info] of this.ctx.registry.localClassesByName) {
       if (this.classes.has(name)) {
@@ -197,6 +212,56 @@ export class Workspace {
     }
 
     this.finalized = true;
+  }
+
+  /** Pull the primary Function AST from each `@ClassName/<methodName>.m`
+   *  external method file that numbl registered for `info`. Methods that
+   *  declare local helper functions in the same file are not yet
+   *  supported by mtoc2 (numbl's `withMethodScope` swaps them in at
+   *  lowering time; mtoc2 has no equivalent). Returns `undefined` when
+   *  the class has no external methods, so the call site keeps the
+   *  pre-existing register signature unchanged. */
+  private collectExternalMethods(
+    info: ClassInfo
+  ): Map<string, FuncStmt> | undefined {
+    if (info.externalMethodFiles.size === 0) return undefined;
+    const out = new Map<string, FuncStmt>();
+    for (const [methodName, mf] of info.externalMethodFiles) {
+      const ast = this.ctx.fileASTCache.get(mf.fileName);
+      if (!ast) {
+        throw new UnsupportedConstruct(
+          `internal: external method file '${mf.fileName}' for ` +
+            `'${info.qualifiedName}.${methodName}' was not parsed`,
+          info.ast.span
+        );
+      }
+      let primary: FuncStmt | null = null;
+      let helperCount = 0;
+      for (const stmt of ast.body) {
+        if (stmt.type !== "Function") continue;
+        if (stmt.name === methodName) {
+          primary = stmt;
+        } else {
+          helperCount++;
+        }
+      }
+      if (!primary) {
+        throw new UnsupportedConstruct(
+          `external method file '${mf.fileName}' has no function named ` +
+            `'${methodName}'`,
+          info.ast.span
+        );
+      }
+      if (helperCount > 0) {
+        throw new UnsupportedConstruct(
+          `external method file '${mf.fileName}' declares local helper ` +
+            `functions; per-method helper scope is not yet supported by mtoc2`,
+          primary.span
+        );
+      }
+      out.set(methodName, primary);
+    }
+    return out;
   }
 
   private spanFromClassFile(reg: ClassRegistration): Span {

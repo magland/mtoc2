@@ -86,10 +86,19 @@ export interface ClassRegistration {
  *  class attributes, get/set accessors, events/enumeration/arguments
  *  blocks, operator overloads, etc.). The `file` argument is stored
  *  on the registration so cross-file specialization keys can salt by
- *  it. */
+ *  it.
+ *
+ *  `externalMethods` carries instance methods discovered by numbl
+ *  in an `@ClassName/` folder — one `<methodName>.m` per file. Numbl's
+ *  `registerWorkspaceFiles` already collected them in
+ *  `ClassInfo.externalMethodFiles`; the `Workspace` finalizer extracts
+ *  each file's primary Function AST and passes them here so they
+ *  participate in the same validation and method-map as in-body
+ *  methods. */
 export function registerClassDef(
   s: ClassDefStmt,
-  file: string
+  file: string,
+  externalMethods?: ReadonlyMap<string, FuncStmt>
 ): ClassRegistration {
   if (s.classAttributes.length > 0) {
     throw new UnsupportedConstruct(
@@ -250,6 +259,44 @@ export function registerClassDef(
           `'${m.type}' blocks are not supported in v1`,
           s.span
         );
+    }
+  }
+
+  // External method files (`@ClassName/<methodName>.m`). Same validation
+  // as in-body instance methods — the source location just lives in a
+  // different file.
+  if (externalMethods) {
+    for (const [methodName, stmt] of externalMethods) {
+      if (stmt.name.startsWith("get.") || stmt.name.startsWith("set.")) {
+        throw new UnsupportedConstruct(
+          `get/set accessor methods are not supported in v1`,
+          stmt.span
+        );
+      }
+      if (stmt.outputs.length > 1) {
+        throw new UnsupportedConstruct(
+          `method '${methodName}': only 0 or 1 outputs supported`,
+          stmt.span
+        );
+      }
+      if (methodName === s.name) {
+        // MATLAB allows a constructor in an external file; mtoc2's
+        // type-inference path keys off the classdef-file constructor,
+        // so we reject this for now.
+        throw new UnsupportedConstruct(
+          `class '${s.name}': external constructor file is not supported; ` +
+            `declare the constructor inside the classdef`,
+          stmt.span
+        );
+      }
+      if (methods.has(methodName) || staticMethods.has(methodName)) {
+        throw new UnsupportedConstruct(
+          `duplicate method '${methodName}' on class '${s.name}' ` +
+            `(declared both in the classdef and in an external file)`,
+          stmt.span
+        );
+      }
+      methods.set(methodName, stmt);
     }
   }
 

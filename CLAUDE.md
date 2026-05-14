@@ -182,6 +182,25 @@ mtoc2 is a _static_ translator. Anything outside the supported subset raises
   (`pkg_foo__<hex>` vs `other_foo__<hex>`). `@pkg.foo` works as a
   function handle. `import pkg.foo` / `import pkg.*` statements are
   not yet supported — calls must be fully qualified.
+- **Class folders** — `@ClassName/ClassName.m` is the classdef file
+  (constructor + property declarations); sibling `@ClassName/foo.m`
+  files are instance methods, one method per file. Numbl's
+  `registerWorkspaceFiles` already detects this layout and populates
+  `ClassInfo.externalMethodFiles` for each class; mtoc2's
+  `Workspace.finalize` reuses that map directly — for each entry it
+  pulls the parsed AST out of numbl's `fileASTCache` and passes the
+  primary `Function` statement into `registerClassDef`'s `methods`
+  table, so external methods join the same validation pipeline as
+  in-body methods (outputs ≤ 1, no `get.`/`set.` accessors, no
+  duplicates). Once registered, dispatch is identical to a method
+  declared inside the classdef body: `obj.foo(args)` and `foo(obj)`
+  both resolve through numbl's `resolveFunction` to a
+  `classMethod` target and specialize via
+  `classMethodSpecSource(className, methodName)`. Not yet supported:
+  external constructor (`@ClassName/ClassName.m` constructor must
+  live inside the classdef block), per-method local helper functions
+  in external method files (numbl swaps them in via `withMethodScope`;
+  mtoc2 has no equivalent).
 - **Text** — two distinct owned kinds, matching numbl: `Char` (single-
   quoted `'foo'`, 1×N row of bytes; `length('foo') == 3`) and `String`
   (double-quoted `"foo"`, scalar handle; `length("foo") == 1`). Both
@@ -215,7 +234,7 @@ indexed-delete (`a(2:5) = []`), unknown-shape constructors
 (`zeros(n)` where `n` is a runtime-only scalar), general broadcast
 (non-scalar mismatched shapes), complex, text concat (`[a, b]` of
 two chars), char arithmetic (`'A' + 1`), `strcmp`, builtin handles,
-`private/` directories, `@Class/` folders, `import` statements,
+`private/` directories, `import` statements,
 `.numbl.js` user functions. Expanding scope is gated by the
 cross-runner.
 
