@@ -43,6 +43,9 @@ import { zeros } from "./shape/zeros.js";
 import { ones } from "./shape/ones.js";
 import { reshape } from "./shape/reshape.js";
 import { transpose } from "./shape/transpose.js";
+import { size } from "./shape/size.js";
+import { flipud, fliplr, flip } from "./shape/flip.js";
+import { assert as assertBuiltin } from "./diag/assert.js";
 import { tic } from "./system/tic.js";
 import { toc } from "./system/toc.js";
 import { cos } from "./math/cos.js";
@@ -99,6 +102,11 @@ for (const b of [
   ones,
   reshape,
   transpose,
+  size,
+  flipud,
+  fliplr,
+  flip,
+  assertBuiltin,
   tic,
   toc,
   cos,

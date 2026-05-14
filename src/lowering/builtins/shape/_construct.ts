@@ -39,7 +39,7 @@ import {
 } from "../../types.js";
 import type { DimInfo, NumericType, Type } from "../../types.js";
 import type { Builtin } from "../registry.js";
-import { exactDouble } from "../_shared.js";
+import { exactDouble, exactRealArray } from "../_shared.js";
 
 /** Mirror of `MTOC2_MAX_NDIM` in src/codegen/runtime/tensor.h. */
 const MTOC2_MAX_NDIM = 8;
@@ -78,6 +78,61 @@ function resolveShape(
       span
     );
   }
+
+  // Form B: single multi-element tensor argument carrying the dim
+  // vector (`zeros(size(xs))`, `zeros([2 3 4])`). Mirrors `reshape`'s
+  // Form B; the vector must be statically-known in v1. Trailing
+  // singletons get the same 2-axis-floor normalization as the
+  // multi-scalar Form A.
+  if (
+    argTypes.length === 1 &&
+    isNumeric(argTypes[0]) &&
+    !isScalar(argTypes[0])
+  ) {
+    const a = argTypes[0];
+    if (a.elem !== "double" && a.elem !== "logical") {
+      throw new TypeError(
+        `'${name}' dim vector must be a real-double tensor (got ${a.elem})`,
+        span
+      );
+    }
+    if (a.isComplex) {
+      throw new TypeError(
+        `'${name}' dim vector must be a real-double tensor (got complex)`,
+        span
+      );
+    }
+    const arr = exactRealArray(a);
+    if (arr === undefined) {
+      throw new UnsupportedConstruct(
+        `'${name}' dim vector must be a statically-known constant in v1`,
+        span
+      );
+    }
+    if (arr.length < 1 || arr.length > MTOC2_MAX_NDIM) {
+      throw new UnsupportedConstruct(
+        `'${name}' supports 1..${MTOC2_MAX_NDIM} output dims (got ${arr.length})`,
+        span
+      );
+    }
+    const axes: ResolvedAxis[] = [];
+    for (let i = 0; i < arr.length; i++) {
+      const v = arr[i];
+      if (!Number.isFinite(v) || !Number.isInteger(v) || v < 0) {
+        throw new TypeError(
+          `'${name}' dim ${i + 1} must be a finite non-negative integer (got ${v})`,
+          span
+        );
+      }
+      axes.push({ kind: "exact", value: v, argIndex: 0 });
+    }
+    // Pad to a 2-axis minimum (mtoc2's lattice represents every
+    // tensor with at least 2 axes; `zeros([5])` == `zeros(5, 1)` per
+    // MATLAB).
+    while (axes.length < 2) axes.push({ kind: "exact", value: 1, argIndex: 0 });
+    return { axes, ndim: axes.length, isSquare: false };
+  }
+
   const axes: ResolvedAxis[] = [];
   for (let i = 0; i < argTypes.length; i++) {
     const a = argTypes[i];

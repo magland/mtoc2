@@ -153,6 +153,23 @@ const REGISTRY: ReadonlyMap<string, RuntimeSnippet> = new Map<
     "mtoc2_tensor_transpose",
     loadSnippet("tensor_transpose.h", ["mtoc2_tensor_t", "mtoc2_alloc"]),
   ],
+  // `size(t)` row-vector form. The `size(t, k)` scalar form emits
+  // inline C; this snippet covers only the variadic-shape return.
+  [
+    "mtoc2_tensor_size_row",
+    loadSnippet("tensor_size.h", ["mtoc2_tensor_t", "mtoc2_alloc"]),
+  ],
+  // Generic axis-flip: `flipud` → axis 0, `fliplr` → axis 1,
+  // `flip(t, k)` → axis (k-1). All three source-level builtins share
+  // this helper.
+  [
+    "mtoc2_tensor_flip",
+    loadSnippet("tensor_flip.h", ["mtoc2_tensor_t", "mtoc2_alloc"]),
+  ],
+  // `assert(cond, msg)` runtime check (scalar cond). The truthy fast
+  // path returns immediately; failure writes the message to stderr
+  // and aborts.
+  ["mtoc2_assert_scalar", loadSnippet("assert_fail.h")],
   // Elementwise logical ops on real tensors. `~` (unary not) is the
   // only resident today; `|` / `&` will share the same snippet when
   // they land. Result tensors are logical-typed; the storage is still
