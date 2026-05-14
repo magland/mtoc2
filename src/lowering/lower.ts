@@ -431,6 +431,7 @@ export class Lowerer {
   private anfChildren(e: IRExpr, hoists: IRStmt[]): IRExpr {
     switch (e.kind) {
       case "NumLit":
+      case "StringLit":
       case "Var":
       case "HandleLit":
       case "HandleCaptureLoad":
@@ -1196,6 +1197,34 @@ export class Lowerer {
         return this.lowerEndKeyword(e);
       case "Range":
         return this.lowerRangeAsValue(e);
+      case "Char": {
+        // Single-quoted MATLAB char literal — lexeme keeps the
+        // surrounding `'` delimiters and doubled-quote escapes.
+        // Strip them so the type's `exact` mirrors numbl's runtime
+        // string. v1 only consumes these inside reducer builtins
+        // (`sum(A, 'all')`, etc.); every other site rejects via
+        // the builtin's transfer or `requireValueType`-adjacent check.
+        const raw = e.value;
+        const inner = raw.slice(1, raw.length - 1).replaceAll("''", "'");
+        return {
+          kind: "StringLit",
+          value: inner,
+          ty: { kind: "String", exact: inner },
+          span: e.span,
+        };
+      }
+      case "String": {
+        // Double-quoted MATLAB string literal — same stripping rule
+        // as `Char` but with `""` as the escape sequence.
+        const raw = e.value;
+        const inner = raw.slice(1, raw.length - 1).replaceAll('""', '"');
+        return {
+          kind: "StringLit",
+          value: inner,
+          ty: { kind: "String", exact: inner },
+          span: e.span,
+        };
+      }
       case "Colon":
         throw new UnsupportedConstruct(
           `bare ':' is only valid inside an index expression`,

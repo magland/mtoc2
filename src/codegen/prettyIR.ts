@@ -86,6 +86,8 @@ export function irExprToString(e: IRExpr): string {
   switch (e.kind) {
     case "NumLit":
       return numLitText(e.value);
+    case "StringLit":
+      return `'${e.value}'`;
     case "Var":
       return e.name;
     case "Binary":

@@ -15,6 +15,7 @@ export function forEachSubExpr(e: IRExpr, visit: (sub: IRExpr) => void): void {
   visit(e);
   switch (e.kind) {
     case "NumLit":
+    case "StringLit":
     case "Var":
       return;
     case "TensorBuild":

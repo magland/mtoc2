@@ -907,6 +907,13 @@ function emitExpr(e: IRExpr, state: RuntimeState): string {
   switch (e.kind) {
     case "NumLit":
       return formatDouble(e.value);
+    case "StringLit":
+      // Today only consumed by reducer builtins, whose `codegenC`
+      // drops the slot before emitting the C call. Render as a C
+      // string literal so the bare expression still compiles if it
+      // somehow reaches a site that doesn't filter (e.g. future
+      // builtins that DO pass strings through).
+      return JSON.stringify(e.value);
     case "TensorBuild": {
       // Runtime tensor construction. Both row-vector and matrix cases
       // route through the same compound-literal flat array (the data

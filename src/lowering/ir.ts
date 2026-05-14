@@ -20,6 +20,21 @@ export interface NumLit {
   span: Span;
 }
 
+/** Source-level string or char literal. Today only consumed by
+ *  reducer builtins (`sum(A, 'all')`, `min(A, [], 'all')`, etc.) at
+ *  transfer time — they read `ty.exact` to dispatch on the literal.
+ *  Codegen renders the IR node as a C string literal so the bare
+ *  expression compiles, but the reducer builtins' `codegenC` ignores
+ *  the slot entirely (the dim choice is encoded in the helper name).
+ *  No other context accepts a `String`-typed value; the lowerer
+ *  rejects it via `requireValueType`-adjacent checks per call site. */
+export interface StringLit {
+  kind: "StringLit";
+  value: string;
+  ty: Type;
+  span: Span;
+}
+
 /** Runtime tensor construction for every tensor source-literal. Codegen
  *  emits `mtoc2_tensor_from_row` (1×N) or `mtoc2_tensor_from_matrix`
  *  (rows×cols) with a C99 compound literal of the per-element
@@ -208,6 +223,7 @@ export interface MakeRange {
 
 export type IRExpr =
   | NumLit
+  | StringLit
   | TensorBuild
   | Var
   | Binary
