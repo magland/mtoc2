@@ -459,6 +459,17 @@ export function isOwned(t: Type): boolean {
   return false;
 }
 
+/** Types that may appear in an N≥2-output multi-assign slot. Scalar
+ *  real numeric outputs are stored by `*_mtoc2_o<i> = <local>` struct-
+ *  copy; owned outputs use the kind's `_assign` helper to transfer
+ *  ownership of the buffer pointer. Void / Unknown / String have no
+ *  C representation that fits the sret slot and stay rejected. */
+export function isMultiOutputSlotType(t: Type): boolean {
+  if (isScalarRealNumeric(t)) return true;
+  if (isOwned(t)) return true;
+  return false;
+}
+
 export function signIsNonneg(s: Sign): boolean {
   return s === "positive" || s === "nonneg" || s === "zero";
 }

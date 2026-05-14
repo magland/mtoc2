@@ -46,13 +46,15 @@ interface TouchCtx {
   /** Future touches reachable from a `Continue` (the loop header). */
   readonly continueOut: ReadonlySet<string>;
   /** Future touches reachable from a `ReturnFromFunction`. The owned
-   *  outputs are added via `ownedOutputCName` below. */
+   *  outputs are added via `ownedOutputCNames` below. */
   readonly returnOut: ReadonlySet<string>;
-  /** The function's owned output C-name (when the enclosing scope is
-   *  a function with an owned output). Used to keep the output alive
-   *  through ReturnFromFunction and through the fall-through end of
-   *  the function body. `null` for main or scalar-returning functions. */
-  readonly ownedOutputCName: string | null;
+  /** The function's owned output C-names. For a single-output owned
+   *  function this is one element (the sret'd buffer); for an N≥2-
+   *  output function it's one entry per owned output slot. Used to
+   *  keep each output alive through ReturnFromFunction and through
+   *  the fall-through end of the function body. Empty for main and
+   *  for functions with no owned outputs. */
+  readonly ownedOutputCNames: ReadonlySet<string>;
   /** Mutated map of per-statement future-touch sets (the output). */
   readonly futureTouchOut: Map<IRStmt, ReadonlySet<string>>;
 }
@@ -186,15 +188,13 @@ function touchStmt(
       return new Set(ctx.continueOut);
     case "ReturnFromFunction": {
       // The early-return path itself has no successors, but the
-      // function's owned output C-name (if any) is "used" at this
-      // return — the codegen emits `return cOut;` after the
-      // `mtoc2_return:` label. Mark it as touched so the dataflow
-      // doesn't decide cOut is dead one stmt earlier and emit a
-      // stray early-free.
+      // function's owned output C-names (if any) are "used" at this
+      // return — the codegen emits the sret writes (or `return cOut;`
+      // for a single owned output) after the `mtoc2_return:` label.
+      // Mark them as touched so the dataflow doesn't decide an output
+      // local is dead one stmt earlier and emit a stray early-free.
       const out = new Set(ctx.returnOut);
-      if (ctx.ownedOutputCName !== null) {
-        out.add(ctx.ownedOutputCName);
-      }
+      for (const c of ctx.ownedOutputCNames) out.add(c);
       return out;
     }
     case "TypeComment":
@@ -205,29 +205,32 @@ function touchStmt(
 }
 
 /** Compute per-statement future-touch sets for a body of statements.
- *  For function bodies that return an owned tensor, pass
- *  `ownedOutput = { cName, ty }` so the analyzer seeds the body-end
- *  future-touch with the output C-name — otherwise the implicit
- *  return would see the cOut Assign as a "last touch" and emit a
- *  stray early-free of the value we're about to return. Pass `null`
- *  for main or scalar-returning functions. */
+ *  For function bodies whose output slots include owned values, pass
+ *  one `{ cName, ty }` per owned output. The analyzer seeds the body-
+ *  end future-touch with each owned-output C-name — otherwise the
+ *  implicit return / sret writes would see the final defs as "last
+ *  touches" and emit stray early-frees of the values we're about to
+ *  transfer to the caller. Pass an empty array for main, scalar-
+ *  returning functions, or functions with no owned outputs. */
 export function computeFutureTouches(
   stmts: ReadonlyArray<IRStmt>,
-  ownedOutput: { cName: string; ty: Type } | null = null
+  ownedOutputs: ReadonlyArray<{ cName: string; ty: Type }> = []
 ): FutureTouchMap {
   const futureTouchOut = new Map<IRStmt, ReadonlySet<string>>();
   const empty: ReadonlySet<string> = new Set();
   const bodyEnd = new Set<string>();
-  let ownedOutputCName: string | null = null;
-  if (ownedOutput !== null && isOwned(ownedOutput.ty)) {
-    bodyEnd.add(ownedOutput.cName);
-    ownedOutputCName = ownedOutput.cName;
+  const ownedOutputCNames = new Set<string>();
+  for (const o of ownedOutputs) {
+    if (isOwned(o.ty)) {
+      bodyEnd.add(o.cName);
+      ownedOutputCNames.add(o.cName);
+    }
   }
   const ctx: TouchCtx = {
     breakOut: empty,
     continueOut: empty,
     returnOut: empty,
-    ownedOutputCName,
+    ownedOutputCNames,
     futureTouchOut,
   };
   touchSeq(stmts, bodyEnd, ctx);

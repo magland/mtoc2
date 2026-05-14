@@ -117,7 +117,7 @@ export function emitProgram(prog: IRProgram, opts: EmitOptions = {}): string {
   for (const o of collectHoistedScalarLocals(prog.topLevelStmts)) {
     userParts.push(`  ${cTypeFor(o.ty)} ${o.cName} = ${defaultInitFor()};`);
   }
-  const mainFutureTouches = computeFutureTouches(prog.topLevelStmts, null);
+  const mainFutureTouches = computeFutureTouches(prog.topLevelStmts);
   const mainOwnedTypes = new Map<string, Type>(
     mainOwned.map(o => [o.cName, o.ty])
   );
@@ -553,18 +553,18 @@ function emitFunction(fn: IRFunc, state: RuntimeState): string {
   for (const o of hoistedScalars) {
     lines.push(`  ${cTypeFor(o.ty)} ${o.cName} = ${defaultInitFor()};`);
   }
-  // Single-output owned: keep the output alive through the body so
-  // the future-touch analysis doesn't emit a stray early-free of the
-  // value we're about to return. Multi-output and zero-output don't
-  // need this — the sret writes / void return have no value being
-  // carried out via the return statement itself.
-  const ownedOutput =
-    nOutputs === 1 &&
-    fn.outputTypes[0] !== undefined &&
-    isOwned(fn.outputTypes[0])
-      ? { cName: fn.cOutputs[0], ty: fn.outputTypes[0] }
-      : null;
-  const futureTouches = computeFutureTouches(fn.body, ownedOutput);
+  // Keep each owned output alive through the body so the future-touch
+  // analysis doesn't emit a stray early-free of the value we're about
+  // to return (single-output) or transfer via sret (multi-output).
+  // Zero-output / scalar-only-output functions contribute nothing.
+  const ownedOutputsForLiveness: { cName: string; ty: Type }[] = [];
+  for (let i = 0; i < nOutputs; i++) {
+    const outTy = fn.outputTypes[i];
+    if (outTy !== undefined && isOwned(outTy)) {
+      ownedOutputsForLiveness.push({ cName: fn.cOutputs[i], ty: outTy });
+    }
+  }
+  const futureTouches = computeFutureTouches(fn.body, ownedOutputsForLiveness);
   const fnOwnedTypes = new Map<string, Type>();
   for (const o of owned) fnOwnedTypes.set(o.cName, o.ty);
   for (let i = 0; i < nOutputs; i++) {
@@ -592,26 +592,25 @@ function emitFunction(fn: IRFunc, state: RuntimeState): string {
   if (hasRet) lines.push(`mtoc2_return:`);
   // Multi-output: write each output through its sret pointer. This
   // happens BEFORE the scope-exit free walk so the writes can read
-  // the live locals before any tensor frees would zero them. For v1
-  // outputs are scalar, but the ordering still matches mtoc's pattern.
+  // the live locals before any tensor frees would zero them.
   //
-  // Defensive guard: an owned output slot would be both written via
-  // `*_mtoc2_o${i} = <local>` (struct copy of the buffer pointer) AND
-  // freed in the scope-exit walk below — the caller would then see
-  // a dangling pointer and the next assign would double-free. The
-  // lowerer rejects owned multi-output slots in v1, so this guard is
-  // latent today; it surfaces a clear internal error if that
-  // restriction is ever lifted without first fixing this codegen
-  // path to transfer ownership (e.g. `*_mtoc2_o${i} = <local>;
-  // <local> = <empty>();` so the scope-exit free is a no-op).
+  // Scalar slots: bare struct copy (`*_mtoc2_o<i> = <local>`).
+  // Owned slots: ownership transfer via the kind's `_assign` helper.
+  // The helper releases the destination's prior contents (always
+  // NULL on a freshly-empty slot from the caller, but `_assign` is
+  // still the right shape — it leaves the local moved-out). The
+  // local's scope-exit free is suppressed below; see the skip on
+  // `outputCNames` in the free walk.
   if (isMulti) {
     for (let i = 0; i < nOutputs; i++) {
-      if (isOwned(fn.outputTypes[i])) {
-        throw new Error(
-          `internal: multi-output owned slot at index ${i} of '${fn.name}' — codegen does not yet transfer ownership for N≥2 outputs (would double-free at scope exit)`
-        );
+      const outTy = fn.outputTypes[i];
+      if (outTy && isOwned(outTy)) {
+        activateOwnedRuntime(outTy, state);
+        const h = ownedHelpersFor(outTy);
+        lines.push(`  ${h.assign}(_mtoc2_o${i}, ${fn.cOutputs[i]});`);
+      } else {
+        lines.push(`  *_mtoc2_o${i} = ${fn.cOutputs[i]};`);
       }
-      lines.push(`  *_mtoc2_o${i} = ${fn.cOutputs[i]};`);
     }
   }
   // Scope-exit frees: skip owned locals that nullAtScopeExit proves
@@ -628,6 +627,10 @@ function emitFunction(fn: IRFunc, state: RuntimeState): string {
     // Skip freeing the single-output return value — its buffer is
     // about to transfer to the caller via return-by-value.
     if (nOutputs === 1 && o.cName === fn.cOutputs[0]) continue;
+    // Multi-output owned slots are moved-out by the sret writes
+    // above; freeing them here would double-free the buffer the
+    // caller now owns.
+    if (isMulti && outputCNames.has(o.cName)) continue;
     activateOwnedRuntime(o.ty, state);
     const h = ownedHelpersFor(o.ty);
     lines.push(`  ${h.free}(&${o.cName});`);

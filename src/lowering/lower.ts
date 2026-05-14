@@ -53,6 +53,7 @@ import {
   classType,
   signFromNumber,
   isScalarRealNumeric,
+  isMultiOutputSlotType,
   isMultiElement,
   isNumeric,
   isVoid,
@@ -840,6 +841,17 @@ export class Lowerer {
       this.requireValueType(a, `argument to '${callName}'`);
     }
     const argTypes = args.map(a => a.ty);
+    // ANF each arg to scalar-or-Var — same discipline as `anfChildren`
+    // for a regular `Call` node. Without this, an owned-producing arg
+    // like `times_ts(ones_nd(...), 2.0)` would leave the inner `ones_nd`
+    // unfreed (the outer helper doesn't consume its tensor arg). For
+    // a user-function call (Call or MultiAssignCall), the callee owns
+    // each arg, so the OUTER producer is fine — only the grandchild
+    // needs hoisting — but mirroring Call's discipline (hoist top-
+    // level owned non-Vars too) is simpler and the temp gets early-
+    // freed after the call so cost is nil.
+    const argHoists: IRStmt[] = [];
+    const anfArgs = args.map(a => this.anfRequireScalarOrVar(a, argHoists));
     const target = this.workspace.resolve(
       callName,
       argTypes,
@@ -888,7 +900,7 @@ export class Lowerer {
         kind: "Call",
         cName: spec.cName,
         name: callName,
-        args,
+        args: anfArgs,
         ty: spec.outputTypes[0] ?? { kind: "Unknown" },
         span: s.span,
       };
@@ -898,9 +910,11 @@ export class Lowerer {
       // or `~`.
       const lv = s.lvalues[0];
       if (lv === undefined || lv.type !== "Var") {
-        return { kind: "ExprStmt", expr: callExpr, span: s.span };
+        const stmt: IRStmt = { kind: "ExprStmt", expr: callExpr, span: s.span };
+        return argHoists.length === 0 ? stmt : [...argHoists, stmt];
       }
-      return this.recordAssignment(lv.name, callExpr, s.span);
+      const stmt = this.recordAssignment(lv.name, callExpr, s.span);
+      return argHoists.length === 0 ? stmt : [...argHoists, stmt];
     }
 
     // 0-output callee with no lvalues: reached via the bare-statement
@@ -912,11 +926,12 @@ export class Lowerer {
         kind: "Call",
         cName: spec.cName,
         name: callName,
-        args,
+        args: anfArgs,
         ty: VOID,
         span: s.span,
       };
-      return { kind: "ExprStmt", expr: callExpr, span: s.span };
+      const stmt: IRStmt = { kind: "ExprStmt", expr: callExpr, span: s.span };
+      return argHoists.length === 0 ? stmt : [...argHoists, stmt];
     }
 
     // N≥2 outputs. Build a MultiAssignCall. Output slots have one of
@@ -929,16 +944,16 @@ export class Lowerer {
     }[] = [];
     for (let i = 0; i < spec.outputTypes.length; i++) {
       const slotTy = spec.outputTypes[i] ?? { kind: "Unknown" };
-      // v1 restriction: scalar real numeric outputs only for N≥2.
-      // Tensor / struct / class / handle sret slots aren't implemented
-      // (would need their owned-kind `_assign` helper on the callee
-      // side and discard-temp lifecycle on the call side).
-      if (!isScalarRealNumeric(slotTy)) {
+      // Accept scalar real numeric or any owned type (tensor / struct /
+      // class / handle). Owned slots transfer ownership via the kind's
+      // `_assign` helper at the callee's sret write site; scalar slots
+      // use a bare struct copy. Void / Unknown / String stay rejected
+      // — no C representation that fits the sret slot.
+      if (!isMultiOutputSlotType(slotTy)) {
         throw new UnsupportedConstruct(
           `multi-output function '${callName}': output ` +
             `'${fnAst.outputs[i]}' has type ${typeToString(slotTy)}; ` +
-            `only scalar real numeric outputs are supported for ` +
-            `multi-output functions`,
+            `this type isn't supported in a multi-output slot`,
           s.span
         );
       }
@@ -967,14 +982,15 @@ export class Lowerer {
         binding: { name: lv.name, cName: rec.cName },
       });
     }
-    return {
+    const mac: IRStmt = {
       kind: "MultiAssignCall",
       cName: spec.cName,
       name: callName,
-      args,
+      args: anfArgs,
       outputs,
       span: s.span,
     };
+    return argHoists.length === 0 ? mac : [...argHoists, mac];
   }
 
   private recordAssignment(name: string, expr: IRExpr, span: Span): IRStmt {
