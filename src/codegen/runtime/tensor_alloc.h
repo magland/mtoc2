@@ -18,7 +18,9 @@ static mtoc2_tensor_t mtoc2_tensor_alloc(long rows, long cols) {
   mtoc2_tensor_t out;
   size_t n;
 #if defined(__has_builtin) && __has_builtin(__builtin_mul_overflow)
-  if (__builtin_mul_overflow((size_t)rows, (size_t)cols, &n)) {
+  size_t bytes;
+  if (__builtin_mul_overflow((size_t)rows, (size_t)cols, &n) ||
+      __builtin_mul_overflow(n, sizeof(double), &bytes)) {
     fprintf(stderr,
       "mtoc2: tensor allocation overflow (%ldx%ld elements)\n", rows, cols);
     abort();
@@ -30,8 +32,9 @@ static mtoc2_tensor_t mtoc2_tensor_alloc(long rows, long cols) {
     abort();
   }
   n = (size_t)rows * (size_t)cols;
+  size_t bytes = n * sizeof(double);
 #endif
-  out.real = mtoc2_alloc(n * sizeof(double));
+  out.real = mtoc2_alloc(bytes);
   out.imag = NULL;
   out.ndim = 2;
   out.dims[0] = rows;

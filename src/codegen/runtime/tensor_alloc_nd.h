@@ -16,9 +16,13 @@
 #include <stdlib.h>
 
 static mtoc2_tensor_t mtoc2_tensor_alloc_nd(int ndim, const long *dims) {
-  if (ndim > MTOC2_MAX_NDIM) {
+  if (ndim < 1 || ndim > MTOC2_MAX_NDIM) {
+    /* The rest of the runtime assumes `ndim >= 1` (and codegen enforces
+     * `ndim >= 2`). A zero or negative ndim would skip the dim loop and
+     * leave the tensor in a malformed state with a 1-element default
+     * buffer; better to abort with a clear message. */
     fprintf(stderr,
-      "mtoc2: tensor ndim %d exceeds MTOC2_MAX_NDIM=%d\n", ndim, MTOC2_MAX_NDIM);
+      "mtoc2: tensor ndim %d out of range [1, %d]\n", ndim, MTOC2_MAX_NDIM);
     abort();
   }
   mtoc2_tensor_t out;
@@ -43,7 +47,17 @@ static mtoc2_tensor_t mtoc2_tensor_alloc_nd(int ndim, const long *dims) {
     n = new_n;
   }
   out.ndim = ndim;
-  out.real = mtoc2_alloc(n * sizeof(double));
+  size_t bytes;
+#if defined(__has_builtin) && __has_builtin(__builtin_mul_overflow)
+  if (__builtin_mul_overflow(n, sizeof(double), &bytes)) {
+    fprintf(stderr,
+      "mtoc2: tensor allocation overflow at byte-count (%zu elements)\n", n);
+    abort();
+  }
+#else
+  bytes = n * sizeof(double);
+#endif
+  out.real = mtoc2_alloc(bytes);
   out.imag = NULL;
   return out;
 }
