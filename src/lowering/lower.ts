@@ -135,6 +135,18 @@ export class Lowerer {
    *  `specializeUserFunction` so a call from inside `helper.m`'s
    *  subfunction reports the right file in its `CallSite`. */
   private currentFile: string;
+  /** Per-specialization `nargout` value. Pushed by `specializeUserFunction`
+   *  before lowering a function body; popped after. Read by the
+   *  `nargout` identifier arm of `lowerIdent`. Empty at top level —
+   *  MATLAB rejects `nargout` outside a function body, which we mirror
+   *  by leaving an `nargout` reference unresolved. */
+  private nargoutStack: number[] = [];
+  /** Companion to `nargoutStack`: the count of supplied positional
+   *  arguments at the call site. Identical to `decl.params.length`
+   *  in mtoc2 v1 (the language doesn't yet have optional positional
+   *  args), but tracked separately so future support for omitted
+   *  trailing args lands cleanly. */
+  private narginStack: number[] = [];
 
   constructor(private workspace: Workspace) {
     this.currentFile = workspace.mainFile;
@@ -857,11 +869,16 @@ export class Lowerer {
         s.span
       );
     }
+    // Caller's requested `nargout`: count of lvalues (0 for the
+    // bare-drop-all path that `lowerExprStmt` routes here).
+    const callNargout = s.lvalues.length;
     const spec = this.specializeUserFunction(
       fnAst,
       argTypes,
       specSource,
-      fnFile
+      fnFile,
+      undefined,
+      callNargout
     );
 
     // 1-output callee: route to the classic single-output ABI
@@ -1484,11 +1501,15 @@ export class Lowerer {
             e.span
           );
         }
+        // Expression-context call site requests exactly 1 output
+        // (the rejection above filters out 2+-output packaged funcs).
         const spec = this.specializeUserFunction(
           target.ast,
           argTypes,
           qname,
-          target.file
+          target.file,
+          undefined,
+          target.ast.outputs.length === 0 ? 0 : 1
         );
         const ty: Type =
           target.ast.outputs.length === 0
@@ -1583,7 +1604,9 @@ export class Lowerer {
       method,
       argTypes,
       classMethodSpecSource(target.className, target.methodName),
-      reg.file
+      reg.file,
+      undefined,
+      method.outputs.length === 0 ? 0 : 1
     );
     const ty: Type =
       method.outputs.length === 0
@@ -1663,7 +1686,9 @@ export class Lowerer {
       method,
       argTypes,
       classMethodSpecSource(target.className, target.methodName),
-      reg.file
+      reg.file,
+      undefined,
+      method.outputs.length === 0 ? 0 : 1
     );
     const ty: Type =
       method.outputs.length === 0
@@ -1687,6 +1712,29 @@ export class Lowerer {
         name: e.name,
         cName: entry.cName,
         ty: entry.ty,
+        span: e.span,
+      };
+    }
+    // `nargout` (and `nargin`) are MATLAB pseudo-variables that fold to
+    // a compile-time constant per specialization. The `nargoutStack`
+    // is pushed by `specializeUserFunction` before lowering the body
+    // and popped after; a reference outside a function body finds it
+    // empty and falls through to the "undefined" error.
+    if (e.name === "nargout" && this.nargoutStack.length > 0) {
+      const v = this.nargoutStack[this.nargoutStack.length - 1];
+      return {
+        kind: "NumLit",
+        value: v,
+        ty: scalarDouble(signFromNumber(v), v),
+        span: e.span,
+      };
+    }
+    if (e.name === "nargin" && this.narginStack.length > 0) {
+      const v = this.narginStack[this.narginStack.length - 1];
+      return {
+        kind: "NumLit",
+        value: v,
+        ty: scalarDouble(signFromNumber(v), v),
         span: e.span,
       };
     }
@@ -2209,7 +2257,9 @@ export class Lowerer {
           target.ast,
           argTypes,
           undefined,
-          target.file
+          target.file,
+          undefined,
+          target.ast.outputs.length === 0 ? 0 : 1
         );
         const ty: Type =
           target.ast.outputs.length === 0
@@ -2260,7 +2310,9 @@ export class Lowerer {
           method,
           callArgTypes,
           classMethodSpecSource(target.className, target.methodName),
-          reg.file
+          reg.file,
+          undefined,
+          method.outputs.length === 0 ? 0 : 1
         );
         const ty: Type =
           method.outputs.length === 0
@@ -2412,7 +2464,8 @@ export class Lowerer {
       argTypes,
       reg.className,
       reg.file,
-      { name: outName, ty: classTy, initExpr: initialReceiver }
+      { name: outName, ty: classTy, initExpr: initialReceiver },
+      1
     );
     // Constructor must return one output (validated at registration).
     const ty: Type = spec.outputTypes[0] ?? classTy;
@@ -2737,7 +2790,9 @@ export class Lowerer {
       handleTy.ast,
       argTypes,
       undefined,
-      handleTy.ast.span.file
+      handleTy.ast.span.file,
+      undefined,
+      handleTy.ast.outputs.length === 0 ? 0 : 1
     );
     const ty: Type =
       handleTy.ast.outputs.length === 0
@@ -2781,7 +2836,16 @@ export class Lowerer {
      *  to `initExpr` (an already-lowered IR expression) prepended to
      *  the body. The user's constructor body then sees the receiver
      *  initialized with the class defaults. */
-    preSeedOutput?: { name: string; ty: Type; initExpr: IRExpr }
+    preSeedOutput?: { name: string; ty: Type; initExpr: IRExpr },
+    /** Per-call-site `nargout`: the number of outputs the caller
+     *  requested. Salts the spec key so two callers requesting
+     *  different output counts get distinct specializations.
+     *  Defaults to `decl.outputs.length` (the declared count) when
+     *  the caller can't supply a more specific value (e.g.
+     *  cross-file resolver paths that don't yet thread this through).
+     *  Inside the body, the `nargout` identifier folds to this value
+     *  via the `nargoutStack`. */
+    nargout?: number
   ): IRFunc {
     if (argTypes.length !== decl.params.length) {
       throw new TypeError(
@@ -2791,10 +2855,19 @@ export class Lowerer {
     }
     const source = specSource ?? decl.name;
     const file = definingFile ?? decl.span.file ?? this.currentFile;
-    // Hash the (file, argTypes) pair together so the C name salts by
-    // both. Keep the human-readable prefix (`apply__<hex>`) — the
-    // hash collapses everything that doesn't matter.
-    const hashInput = `${file}|${argTypes.map(canonicalizeType).join("|")}`;
+    // Per-specialization `nargout`: defaults to the declared count so
+    // resolver paths that don't yet thread the caller's request still
+    // produce a working specialization (matches numbl's "max possible
+    // nargout" interpretation when the call site isn't statically
+    // known). Callers that DO know — `lowerMultiAssign`,
+    // `lowerFuncCall`, ExprStmt drop-all — supply the precise count
+    // so the spec key shards correctly.
+    const effectiveNargout = nargout ?? decl.outputs.length;
+    // Hash the (file, argTypes, nargout) triple together so the C
+    // name salts by all three. Keep the human-readable prefix
+    // (`apply__<hex>`) — the hash collapses everything that doesn't
+    // matter.
+    const hashInput = `${file}|${argTypes.map(canonicalizeType).join("|")}|nargout=${effectiveNargout}`;
     const key = `${sanitizeCIdent(source)}__${hashType(hashInput)}`;
     const cached = this.specializations.get(key);
     if (cached) return cached;
@@ -2822,6 +2895,8 @@ export class Lowerer {
     this.env = new Map();
     this.tempCounter = 0;
     this.currentFile = file;
+    this.nargoutStack.push(effectiveNargout);
+    this.narginStack.push(argTypes.length);
 
     // Bind params. The C name goes through `cIdentForUserName` so a
     // user-source `function r = f(struct)` doesn't reference the C
@@ -2866,6 +2941,8 @@ export class Lowerer {
     this.env = savedEnv;
     this.tempCounter = savedTempCounter;
     this.currentFile = savedCurrentFile;
+    this.nargoutStack.pop();
+    this.narginStack.pop();
 
     const out: IRFunc = {
       ...placeholder,
