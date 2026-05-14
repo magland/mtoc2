@@ -30,29 +30,47 @@ function usage(): never {
   process.exit(2);
 }
 
-/** Scan `dir` for sibling `.m` files and read each one. Skips
- *  subdirectories — mtoc2 v1 doesn't support `+pkg/`, `@Class/`, or
- *  `private/` layouts; an `.m` inside one would surface as
- *  unsupported at the resolver anyway. */
+/** Recursively scan `dir` for sibling `.m` files. Descends into
+ *  `+pkg/` namespace dirs (so `+pkg/foo.m` is picked up as `pkg.foo`)
+ *  and `@Class/` class dirs. Mirrors numbl's `scanMFiles`
+ *  ([../numbl/src/cli-scan.ts]) so the cross-runner sees the same
+ *  workspace shape from both runners. `private/` directories aren't
+ *  supported by mtoc2 yet, but we still descend so an `.m` inside one
+ *  surfaces an `UnsupportedConstruct` at the call site rather than
+ *  silently going missing. */
 function scanSiblings(dir: string, excludeAbs: string): SourceFile[] {
-  let entries: string[];
-  try {
-    entries = readdirSync(dir);
-  } catch {
-    return [];
-  }
   const out: SourceFile[] = [];
-  for (const entry of entries) {
-    if (!entry.endsWith(".m")) continue;
-    const full = join(dir, entry);
-    if (resolve(full) === excludeAbs) continue;
+  function walk(current: string): void {
+    let entries: string[];
     try {
-      if (!statSync(full).isFile()) continue;
+      entries = readdirSync(current);
     } catch {
-      continue;
+      return;
     }
-    out.push({ name: full, source: readFileSync(full, "utf8") });
+    for (const entry of entries) {
+      const full = join(current, entry);
+      let st;
+      try {
+        st = statSync(full);
+      } catch {
+        continue;
+      }
+      if (st.isDirectory()) {
+        if (
+          entry.startsWith("+") ||
+          entry.startsWith("@") ||
+          entry === "private"
+        ) {
+          walk(full);
+        }
+        continue;
+      }
+      if (!st.isFile() || !entry.endsWith(".m")) continue;
+      if (resolve(full) === excludeAbs) continue;
+      out.push({ name: full, source: readFileSync(full, "utf8") });
+    }
   }
+  walk(dir);
   return out;
 }
 

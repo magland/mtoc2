@@ -1364,7 +1364,7 @@ export class Lowerer {
     };
   }
 
-  /** Class method dispatch. Covers three call shapes:
+  /** Class method dispatch. Covers four call shapes:
    *    - `obj.method(args)` — instance method.
    *    - `obj.staticMethod(args)` — instance-style call to a static
    *      method; numbl's resolver flips `stripInstance=true` so the
@@ -1373,16 +1373,92 @@ export class Lowerer {
    *      name; we detect this by inspecting the AST base before
    *      lowering, set `targetClassName` on the call site, and let
    *      the resolver pick the right method (also stripInstance).
+   *    - `pkg.foo(args)` / `pkg.sub.foo(args)` — package function
+   *      call. The whole dotted chain (`pkg.sub.foo`) is the
+   *      qualified workspace-function name. Same rule as numbl's
+   *      interpreter: only treated as a package ref when the
+   *      leftmost segment is not an in-scope variable. Packaged
+   *      classes (`+pkg/@Foo/Foo.m` → `pkg.Foo`) and packaged
+   *      static methods (`pkg.Foo.staticMethod(...)`) route through
+   *      the same path.
    *
    *  v1 only supports methods with 0 or 1 outputs. */
   private lowerMethodCall(e: Extract<Expr, { type: "MethodCall" }>): IRExpr {
-    // Static dispatch by class name: `ClassName.method(args)`.
-    if (
-      e.base.type === "Ident" &&
-      !this.env.has(e.base.name) &&
-      this.workspace.isClass(e.base.name)
-    ) {
-      return this.lowerStaticMethodCall(e.base.name, e, e.span);
+    // Package function / qualified class call. The base is a chain
+    // of Ident/Member (no calls, no index) whose leftmost segment
+    // is not an in-scope variable.
+    const dottedBase = tryExtractDottedName(e.base);
+    if (dottedBase && !this.env.has(dottedBase.split(".")[0])) {
+      const qname = `${dottedBase}.${e.name}`;
+      // `pkg.Foo(args)` — packaged class constructor.
+      if (this.workspace.isClass(qname)) {
+        const reg = this.workspace.classes.get(qname)!;
+        return this.lowerClassConstructorCall(reg, e.args, e.span);
+      }
+      // `ClassName.staticMethod(args)` where `ClassName` is either a
+      // bare class or a qualified one (`pkg.Foo.staticMethod(...)`).
+      if (this.workspace.isClass(dottedBase)) {
+        return this.lowerStaticMethodCall(dottedBase, e, e.span);
+      }
+      // `pkg.foo(args)` — packaged workspace function. Let the
+      // resolver decide; we route the userFunction verdict through
+      // the same path as `lowerFuncCall`.
+      const args = e.args.map(a => this.lowerExpr(a));
+      for (const a of args) {
+        this.requireValueType(a, `argument to '${qname}'`);
+      }
+      const argTypes = args.map(a => a.ty);
+      const target = this.workspace.resolve(
+        qname,
+        argTypes,
+        this.callSite(),
+        e.span
+      );
+      if (target?.kind === "userFunction") {
+        if (target.ast.outputs.length >= 2) {
+          throw new UnsupportedConstruct(
+            `function '${qname}' has ${target.ast.outputs.length} outputs ` +
+              `and cannot be used in an expression position; assign via ` +
+              `'[a, b, ...] = ${qname}(...)' or call as a bare statement ` +
+              `to drop all outputs`,
+            e.span
+          );
+        }
+        const spec = this.specializeUserFunction(
+          target.ast,
+          argTypes,
+          qname,
+          target.file
+        );
+        const ty: Type =
+          target.ast.outputs.length === 0
+            ? VOID
+            : (spec.outputTypes[0] ?? { kind: "Unknown" });
+        return {
+          kind: "Call",
+          cName: spec.cName,
+          name: qname,
+          args,
+          ty,
+          span: e.span,
+        };
+      }
+      if (target?.kind === "classConstructor") {
+        const reg = this.classReg(target.className);
+        if (reg === undefined) {
+          throw new UnsupportedConstruct(
+            `internal: class '${target.className}' missing from workspace registry`,
+            e.span
+          );
+        }
+        return this.lowerClassConstructorCall(reg, e.args, e.span);
+      }
+      // Numbl's resolver only returns these dotted-route verdicts for
+      // qualified names; if we got something else (or nothing) for a
+      // dotted chain that's clearly not a class, fail with a clear
+      // message rather than fall through to instance dispatch (which
+      // would try to lower `pkg` as an Ident and crash).
+      throw new UnsupportedConstruct(`unknown function '${qname}'`, e.span);
     }
 
     // Instance dispatch: the base lowers to a value and must be a
@@ -2597,6 +2673,21 @@ const C_RESERVED_NAMES: ReadonlySet<string> = new Set([
 function cIdentForUserName(name: string): string {
   if (C_RESERVED_NAMES.has(name)) return `v_${name}`;
   return name;
+}
+
+/** Walk a chain of Ident / Member nodes (no calls, no indexing) and
+ *  return the dotted-name they form, e.g. `Member(Ident("pkg"),
+ *  "sub")` → `"pkg.sub"`. Returns null for any other shape. Used to
+ *  detect `pkg.foo(...)` and `pkg.sub.foo(...)` package call shapes
+ *  before falling through to instance-method dispatch. Mirrors
+ *  numbl's interpreter helper of the same name. */
+function tryExtractDottedName(e: Expr): string | null {
+  if (e.type === "Ident") return e.name;
+  if (e.type === "Member") {
+    const base = tryExtractDottedName(e.base);
+    if (base) return `${base}.${e.name}`;
+  }
+  return null;
 }
 
 /** Scan a constructor body for the FIRST top-level direct

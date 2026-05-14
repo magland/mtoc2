@@ -583,11 +583,24 @@ is intentionally lossy: only `ClassType` maps to a distinguishing
 `Unknown`. That's all numbl's resolver needs to apply class-method
 precedence.
 
-The CLI scans `dirname(absolute-entry)` for sibling `.m` files. The
-web IDE passes flat file names — no scan needed since the workspace
-already contains every project file. Multifile test groups under
-`test_scripts/<subdir>/` follow the same flow: `main.m` is the
-entry, every other `.m` in the directory is a workspace sibling.
+The CLI scans `dirname(absolute-entry)` for sibling `.m` files and
+descends recursively into `+pkg/` namespace dirs and `@Class/` class
+dirs (mirroring numbl's `scanMFiles`). The web IDE passes flat file
+names — no scan needed since the workspace already contains every
+project file. Multifile test groups under `test_scripts/<subdir>/`
+follow the same flow: `main.m` is the entry, every other `.m` in the
+directory is a workspace sibling.
+
+Package functions register through the same path: `+pkg/foo.m` is
+registered by numbl's `registerWorkspaceFiles` as the qualified name
+`pkg.foo`. Call sites `pkg.foo(args)` and `pkg.sub.foo(args)` parse
+as `MethodCall` nodes; `lowerMethodCall` recognizes the dotted base
+as a package reference (when the leftmost segment is not in the
+local env, matching MATLAB's env-shadow rule) and routes the
+qualified name through `workspace.resolve`. The qualified name is
+passed as the specialization spec source so the mangled C identifier
+keeps a readable prefix (`pkg_foo__<hex>`). `@pkg.foo` function
+handles flow through the same resolver path.
 
 Functions may declare 0, 1, or N≥2 outputs. The C ABI splits three
 ways:
