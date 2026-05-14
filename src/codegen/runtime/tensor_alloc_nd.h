@@ -28,21 +28,28 @@ static mtoc2_tensor_t mtoc2_tensor_alloc_nd(int ndim, const long *dims) {
   mtoc2_tensor_t out;
   size_t n = 1;
   for (int i = 0; i < ndim; i++) {
-    out.dims[i] = dims[i];
+    /* MATLAB / numbl clamp negative dim values to 0 (yielding an
+     * empty tensor) rather than aborting. Without this the
+     * `(size_t)dims[i]` cast below wraps a negative `long` to
+     * SIZE_MAX and the very next mul-overflow check fires with a
+     * misleading message. Trigger:
+     *   `n = 0; %!numbl:opaque n; zeros(n - 1, 3);` */
+    long d = dims[i] < 0 ? 0 : dims[i];
+    out.dims[i] = d;
     size_t new_n;
 #if defined(__has_builtin) && __has_builtin(__builtin_mul_overflow)
-    if (__builtin_mul_overflow(n, (size_t)dims[i], &new_n)) {
+    if (__builtin_mul_overflow(n, (size_t)d, &new_n)) {
       fprintf(stderr,
-        "mtoc2: tensor allocation overflow at dim %d (size %ld)\n", i, dims[i]);
+        "mtoc2: tensor allocation overflow at dim %d (size %ld)\n", i, d);
       abort();
     }
 #else
-    if ((size_t)dims[i] != 0 && n > (SIZE_MAX / sizeof(double)) / (size_t)dims[i]) {
+    if ((size_t)d != 0 && n > (SIZE_MAX / sizeof(double)) / (size_t)d) {
       fprintf(stderr,
-        "mtoc2: tensor allocation overflow at dim %d (size %ld)\n", i, dims[i]);
+        "mtoc2: tensor allocation overflow at dim %d (size %ld)\n", i, d);
       abort();
     }
-    new_n = n * (size_t)dims[i];
+    new_n = n * (size_t)d;
 #endif
     n = new_n;
   }

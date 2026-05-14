@@ -15,6 +15,12 @@
 #include <stdlib.h>
 
 static mtoc2_tensor_t mtoc2_tensor_alloc(long rows, long cols) {
+  /* MATLAB / numbl clamp negative dim values to 0 (resulting in an
+   * empty tensor) rather than aborting; without this the bare
+   * `(size_t)rows` cast below would wrap a negative `long` to
+   * SIZE_MAX and trigger a spurious "allocation overflow" abort. */
+  if (rows < 0) rows = 0;
+  if (cols < 0) cols = 0;
   mtoc2_tensor_t out;
   size_t n;
 #if defined(__has_builtin) && __has_builtin(__builtin_mul_overflow)
