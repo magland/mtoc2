@@ -756,14 +756,46 @@ export class Lowerer {
   private lowerMultiAssign(
     s: Extract<Stmt, { type: "MultiAssign" }>
   ): IRStmt | IRStmt[] {
-    if (s.expr.type !== "FuncCall") {
+    // Allow two AST shapes on the RHS:
+    //   - `FuncCall` for plain `foo(...)` / `helper(...)`
+    //   - `MethodCall` whose base is a dotted name with a non-in-scope
+    //     leftmost segment — i.e. a package-function call like
+    //     `lege.exps(...)`. Same routing as `lowerMethodCall`'s package
+    //     branch. (Instance methods stay 1-output-only; multi-output
+    //     method dispatch is a separate followup.)
+    let callName: string;
+    let argExprs: Expr[];
+    let callSpan: { file: string; start: number; end: number };
+    let specSource: string | undefined;
+    if (s.expr.type === "FuncCall") {
+      callName = s.expr.name;
+      argExprs = s.expr.args;
+      callSpan = s.expr.span;
+      specSource = undefined; // default: decl.name
+    } else if (s.expr.type === "MethodCall") {
+      const dottedBase = tryExtractDottedName(s.expr.base);
+      if (dottedBase === null || this.env.has(dottedBase.split(".")[0])) {
+        throw new UnsupportedConstruct(
+          `multi-assign right-hand side must be a user-function or ` +
+            `package-function call (got instance-method dispatch, not ` +
+            `yet supported in '[...] = ...')`,
+          s.span
+        );
+      }
+      callName = `${dottedBase}.${s.expr.name}`;
+      argExprs = s.expr.args;
+      callSpan = s.expr.span;
+      // Salt the spec key with the qualified name so a packaged `foo`
+      // doesn't share its specialization slot with a workspace-level
+      // `foo` of the same shape.
+      specSource = callName;
+    } else {
       throw new UnsupportedConstruct(
         `multi-assign right-hand side must be a user-function call`,
         s.span
       );
     }
-    const fc = s.expr;
-    const callName = fc.name;
+    const fc = { name: callName, args: argExprs, span: callSpan };
     // Validate lvalues up-front.
     for (const lv of s.lvalues) {
       if (lv.type !== "Var" && lv.type !== "Ignore") {
@@ -828,7 +860,7 @@ export class Lowerer {
     const spec = this.specializeUserFunction(
       fnAst,
       argTypes,
-      undefined,
+      specSource,
       fnFile
     );
 

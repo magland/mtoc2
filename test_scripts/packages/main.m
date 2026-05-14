@@ -4,6 +4,7 @@ test_pkg_to_pkg_call();
 test_two_packages_same_basename();
 test_pkg_func_handle();
 test_pkg_handle_through_local();
+test_pkg_multi_assign();
 
 function test_basic_pkg_call()
   % pkg.foo lives in +pkg/foo.m
@@ -41,4 +42,13 @@ function test_pkg_handle_through_local()
   h = @pkg.foo;
   g = @(x) h(x) + 1;
   disp(g(4));
+end
+
+function test_pkg_multi_assign()
+  % `[a, b] = pkg.pair(x)` — multi-output assign from a package
+  % function. The AST RHS is a `MethodCall`, not a `FuncCall`; the
+  % lowerer's multi-assign path accepts both shapes.
+  [a, b] = pkg.pair(5);
+  disp(a);
+  disp(b);
 end
