@@ -68,15 +68,18 @@ MTOC2_DEFINE_ELEMWISE_TT_FN(mtoc2_tensor_mod_tt,   mtoc2_mod_real)
 MTOC2_DEFINE_ELEMWISE_TT_FN(mtoc2_tensor_rem_tt,   fmod)
 MTOC2_DEFINE_ELEMWISE_TT_FN(mtoc2_tensor_atan2_tt, atan2)
 MTOC2_DEFINE_ELEMWISE_TT_FN(mtoc2_tensor_hypot_tt, hypot)
+MTOC2_DEFINE_ELEMWISE_TT_FN(mtoc2_tensor_power_tt, pow)
 
 MTOC2_DEFINE_ELEMWISE_TS_FN(mtoc2_tensor_mod_ts,   mtoc2_mod_real)
 MTOC2_DEFINE_ELEMWISE_TS_FN(mtoc2_tensor_rem_ts,   fmod)
 MTOC2_DEFINE_ELEMWISE_TS_FN(mtoc2_tensor_atan2_ts, atan2)
 MTOC2_DEFINE_ELEMWISE_TS_FN(mtoc2_tensor_hypot_ts, hypot)
+MTOC2_DEFINE_ELEMWISE_TS_FN(mtoc2_tensor_power_ts, pow)
 
-/* Non-commutative non-fn ops (mod, rem, atan2) need scalar-first
- * variants. `hypot` is commutative; the builtin emits `_ts` with
- * swapped operands at scalar-OP-tensor sites. */
+/* Non-commutative non-fn ops (mod, rem, atan2, power) need scalar-
+ * first variants. `hypot` is commutative; the builtin emits `_ts`
+ * with swapped operands at scalar-OP-tensor sites. */
 MTOC2_DEFINE_ELEMWISE_ST_FN(mtoc2_tensor_mod_st,   mtoc2_mod_real)
 MTOC2_DEFINE_ELEMWISE_ST_FN(mtoc2_tensor_rem_st,   fmod)
 MTOC2_DEFINE_ELEMWISE_ST_FN(mtoc2_tensor_atan2_st, atan2)
+MTOC2_DEFINE_ELEMWISE_ST_FN(mtoc2_tensor_power_st, pow)

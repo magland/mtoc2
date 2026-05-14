@@ -979,6 +979,8 @@ function emitExpr(e: IRExpr, state: RuntimeState): string {
       useRuntimeByName(state, "mtoc2_tensor_from_matrix");
       return `mtoc2_tensor_from_matrix((double[]){${flat}}, ${rows}, ${cols})`;
     }
+    case "TensorConcat":
+      return emitTensorConcat(e, state);
     case "Var":
       // Tensor Var reads pass the struct by value; downstream context
       // (Assign RHS, user-function call) wraps in copy where needed.
@@ -1268,6 +1270,71 @@ function emitSliceSlotSetup(
     }
   }
   return slotSrc;
+}
+
+/** Emit a `TensorConcat` as a GCC statement-expression: alloc a fresh
+ *  tensor, write every cell into its (statically-known) rectangle of
+ *  the destination, then evaluate to the tensor. Scalar cells write
+ *  a single slot; tensor cells run a nested loop over the cell's
+ *  rectangle copying column-major source data into the destination.
+ *  ANF guarantees every tensor cell is already a `Var`, so reads
+ *  from the cell carry no allocation cost.
+ *
+ *  Mirrors numbl's `catAlongDim` (runtime/tensor-construction.ts:402+)
+ *  output layout — column-major destination, per-cell rectangle. */
+function emitTensorConcat(
+  e: Extract<IRExpr, { kind: "TensorConcat" }>,
+  state: RuntimeState
+): string {
+  useRuntimeByName(state, "mtoc2_tensor_t");
+  useRuntimeByName(state, "mtoc2_tensor_alloc_nd");
+
+  const [totalRows, totalCols] = e.shape;
+  const lines: string[] = [];
+  lines.push(
+    `mtoc2_tensor_t _mtoc2_t = mtoc2_tensor_alloc_nd(2, (long[]){${totalRows}L, ${totalCols}L});`
+  );
+
+  let rowOff = 0;
+  for (let i = 0; i < e.cells.length; i++) {
+    const row = e.cells[i];
+    const cellRows = e.rowHeights[i];
+    let colOff = 0;
+    for (let j = 0; j < row.length; j++) {
+      const cell = row[j];
+      const cellCols = e.cellCols[i][j];
+      const cellStr = emitExpr(cell, state);
+
+      if (cellRows === 1 && cellCols === 1) {
+        // Scalar cell — single slot write. `dst_idx = rowOff + colOff*totalRows`.
+        const dstIdx = `${rowOff}L + ${colOff}L * ${totalRows}L`;
+        lines.push(`_mtoc2_t.real[${dstIdx}] = ${cellStr};`);
+      } else {
+        // Tensor cell — nested column-major copy. cell.real is the
+        // source buffer; ANF has made it a Var, so `cellStr` is a
+        // bare identifier (no allocation cost on every iteration).
+        // The inner loop walks `sr` (source rows) — unit-stride on
+        // source — and the outer `sc` (source cols).
+        lines.push(
+          `for (long _mtoc2_sc = 0; _mtoc2_sc < ${cellCols}L; _mtoc2_sc++) {`
+        );
+        lines.push(
+          `  for (long _mtoc2_sr = 0; _mtoc2_sr < ${cellRows}L; _mtoc2_sr++) {`
+        );
+        const dstIdx = `(${rowOff}L + _mtoc2_sr) + (${colOff}L + _mtoc2_sc) * ${totalRows}L`;
+        const srcIdx = `_mtoc2_sr + _mtoc2_sc * ${cellRows}L`;
+        lines.push(
+          `    _mtoc2_t.real[${dstIdx}] = ${cellStr}.real[${srcIdx}];`
+        );
+        lines.push(`  }`);
+        lines.push(`}`);
+      }
+      colOff += cellCols;
+    }
+    rowOff += cellRows;
+  }
+  lines.push(`_mtoc2_t;`);
+  return `({ ${lines.join(" ")} })`;
 }
 
 /** Emit an `IndexSlice` as a C statement-expression-style block that

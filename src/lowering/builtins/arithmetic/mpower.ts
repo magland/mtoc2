@@ -1,0 +1,33 @@
+/**
+ * `mpower` builtin — backs the `^` binary operator.
+ *
+ * v1 supports only the scalar-on-both-sides case (which delegates to
+ * `power`, the `.^` builtin). Matrix power on a square base would
+ * require eigendecomposition for non-integer exponents and repeated
+ * `mtimes` for integer exponents — a real slope of its own. Numbl's
+ * `mPow` (helpers/arithmetic.ts:1006) is the reference; we punt on it
+ * entirely for now.
+ */
+
+import { UnsupportedConstruct } from "../../errors.js";
+import { isMultiElement } from "../../types.js";
+import type { Builtin } from "../registry.js";
+import { power } from "./power.js";
+
+export const mpower: Builtin = {
+  name: "mpower",
+  arity: 2,
+  transfer(argTypes, span) {
+    if (isMultiElement(argTypes[0]) || isMultiElement(argTypes[1])) {
+      throw new UnsupportedConstruct(
+        `'^' on matrices (matrix power) is not yet supported; use '.^' for elementwise power`,
+        span
+      );
+    }
+    return power.transfer(argTypes, span);
+  },
+  codegenC(argsC, argTypes) {
+    return power.codegenC(argsC, argTypes);
+  },
+  runtimeDeps: power.runtimeDeps,
+};

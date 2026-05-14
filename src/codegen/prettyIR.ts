@@ -113,6 +113,10 @@ export function irExprToString(e: IRExpr): string {
       }
       return `[${rowsOut.join("; ")}]`;
     }
+    case "TensorConcat": {
+      const rowsOut = e.cells.map(row => row.map(irExprToString).join(" "));
+      return `[${rowsOut.join("; ")}]`;
+    }
     case "HandleLit":
       if (e.ty.kind === "Handle") {
         if (e.captures.length === 0) return `@${e.ty.targetName}`;

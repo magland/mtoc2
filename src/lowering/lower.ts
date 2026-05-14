@@ -441,6 +441,13 @@ export class Lowerer {
             this.anfRequireScalarOrVar(el, hoists)
           ),
         };
+      case "TensorConcat":
+        return {
+          ...e,
+          cells: e.cells.map(row =>
+            row.map(cell => this.anfRequireScalarOrVar(cell, hoists))
+          ),
+        };
       case "Binary":
         return {
           ...e,
@@ -1674,15 +1681,33 @@ export class Lowerer {
     );
   }
 
-  /** Lower an AST `Tensor` node (`[1 2; 3 4]`) to a TensorBuild IR node.
-   *  The shape is statically known; each cell becomes an IRExpr (a
-   *  NumLit for literal cells, Var / Binary / ... for computed cells).
-   *  Layout is column-major to match numbl's RuntimeTensor.data.
+  /** Lower an AST `Tensor` node (`[1 2; 3 4]`, `[a, b; c, d]`, `[v]`, etc.).
    *
-   *  Special case: a 1×1 tensor literal `[x]` is the same as `x` in
-   *  MATLAB (both are scalars). The lowerer returns the inner scalar
-   *  expression directly so the C-side variable type stays a bare
-   *  `double` rather than an `mtoc2_tensor_t`. */
+   *  Two code paths share this entry:
+   *
+   *  - **All-scalar cells** (fast path) — every cell is a scalar real
+   *    numeric. We emit `TensorBuild` with a flat column-major
+   *    `elements` array, exactly as before; `mtoc2_tensor_from_row` /
+   *    `mtoc2_tensor_from_matrix` handle codegen.
+   *
+   *  - **Mixed cells** (concat path) — at least one cell is a multi-
+   *    element tensor. We compute per-row horzcat and across-row
+   *    vertcat shapes statically, build a `TensorConcat` IR node, and
+   *    codegen emits an alloc + per-cell block copies. Mirrors numbl's
+   *    `catAlongDim` (`runtime/tensor-construction.ts:402+`).
+   *
+   *  Numbl semantics carried through:
+   *    - Empty cells (any axis 0) are dropped. `[zeros(0,1), [1 2 3]]`
+   *      produces `[1 2 3]`, not a shape error.
+   *    - Rows with no surviving cells are dropped.
+   *    - Singleton `[x]` (one cell, whether scalar or tensor) returns
+   *      the inner expression unchanged — matches MATLAB.
+   *    - Result shape is statically resolved at lowering; mismatched
+   *      shapes are caught with span-attributed errors.
+   *
+   *  ND cells (`dims.length > 2`), complex cells, and non-numeric
+   *  cells are rejected.
+   */
   private lowerTensorLit(e: Extract<Expr, { type: "Tensor" }>): IRExpr {
     if (e.rows.length === 0) {
       // Empty `[]`. Numbl uses an empty 0×0 tensor — we mirror.
@@ -1694,72 +1719,272 @@ export class Lowerer {
         span: e.span,
       };
     }
-    const rows = e.rows.length;
-    const cols0 = e.rows[0].length;
+
+    // Phase 1 — lower every cell and classify its shape.
+    //   - scalar: kind=scalar, value carries the scalar IRExpr.
+    //   - tensor: kind=tensor, rows/cols carry the cell's static shape.
+    //   - empty:  kind=empty, contributes nothing (dropped below).
+    type Cell =
+      | { kind: "scalar"; expr: IRExpr; ty: NumericType }
+      | {
+          kind: "tensor";
+          expr: IRExpr;
+          ty: NumericType;
+          rows: number;
+          cols: number;
+        }
+      | { kind: "empty"; ty: NumericType };
+    const grid: Cell[][] = [];
+    let anyTensor = false;
     for (const row of e.rows) {
-      if (row.length !== cols0) {
-        throw new UnsupportedConstruct(
-          `tensor rows must have the same number of columns`,
+      const out: Cell[] = [];
+      for (const cell of row) {
+        const lowered = this.lowerExpr(cell);
+        const ty = lowered.ty;
+        if (!isNumeric(ty) || ty.isComplex) {
+          throw new UnsupportedConstruct(
+            `bracket literal cell must be a real numeric scalar or tensor (got ${typeToString(ty)})`,
+            cell.span
+          );
+        }
+        if (ty.elem !== "double" && ty.elem !== "logical") {
+          throw new UnsupportedConstruct(
+            `bracket literal cell must be a real double or logical (got ${ty.elem})`,
+            cell.span
+          );
+        }
+        if (ty.dims.length > 2) {
+          throw new UnsupportedConstruct(
+            `bracket concatenation requires 2-D cells (got a rank-${ty.dims.length} tensor); use 'cat'/'permute' for higher-rank inputs`,
+            cell.span
+          );
+        }
+        if (isScalarRealNumeric(ty)) {
+          out.push({ kind: "scalar", expr: lowered, ty });
+          continue;
+        }
+        // Tensor cell — must have a statically-known 2-D shape.
+        if (ty.shape === undefined || ty.shape.length !== 2) {
+          throw new UnsupportedConstruct(
+            `bracket concatenation requires statically-known cell shapes (got ${typeToString(ty)})`,
+            cell.span
+          );
+        }
+        const [cr, cc] = ty.shape;
+        if (cr === 0 || cc === 0) {
+          out.push({ kind: "empty", ty });
+          continue;
+        }
+        anyTensor = true;
+        out.push({ kind: "tensor", expr: lowered, ty, rows: cr, cols: cc });
+      }
+      grid.push(out);
+    }
+
+    // All-scalar fast path — preserve the existing TensorBuild shape
+    // and codegen.
+    if (!anyTensor && grid.every(r => r.every(c => c.kind === "scalar"))) {
+      // Uniform row width is required for the scalar grid.
+      const rows = grid.length;
+      const cols0 = grid[0].length;
+      for (const r of grid) {
+        if (r.length !== cols0) {
+          throw new TypeError(
+            `bracket horzcat row-count mismatch: row 1 has ${cols0} cells, ` +
+              `another row has ${r.length}`,
+            e.span
+          );
+        }
+      }
+      const cols = cols0;
+      const total = rows * cols;
+      const loweredFlat: IRExpr[] = new Array(total);
+      for (let r = 0; r < rows; r++) {
+        for (let c = 0; c < cols; c++) {
+          const cell = grid[r][c];
+          if (cell.kind !== "scalar") {
+            throw new Error(
+              "internal: unexpected non-scalar in scalar fast path"
+            );
+          }
+          loweredFlat[c * rows + r] = cell.expr;
+        }
+      }
+      if (rows === 1 && cols === 1) {
+        return loweredFlat[0];
+      }
+      let exactData: Float64Array | undefined;
+      if (total <= EXACT_ARRAY_MAX_ELEMENTS) {
+        const data = new Float64Array(total);
+        let allExact = true;
+        for (let i = 0; i < total; i++) {
+          const v = exactDouble(loweredFlat[i].ty);
+          if (v === undefined) {
+            allExact = false;
+            break;
+          }
+          data[i] = v;
+        }
+        if (allExact) exactData = data;
+      }
+      const ty = tensorDouble([rows, cols], exactData);
+      return {
+        kind: "TensorBuild",
+        elements: loweredFlat,
+        shape: [rows, cols],
+        ty,
+        span: e.span,
+      };
+    }
+
+    // Concat path. Compute per-row horzcat shapes, then vertcat.
+    //
+    // For each row, drop empty cells. The row's height is the unique
+    // non-empty cell's `rows` (validated against neighbors). The row's
+    // width is the sum of non-empty cells' `cols`. A row with no
+    // non-empty cells contributes nothing to the vertcat.
+    type NonEmptyCell = Exclude<Cell, { kind: "empty" }>;
+    const rowsRetained: NonEmptyCell[][] = [];
+    const rowHeights: number[] = [];
+    const rowWidths: number[] = [];
+    const cellCols: number[][] = [];
+    for (let i = 0; i < grid.length; i++) {
+      const row = grid[i];
+      const keptCells: NonEmptyCell[] = [];
+      const keptCols: number[] = [];
+      let height: number | null = null;
+      let width = 0;
+      for (let j = 0; j < row.length; j++) {
+        const cell = row[j];
+        if (cell.kind === "empty") continue;
+        const h = cell.kind === "scalar" ? 1 : cell.rows;
+        const w = cell.kind === "scalar" ? 1 : cell.cols;
+        if (height === null) height = h;
+        else if (height !== h) {
+          throw new TypeError(
+            `bracket horzcat row-height mismatch: cell ${j + 1} on row ${i + 1} ` +
+              `has ${h} row(s) but a neighbor in the same row has ${height}`,
+            e.rows[i][j].span
+          );
+        }
+        keptCells.push(cell);
+        keptCols.push(w);
+        width += w;
+      }
+      if (height === null) continue; // entire row was empty — drop it
+      rowsRetained.push(keptCells);
+      rowHeights.push(height);
+      rowWidths.push(width);
+      cellCols.push(keptCols);
+    }
+
+    // If every row was dropped, the result is the empty 0×0 placeholder.
+    if (rowsRetained.length === 0) {
+      return {
+        kind: "TensorBuild",
+        elements: [],
+        shape: [0, 0],
+        ty: tensorDouble([0, 0]),
+        span: e.span,
+      };
+    }
+
+    // All retained rows must have the same width.
+    const width = rowWidths[0];
+    for (let i = 1; i < rowWidths.length; i++) {
+      if (rowWidths[i] !== width) {
+        throw new TypeError(
+          `bracket vertcat column-count mismatch: row 1 has ${width} column(s), ` +
+            `row ${i + 1} has ${rowWidths[i]}`,
           e.span
         );
       }
     }
-    const cols = cols0;
-    const total = rows * cols;
+    const totalRows = rowHeights.reduce((p, q) => p + q, 0);
+    const totalCols = width;
 
-    // Lower every element first. Column-major storage: index = c*rows + r.
-    const loweredFlat: IRExpr[] = new Array(total);
-    for (let r = 0; r < rows; r++) {
-      for (let c = 0; c < cols; c++) {
-        const lowered = this.lowerExpr(e.rows[r][c]);
-        if (!isScalarRealNumeric(lowered.ty)) {
-          throw new UnsupportedConstruct(
-            `tensor literal element must be scalar real numeric`,
-            e.rows[r][c].span
-          );
-        }
-        loweredFlat[c * rows + r] = lowered;
-      }
+    // Singleton case: one cell total, no concat needed — return the
+    // cell's lowered IR unchanged. Matches MATLAB's `[v] === v`
+    // (whether v is scalar or tensor).
+    if (rowsRetained.length === 1 && rowsRetained[0].length === 1) {
+      const only = rowsRetained[0][0];
+      return only.expr;
     }
 
-    if (rows === 1 && cols === 1) {
-      return loweredFlat[0];
-    }
+    // ANF the tensor cells so each is a Var. Scalar cells stay
+    // inline. The hoist sites flow up via the Lowerer's normal
+    // ANF machinery — but at this point we're returning a single
+    // expression. The standard ANF rewrite in `anfChildren` will
+    // catch our TensorConcat (it's owned-producing) and recurse
+    // through `cells` with `anfRequireScalarOrVar`, which will
+    // hoist any tensor-typed non-Var cells. So we can just hand off
+    // raw cells here — they'll be hoisted by the time codegen sees
+    // them.
+    const cellsIR: IRExpr[][] = rowsRetained.map(row => row.map(c => c.expr));
 
-    // Propagate `exact` when every element has a known scalar number
-    // value AND the total fits the exact-array cap. The runtime
-    // helper still materializes the tensor (per the always-
-    // materialize invariant), but downstream type-system consumers
-    // can fold against the static data:
-    //   - `reshape`'s Form B dim-vector path reads the literal's
-    //     exact data to compute the static result shape.
-    //   - `sqrt([0 1 4 9])` passes its domain check because
-    //     `tensorDouble(shape, exact)` derives `sign:"nonneg"` from
-    //     the exact data.
-    //   - `sum` of a literal can fold to a constant.
+    // Try exact-fold. Every cell must be exact; total elements must
+    // fit the cap. Each cell's exact data is column-major and
+    // contiguous; we walk the destination's column-major slots.
     let exactData: Float64Array | undefined;
+    const total = totalRows * totalCols;
     if (total <= EXACT_ARRAY_MAX_ELEMENTS) {
       const data = new Float64Array(total);
       let allExact = true;
-      for (let i = 0; i < total; i++) {
-        const v = exactDouble(loweredFlat[i].ty);
-        if (v === undefined) {
-          allExact = false;
-          break;
+      let rowOff = 0;
+      for (let i = 0; i < rowsRetained.length && allExact; i++) {
+        const row = rowsRetained[i];
+        let colOff = 0;
+        for (let j = 0; j < row.length && allExact; j++) {
+          const cell = row[j];
+          const cellRows = cellRowsOf(cell);
+          const cellCols_ = cellColsOf(cell);
+          if (cell.kind === "scalar") {
+            const v = exactDouble(cell.ty);
+            if (v === undefined) {
+              allExact = false;
+              break;
+            }
+            const dstIdx = rowOff + colOff * totalRows;
+            data[dstIdx] = v;
+          } else {
+            // tensor cell — must have exact buffer
+            const src = cell.ty.exact;
+            if (!(src instanceof Float64Array)) {
+              allExact = false;
+              break;
+            }
+            for (let sc = 0; sc < cellCols_; sc++) {
+              for (let sr = 0; sr < cellRows; sr++) {
+                const dstIdx = rowOff + sr + (colOff + sc) * totalRows;
+                const srcIdx = sr + sc * cellRows;
+                data[dstIdx] = src[srcIdx];
+              }
+            }
+          }
+          colOff += cellCols_;
         }
-        data[i] = v;
+        rowOff += rowHeights[i];
       }
       if (allExact) exactData = data;
     }
 
-    const ty = tensorDouble([rows, cols], exactData);
+    const resultTy = tensorDouble([totalRows, totalCols], exactData);
     return {
-      kind: "TensorBuild",
-      elements: loweredFlat,
-      shape: [rows, cols],
-      ty,
+      kind: "TensorConcat",
+      cells: cellsIR,
+      rowHeights,
+      cellCols,
+      shape: [totalRows, totalCols],
+      ty: resultTy,
       span: e.span,
     };
+
+    function cellRowsOf(c: NonEmptyCell): number {
+      return c.kind === "scalar" ? 1 : c.rows;
+    }
+    function cellColsOf(c: NonEmptyCell): number {
+      return c.kind === "scalar" ? 1 : c.cols;
+    }
   }
 
   private lowerBinary(e: Extract<Expr, { type: "Binary" }>): IRExpr {

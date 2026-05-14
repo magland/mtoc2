@@ -21,6 +21,11 @@ export function forEachSubExpr(e: IRExpr, visit: (sub: IRExpr) => void): void {
     case "TensorBuild":
       for (const el of e.elements) forEachSubExpr(el, visit);
       return;
+    case "TensorConcat":
+      for (const row of e.cells) {
+        for (const cell of row) forEachSubExpr(cell, visit);
+      }
+      return;
     case "Binary":
       forEachSubExpr(e.left, visit);
       forEachSubExpr(e.right, visit);

@@ -21,6 +21,8 @@ import { rdivide } from "./arithmetic/rdivide.js";
 import { mtimes } from "./arithmetic/mtimes.js";
 import { mrdivide } from "./arithmetic/mrdivide.js";
 import { uminus } from "./arithmetic/uminus.js";
+import { power } from "./arithmetic/power.js";
+import { mpower } from "./arithmetic/mpower.js";
 import { eq } from "./compare/eq.js";
 import { ne } from "./compare/ne.js";
 import { lt } from "./compare/lt.js";
@@ -40,6 +42,7 @@ import { all } from "./reduction/all.js";
 import { zeros } from "./shape/zeros.js";
 import { ones } from "./shape/ones.js";
 import { reshape } from "./shape/reshape.js";
+import { transpose } from "./shape/transpose.js";
 import { tic } from "./system/tic.js";
 import { toc } from "./system/toc.js";
 import { cos } from "./math/cos.js";
@@ -62,6 +65,9 @@ import { rem } from "./math/rem.js";
 import { atan2 } from "./math/atan2.js";
 import { hypot } from "./math/hypot.js";
 import { pi, eps, Inf, inf, NaNBuiltin, nan } from "./math/constants.js";
+import { notBuiltin } from "./logical/not.js";
+import { oror } from "./logical/oror.js";
+import { andand } from "./logical/andand.js";
 
 for (const b of [
   plus,
@@ -71,6 +77,8 @@ for (const b of [
   mtimes,
   mrdivide,
   uminus,
+  power,
+  mpower,
   eq,
   ne,
   lt,
@@ -90,6 +98,7 @@ for (const b of [
   zeros,
   ones,
   reshape,
+  transpose,
   tic,
   toc,
   cos,
@@ -117,6 +126,9 @@ for (const b of [
   inf,
   NaNBuiltin,
   nan,
+  notBuiltin,
+  oror,
+  andand,
 ]) {
   registerBuiltin(b);
 }
@@ -190,6 +202,14 @@ export function binaryOpBuiltin(op: BinaryOperation, span: Span): string {
       return "gt";
     case BinaryOperation.GreaterEqual:
       return "ge";
+    case BinaryOperation.OrOr:
+      return "oror";
+    case BinaryOperation.AndAnd:
+      return "andand";
+    case BinaryOperation.Pow:
+      return "mpower";
+    case BinaryOperation.ElemPow:
+      return "power";
     default:
       // The remaining BinaryOperation cases (Pow / ElemPow / LeftDiv /
       // ElemLeftDiv / OrOr / AndAnd / BitOr / BitAnd) are valid numbl
@@ -210,6 +230,13 @@ export function unaryOpBuiltin(op: UnaryOperation, span: Span): string {
       return "uminus";
     case UnaryOperation.Plus:
       return "uplus";
+    case UnaryOperation.Transpose:
+    case UnaryOperation.NonConjugateTranspose:
+      // For real-typed inputs (mtoc2 v1) `.'` and `'` are identical.
+      // When complex lands, `'` will route to a separate `ctranspose`.
+      return "transpose";
+    case UnaryOperation.Not:
+      return "not";
     default:
       throw new UnsupportedConstruct(
         `unary operator '${unaryOpSurface(op)}' is not yet supported`,

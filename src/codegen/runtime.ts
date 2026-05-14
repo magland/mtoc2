@@ -146,6 +146,21 @@ const REGISTRY: ReadonlyMap<string, RuntimeSnippet> = new Map<
     "mtoc2_reshape_nd",
     loadSnippet("tensor_reshape_nd.h", ["mtoc2_tensor_alloc_nd"]),
   ],
+  // 2-D non-conjugate transpose. The `.'` and `'` unary operators
+  // both map here (the conjugate variant matters only for complex
+  // tensors, which mtoc2 doesn't yet have).
+  [
+    "mtoc2_tensor_transpose",
+    loadSnippet("tensor_transpose.h", ["mtoc2_tensor_t", "mtoc2_alloc"]),
+  ],
+  // Elementwise logical ops on real tensors. `~` (unary not) is the
+  // only resident today; `|` / `&` will share the same snippet when
+  // they land. Result tensors are logical-typed; the storage is still
+  // `double` (the type system carries the logical flag).
+  [
+    "mtoc2_tensor_logical_real",
+    loadSnippet("tensor_logical_real.h", ["mtoc2_tensor_t", "mtoc2_alloc"]),
+  ],
   [
     "mtoc2_disp_tensor",
     loadSnippet("disp_tensor.h", ["mtoc2_tensor_t", "mtoc2_format_double"]),

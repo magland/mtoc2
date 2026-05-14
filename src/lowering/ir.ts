@@ -206,6 +206,36 @@ export interface EndRef {
   span: Span;
 }
 
+/** Bracket concatenation `[a, b; c, d]` where one or more cells is a
+ *  multi-element tensor (not just a scalar). The all-scalar case
+ *  stays on `TensorBuild` for the existing fast-path emission.
+ *
+ *  Layout discipline (column-major destination throughout):
+ *  - `cells` is a list of rows; each row is a list of cells in source
+ *    order. After lowering, every cell is either a scalar real
+ *    numeric or a multi-element tensor `Var` (ANF hoists owned-
+ *    producing non-Var cells to temps first).
+ *  - `rowHeights[i]` is the row count of every cell in row `i` (rows
+ *    are vertically aligned).
+ *  - `cellCols[i][j]` is the column count of cell `j` in row `i`
+ *    (cells horizontally concatenate along the row).
+ *  - The result's shape `[totalRows, totalCols]` is statically known.
+ *
+ *  Empty cells (any cell whose shape contains a 0) are filtered out
+ *  during lowering — they evaporate per numbl's `catAlongDim` rule.
+ *  The cell grid here only contains cells whose product is positive.
+ *
+ *  Owned producer. Same ANF discipline as `TensorBuild`. */
+export interface TensorConcat {
+  kind: "TensorConcat";
+  cells: IRExpr[][];
+  rowHeights: number[];
+  cellCols: number[][];
+  shape: number[];
+  ty: Type;
+  span: Span;
+}
+
 /** Range used as a value (outside index slots and for-loop bounds).
  *  Emits a freshly-allocated `1×N` row tensor at runtime via
  *  `mtoc2_tensor_make_range`. Owned producer; ANFs. The `step` may
@@ -225,6 +255,7 @@ export type IRExpr =
   | NumLit
   | StringLit
   | TensorBuild
+  | TensorConcat
   | Var
   | Binary
   | Unary
