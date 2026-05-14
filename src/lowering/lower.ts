@@ -52,6 +52,7 @@ import {
   tensorDouble,
   classType,
   signFromNumber,
+  unifySign,
   isScalarRealNumeric,
   isMultiOutputSlotType,
   isMultiElement,
@@ -1215,18 +1216,15 @@ export class Lowerer {
     }
 
     const envBefore = new Map(this.env);
-    // Loop var is widened to non-exact (could take many values).
-    const loopVarSign =
-      step > 0 ? "positive" : step < 0 ? "negative" : "unknown";
-    // (Conservatively, k could be 0 for `0:N` — but for MVP "positive"
-    // is fine when both start>=1 and step>0; otherwise widen.)
+    // Loop var sign: the values are start, start+step, ..., end, so the
+    // sign lattice must cover every value in [min(start,end),
+    // max(start,end)]. Unifying startSign and endSign captures that —
+    // it correctly classifies a descending loop with positive bounds
+    // (`10:-1:1`) as "positive", an ascending loop with negative
+    // bounds as "negative", and a range spanning zero as "unknown".
     const startSign = isNumeric(start.ty) ? start.ty.sign : "unknown";
-    let kSign: NumericType["sign"] = "unknown";
-    if (step > 0 && startSign === "positive") kSign = "positive";
-    else if (step > 0 && (startSign === "nonneg" || startSign === "zero"))
-      kSign = "nonneg";
-    else if (step < 0 && startSign === "negative") kSign = "negative";
-    else kSign = loopVarSign;
+    const endSign = isNumeric(end.ty) ? end.ty.sign : "unknown";
+    const kSign: NumericType["sign"] = unifySign(startSign, endSign);
 
     const cVar = cIdentForUserName(s.varName);
     this.env.set(s.varName, {
