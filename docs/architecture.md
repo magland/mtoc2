@@ -198,18 +198,19 @@ one typedef per canonical shape, both use the same IR nodes
 (`StructLit`, `MemberLoad`, `MemberStore`).
 
 **Structs.** The lowerer recognizes a bare `struct(...)` FuncCall
-and builds a `StructLit` whose `ty` is a fresh `StructType`. Each
-field value's type is normalized through `widenForStorage` (drop
-exact, drop sign) before being recorded so different exact-value
-writes don't shard the typedef. v1 requires the `struct(...)`
-literal to introduce a struct — a bare `s.x = v` on an undefined
-`s` is rejected with a clear span-carrying error. Field reads
-(`s.f`) lower to `MemberLoad`; field writes including chained
-paths (`s.inner.f = v`) lower to a single `MemberStore` with the
-field path baked in. The path's leaf type must be
-`storageEquivalent` to the rhs (scalar-vs-multi-element distinction
-is enforced, but `sign`/`exact`/specific shape differences are
-fine).
+and builds a `StructLit` whose `ty` is a fresh `StructType` whose
+field types are the precise types of the supplied values. v1
+requires the `struct(...)` literal to introduce a struct — a bare
+`s.x = v` on an undefined `s` is rejected with a clear span-
+carrying error. Field reads (`s.f`) lower to `MemberLoad`; field
+writes including chained paths (`s.inner.f = v`) lower to a single
+`MemberStore` with the field path baked in. The path's leaf type
+and rhs must satisfy `storageEquivalent` — both reduce to the same
+C-type string via `cFieldTypeStr`, which collapses sign / exact /
+tensor-shape differences. After a write, env's struct-typed
+variable refreshes via `withPathTypeUpdated` so subsequent reads of
+the field see the rhs's full internal type; the C typedef is
+unaffected because its hash depends only on `cFieldTypeStr`.
 
 **Classes.** `Stmt.ClassDef` is collected up front by
 `collectClassDefs` (`src/lowering/classDefs.ts`) into a registry
@@ -217,7 +218,9 @@ keyed by class name. Each registration carries:
 
 - a `ClassType` whose properties come from the `properties` block
   defaults (each typed by a shallow inference accepting numeric
-  literals, signed numerics, and tensor literals);
+  literals, signed numerics, and tensor literals — precise types
+  carry through to the property type, since `cFieldTypeStr`-based
+  typedef hashing makes the precision free at the C level);
 - the property-default expressions, used to synthesize the
   initial receiver at every constructor call site;
 - the constructor (a method named after the class) and the other
