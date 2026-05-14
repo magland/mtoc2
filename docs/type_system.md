@@ -300,6 +300,24 @@ s == 0` branch by accident.
 `TryCatch` so a deeply-nested mutation still triggers stripping at
 the loop's top.
 
+### 3. Indexed writes widen the base's `sign`
+
+A second stale-lattice trap: `x = zeros(1, 5)` enters env with
+`sign = nonneg` (derived from the exact zero data), and an `x(3) =
+-10` indexed write leaves the type's `sign` lattice unchanged even
+though the runtime tensor now contains a negative element. Without
+widening, a downstream `sqrt(x)` slips past `requireDomain` and
+the emitted C silently produces `NaN` for that element, diverging
+from numbl's complex result.
+
+`widenAfterIndexedWrite` (in `types.ts`) handles this: after every
+`IndexStore` / `IndexSliceStore` lowering, it drops the base's
+`exact` and runs `unifySign(currentSign, rhsSign)`. Same-sign rhs
+(e.g. `x(3) = 4` after `zeros(...)`) keeps the lattice tight;
+opposite-sign or unknown rhs widens to `unknown`. The same hook
+also clears `exact` on String env entries and recursively widens
+nested struct/class fields via `withoutExact`.
+
 ## Specialization keys
 
 Function calls specialize per (canonicalized) input-type tuple.

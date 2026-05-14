@@ -43,6 +43,7 @@ import { offsetToLineCol } from "../parser/sourceLoc.js";
 import { UnsupportedConstruct, TypeError } from "./errors.js";
 import {
   type Type,
+  type Sign,
   type NumericType,
   type HandleType,
   type HandleCapture,
@@ -70,6 +71,7 @@ import {
   unify,
   storageEquivalent,
   stripExactFromEnv,
+  widenAfterIndexedWrite,
   withoutExact,
   canonicalizeType,
   classMethodSpecSource,
@@ -652,14 +654,16 @@ export class Lowerer {
         : lowerIndexStore.call(this, lv, s.expr, s.span);
       // The runtime tensor was mutated in place, but the env entry
       // for the base variable still carries the pre-write `exact`
-      // (set by e.g. `zeros(N,M)` at construction). Subsequent
-      // transfer fns (sum, etc.) and the if-cond folder would read
-      // the stale exact and silently mis-emit. Drop exact on every
-      // indexed write so the env reflects the post-write reality.
+      // and `sign` (set by e.g. `zeros(N,M)` at construction).
+      // Subsequent transfer fns (sum, etc.), domain checks (sqrt /
+      // log), and the if-cond folder would read those stale fields
+      // and silently mis-emit. Drop `exact` and widen `sign` toward
+      // the rhs sign so the env reflects the post-write reality.
       // Both lower helpers above require lv.base to be an Ident, so
       // pulling its name here is safe.
       if (lv.base.type === "Ident") {
-        stripExactFromEnv(this.env, [lv.base.name]);
+        const rhsSign = rhsSignFromStoreResult(result);
+        widenAfterIndexedWrite(this.env, lv.base.name, rhsSign);
       }
       return result;
     }
@@ -3409,6 +3413,18 @@ function stripQuotes(s: string): string {
 
 /** Walk a stmt-tree and collect names of LHS targets (Assign, MultiAssign,
  *  For loop vars). Used to widen loop-body-mutated env entries to non-exact. */
+/** Extract the rhs sign from an IndexStore / IndexSliceStore result so
+ *  `widenAfterIndexedWrite` can unify it into the base's lattice sign.
+ *  The store is always the last stmt in the result (lowerIndexSliceStore
+ *  may prepend hoists). */
+function rhsSignFromStoreResult(result: IRStmt | IRStmt[]): Sign {
+  const last = Array.isArray(result) ? result[result.length - 1] : result;
+  if (last.kind !== "IndexStore" && last.kind !== "IndexSliceStore") {
+    return "unknown";
+  }
+  return isNumeric(last.rhs.ty) ? last.rhs.ty.sign : "unknown";
+}
+
 function collectAssignedNames(stmts: Stmt[]): Set<string> {
   const out = new Set<string>();
   const walk = (ss: Stmt[]): void => {

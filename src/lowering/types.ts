@@ -531,6 +531,43 @@ export function stripExactFromEnv(
   }
 }
 
+/** Drop `exact` and widen `sign` toward the rhs sign on the named
+ *  entry. Called after an indexed write (`x(i) = rhs`, `x(:) = rhs`, …)
+ *  where the rhs is general enough that we can't carry the pre-write
+ *  sign forward unchanged.
+ *
+ *  Without this, e.g. `x = zeros(1, 5); x(3) = -10; sqrt(x)` would slip
+ *  past `sqrt`'s `requireDomain` check because the env still claims
+ *  `sign = nonneg`. We use `unifySign(current, rhsSign)` so a same-sign
+ *  rhs (e.g. `x(3) = 4` after `zeros(...)`) doesn't unnecessarily
+ *  collapse the lattice — the new sign covers both the surviving
+ *  pre-write elements and the just-written one.
+ *
+ *  `rhsSign` defaults to `"unknown"` for callers that don't have a
+ *  rhs to inspect (slice writes from an opaque source, etc.). */
+export function widenAfterIndexedWrite(
+  env: Map<string, { cName: string; ty: Type }>,
+  name: string,
+  rhsSign: Sign = "unknown"
+): void {
+  const e = env.get(name);
+  if (e === undefined) return;
+  if (e.ty.kind === "Numeric") {
+    const t = e.ty;
+    const newSign = unifySign(t.sign, rhsSign);
+    if (t.exact !== undefined || t.sign !== newSign) {
+      env.set(name, {
+        cName: e.cName,
+        ty: { ...t, exact: undefined, sign: newSign },
+      });
+    }
+  } else if (e.ty.kind === "String" && e.ty.exact !== undefined) {
+    env.set(name, { cName: e.cName, ty: { kind: "String" } });
+  } else if (e.ty.kind === "Struct" || e.ty.kind === "Class") {
+    env.set(name, { cName: e.cName, ty: withoutExact(e.ty) });
+  }
+}
+
 export function withoutExact(t: Type): Type {
   if (t.kind === "Numeric" && t.exact !== undefined) {
     const { exact: _e, ...rest } = t;
