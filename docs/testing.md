@@ -29,8 +29,10 @@ multifile workspace tests can coexist without polluting each other:
 - `test_scripts/<subdir>/main.m` — each subdirectory is a multifile
   test group. `main.m` is the entry; every other `.m` in the
   subdirectory is a workspace sibling (auto-picked up by the CLI's
-  `scanSiblings`). The walker does NOT treat sibling files in a
-  subdir as standalone entries.
+  `scanSiblings`, which descends recursively into `+pkg/` and
+  `@Class/` directories). The walker does NOT treat sibling files in
+  a subdir as standalone entries — including files inside `+pkg/`
+  subdirs.
 
 Each script should:
 

@@ -118,18 +118,33 @@ mtoc2 is a _static_ translator. Anything outside the supported subset raises
   a function name, a workspace `classdef`, etc.) are resolved through
   numbl's `resolveFunction` directly — see
   [src/workspace/workspace.ts](src/workspace/workspace.ts). The CLI
-  scans `dirname(entry)` for sibling `.m`s; the web IDE passes flat
-  file names. MATLAB precedence rules (local-to-main beats workspace
-  beats builtin) are inherited from numbl rather than reimplemented.
+  walks the entry's directory recursively, descending only into
+  `+pkg/` namespace dirs and `@Class/` class dirs; the web IDE passes
+  flat file names. MATLAB precedence rules (local-to-main beats
+  workspace beats builtin) are inherited from numbl rather than
+  reimplemented.
+- **Package functions** — `+pkg/foo.m` registers as the qualified
+  workspace function `pkg.foo`; nested `+pkg/+sub/foo.m` →
+  `pkg.sub.foo`. Call sites `pkg.foo(args)` and `pkg.sub.foo(args)`
+  parse as `MethodCall` AST nodes; `lowerMethodCall` extracts the
+  dotted chain (via `tryExtractDottedName`), confirms the leftmost
+  segment isn't an in-scope variable (MATLAB env-shadow rule), and
+  routes the qualified name through `workspace.resolve` — exactly
+  the same path as a bare-name workspace function call. The
+  specialization spec source uses the qualified name, so two packages
+  with same-basename functions mangle to distinct readable C names
+  (`pkg_foo__<hex>` vs `other_foo__<hex>`). `@pkg.foo` works as a
+  function handle. `import pkg.foo` / `import pkg.*` statements are
+  not yet supported — calls must be fully qualified.
 
 Not yet supported: matrix multiplication / division, logical / vector-
 of-indices indexing (`a(mask)`, `a(idx_vec)`), member-rooted indexing
 (`obj.r(1, :, :)`, `obj.f(i) = rhs`), indexed-delete (`a(2:5) = []`),
 unknown-shape constructors (`zeros(n)` where `n` is a runtime-only
 scalar), general broadcast (non-scalar mismatched shapes), complex,
-strings, chars, builtin handles, `private/` directories, `+pkg/`
-namespaces, `@Class/` folders, `import` statements, `.numbl.js` user
-functions. Expanding scope is gated by the cross-runner.
+strings, chars, builtin handles, `private/` directories, `@Class/`
+folders, `import` statements, `.numbl.js` user functions. Expanding
+scope is gated by the cross-runner.
 
 ## Docs are part of the change
 
