@@ -35,6 +35,26 @@ import { zeros } from "./shape/zeros.js";
 import { ones } from "./shape/ones.js";
 import { tic } from "./system/tic.js";
 import { toc } from "./system/toc.js";
+import { cos } from "./math/cos.js";
+import { sin } from "./math/sin.js";
+import { tan } from "./math/tan.js";
+import { atan } from "./math/atan.js";
+import { exp } from "./math/exp.js";
+import { abs } from "./math/abs.js";
+import { signBuiltin } from "./math/sign.js";
+import { floor } from "./math/floor.js";
+import { ceil } from "./math/ceil.js";
+import { round } from "./math/round.js";
+import { fix } from "./math/fix.js";
+import { sqrt } from "./math/sqrt.js";
+import { log } from "./math/log.js";
+import { log2 } from "./math/log2.js";
+import { log10 } from "./math/log10.js";
+import { mod } from "./math/mod.js";
+import { rem } from "./math/rem.js";
+import { atan2 } from "./math/atan2.js";
+import { hypot } from "./math/hypot.js";
+import { pi, eps, Inf, inf, NaNBuiltin, nan } from "./math/constants.js";
 
 for (const b of [
   plus,
@@ -58,6 +78,31 @@ for (const b of [
   ones,
   tic,
   toc,
+  cos,
+  sin,
+  tan,
+  atan,
+  exp,
+  abs,
+  signBuiltin,
+  floor,
+  ceil,
+  round,
+  fix,
+  sqrt,
+  log,
+  log2,
+  log10,
+  mod,
+  rem,
+  atan2,
+  hypot,
+  pi,
+  eps,
+  Inf,
+  inf,
+  NaNBuiltin,
+  nan,
 ]) {
   registerBuiltin(b);
 }

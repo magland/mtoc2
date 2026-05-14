@@ -241,6 +241,42 @@ Today's builtins:
   span. Identifier reads of zero-arity builtins like `tic`/`toc`
   are recognized in `lowerIdent` so source forms `tic;`, `t = tic`,
   `t = toc`, and `toc;` all reach the right path.
+- **Elementwise unary math**: `cos`, `sin`, `tan`, `atan`, `exp`,
+  `abs`, `sign`, `floor`, `ceil`, `round`, `fix`, `sqrt`, `log`,
+  `log2`, `log10`. Each is wired by a single
+  [`builtins/math/_unary_real.ts`](../src/lowering/builtins/math/_unary_real.ts)
+  factory (`defineUnaryRealMath`) over the `(cFnReal, jsFn, signRule,
+requireDomain?)` quadruple. Scalar arg → emit `<cFnReal>(arg)`
+  (math headers are in `BASE_HEADERS`); tensor arg → emit
+  `mtoc2_tensor_<name>(arg)` via the shared runtime snippet
+  `mtoc2_tensor_unary_real_math` (one `.h` macro-expanded across
+  every name). Exact-fold runs when the input is exact and the
+  result is finite, mirroring the elementwise binary precedent.
+  `sqrt` rejects inputs whose sign isn't statically nonneg; `log`,
+  `log2`, `log10` reject inputs whose sign isn't statically positive
+  (mtoc2 has no complex type — see followups). `round` uses
+  MATLAB-style half-away-from-zero (C99 `round()` via a thin
+  `mtoc2_round_half_away` wrapper); `sign` uses an explicit
+  `mtoc2_signum` that propagates NaN to match JS `Math.sign`.
+- **Elementwise binary math (function form)**: `mod`, `rem`,
+  `atan2`, `hypot`. Built on a sibling
+  [`defineElemwiseRealBinaryFn`](../src/lowering/builtins/arithmetic/_elemwise.ts)
+  that mirrors the infix-op factory but emits a C function call
+  (`fmod(a,b)`, `atan2(a,b)`, …) for the scalar case. Tensor cases
+  emit `mtoc2_tensor_<name>_{tt,ts,st}` via a sibling snippet
+  `mtoc2_tensor_elemwise_real_fn`. `mod` uses its own
+  `mtoc2_mod_real` (sign-of-`b`) instead of C's `fmod` (sign-of-`a`)
+  to match MATLAB semantics.
+- **Numeric constants**: `pi`, `eps`, `Inf` / `inf`, `NaN` / `nan` —
+  0-arg builtins emitting a C-side literal (`3.141592653589793`,
+  `INFINITY`, `NAN`, …). Both `pi` (bare identifier) and `pi()`
+  (paren form) work — the bare form goes through `lowerIdent`'s
+  0-arity builtin path; the paren form goes through a 0-arity
+  fallback in `lowerFunctionCall` that fires before the workspace
+  resolver (numbl tracks constants in a separate table from its
+  builtin set, so `workspace.resolve("pi", [], …)` returns null
+  even though the source is valid). `e` is intentionally absent —
+  MATLAB and numbl don't define it either (use `exp(1)`).
 
 Operator-to-builtin maps live alongside the registry.
 

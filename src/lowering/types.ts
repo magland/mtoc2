@@ -32,6 +32,38 @@ export function signFromNumber(v: number): Sign {
   return "zero";
 }
 
+/** Derive the sign of a tensor from its exact data. Returns the
+ *  tightest lattice state that holds across every element:
+ *  - all `>0` → `positive`
+ *  - all `<0` → `negative`
+ *  - all `===0` → `zero`
+ *  - mix of `>0` and `==0` → `nonneg`
+ *  - mix of `<0` and `==0` → `nonpositive`
+ *  - mix of `>0` and `<0` (no zeros) → `nonzero`
+ *  - any NaN, or mix of all three (positives, negatives, zeros) → `unknown`.
+ *
+ *  Empty data returns `unknown` (no elements to constrain). */
+export function signFromExactArray(data: Float64Array): Sign {
+  if (data.length === 0) return "unknown";
+  let anyPos = false;
+  let anyNeg = false;
+  let anyZero = false;
+  for (let i = 0; i < data.length; i++) {
+    const v = data[i];
+    if (Number.isNaN(v)) return "unknown";
+    if (v > 0) anyPos = true;
+    else if (v < 0) anyNeg = true;
+    else anyZero = true;
+  }
+  if (anyPos && anyNeg && anyZero) return "unknown";
+  if (anyPos && anyNeg) return "nonzero";
+  if (anyPos && anyZero) return "nonneg";
+  if (anyNeg && anyZero) return "nonpositive";
+  if (anyPos) return "positive";
+  if (anyNeg) return "negative";
+  return "zero";
+}
+
 export function unifySign(a: Sign, b: Sign): Sign {
   if (a === b) return a;
   const s = new Set([a, b]);
@@ -257,7 +289,14 @@ export function tensorDoubleFromDims(dims: DimInfo[]): NumericType {
  *  from `shape` (axis of length 1 → `{kind:"one"}`, else
  *  `{kind:"notOne"}`). When `exact` is provided, its length must equal
  *  the shape's product; the layout is column-major (matching numbl's
- *  `RuntimeTensor.data`). */
+ *  `RuntimeTensor.data`).
+ *
+ *  When `exact` is provided, `sign` is derived from the actual values
+ *  via `signFromExactArray`. This is what lets `sqrt([0 1 4 9])` pass
+ *  the requireDomain check (without it the tensor would carry
+ *  `sign:"unknown"`). For tensors without exact data the caller can
+ *  set `sign` post-construction (e.g. `zeros`/`ones` know their fill
+ *  value even when the result is too large to carry exact data). */
 export function tensorDouble(
   shape: number[],
   exact?: Float64Array
@@ -281,6 +320,7 @@ export function tensorDouble(
       );
     }
     t.exact = exact;
+    t.sign = signFromExactArray(exact);
   }
   return t;
 }

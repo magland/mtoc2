@@ -144,6 +144,25 @@ const REGISTRY: ReadonlyMap<string, RuntimeSnippet> = new Map<
     loadSnippet("tensor_elemwise_real.h", ["mtoc2_tensor_t", "mtoc2_alloc"]),
   ],
 
+  // Elementwise binary functions on real tensors — `mod`, `rem`,
+  // `atan2`, `hypot`. Sibling of `tensor_elemwise_real.h` but the
+  // kernel is `FN(a,b)` instead of `a OP b`. Carried in its own
+  // snippet so the four function builtins activate it independent
+  // of the infix-op set.
+  [
+    "mtoc2_tensor_elemwise_real_fn",
+    loadSnippet("tensor_elemwise_real_fn.h", ["mtoc2_tensor_t", "mtoc2_alloc"]),
+  ],
+
+  // Elementwise unary math on real tensors (`cos`/`sin`/`sqrt`/`abs`/
+  // `log`/…). One shared snippet defines `mtoc2_tensor_<name>` for
+  // every per-name helper; every unary math builtin activates this
+  // single snippet via its runtimeDeps.
+  [
+    "mtoc2_tensor_unary_real_math",
+    loadSnippet("tensor_unary_real_math.h", ["mtoc2_tensor_t", "mtoc2_alloc"]),
+  ],
+
   // ── sum (reduce real tensor to scalar) ────────────────────────────
   ["mtoc2_sum", loadSnippet("sum.h", ["mtoc2_tensor_t"])],
 

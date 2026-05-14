@@ -99,7 +99,9 @@ export function defineShapeConstructor(
       const { shape } = resolveShape(name, argTypes, span);
       const total = shape.reduce((a, b) => a * b, 1);
       // Empty result (any axis 0) keeps the shape but no exact data —
-      // there's no element to put in a Float64Array.
+      // there's no element to put in a Float64Array. Sign stays
+      // "unknown" (vacuously true; empty tensors don't constrain
+      // domain checks anyway).
       if (total === 0) {
         return tensorDouble(shape);
       }
@@ -111,9 +113,15 @@ export function defineShapeConstructor(
       if (total <= EXACT_ARRAY_MAX_ELEMENTS) {
         const data = new Float64Array(total);
         if (fillValue !== 0) data.fill(fillValue);
+        // tensorDouble auto-derives sign from the exact data.
         return tensorDouble(shape, data);
       }
-      return tensorDouble(shape);
+      // Too large to carry exact data, but the fill value is still
+      // known statically. Set the sign explicitly so domain checks
+      // (e.g. `sqrt(zeros(20,20))`) succeed.
+      const t = tensorDouble(shape);
+      t.sign = signFromNumber(fillValue);
+      return t;
     },
     codegenC(_argsC, argTypes) {
       // The transfer step has already verified every arg has a

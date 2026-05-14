@@ -87,6 +87,18 @@ type Type =
 - `sign` is one of `positive | nonneg | negative | nonpositive | zero
 | nonzero | unknown`. Coarser than exact but useful when exact isn't
   available (e.g. `unifySign("positive", "positive") === "positive"`).
+  - On **scalars**, set by the factory (`scalarDouble(sign, exact?)`)
+    or derived via `signFromNumber` at exact-fold sites.
+  - On **tensors**, `tensorDouble(shape, exact?)` auto-derives the
+    sign from the exact data via `signFromExactArray`: a literal like
+    `[0 1 4 9]` carries `nonneg`, `[1 4 9]` carries `positive`, etc.
+    Tensors without exact data inherit `unknown` unless the caller
+    sets sign explicitly — the `zeros`/`ones` shape constructors do
+    this for results too large to carry exact data, so domain checks
+    like `sqrt(zeros(N, N))` succeed at translation time. The
+    `%!numbl:opaque` directive only strips `exact`; the derived
+    `sign` survives, so an opaque'd tensor that started life as
+    `[1 2 3]` is still statically `positive`.
 - `exact` is the precise value, when known. See below.
 
 ### StringType

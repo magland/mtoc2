@@ -76,6 +76,61 @@ export function defineElemwiseRealBinary(
   fold: (a: number, b: number) => number,
   signRule: (a: NumericType, b: NumericType) => Sign
 ): Builtin {
+  return buildElemwiseRealBinary({
+    name,
+    helperBase,
+    commutative,
+    fold,
+    signRule,
+    scalarExpr: (a, b) => `(${a} ${cOp} ${b})`,
+    runtimeDep: "mtoc2_tensor_elemwise_real",
+  });
+}
+
+/** Same as `defineElemwiseRealBinary`, but the scalar path emits a C
+ *  function call (`fmod(a,b)`, `atan2(a,b)`, …) instead of an infix
+ *  operator. The tensor helpers still follow the `_tt`/`_ts`/`_st`
+ *  naming convention; supply the appropriate `runtimeDep` for the
+ *  snippet that defines them (`mtoc2_tensor_elemwise_real_fn`
+ *  covers `mod`/`rem`/`atan2`/`hypot`). */
+export function defineElemwiseRealBinaryFn(opts: {
+  name: string;
+  cFn: string;
+  helperBase: string;
+  commutative: boolean;
+  fold: (a: number, b: number) => number;
+  signRule: (a: NumericType, b: NumericType) => Sign;
+  runtimeDep: string;
+}): Builtin {
+  return buildElemwiseRealBinary({
+    name: opts.name,
+    helperBase: opts.helperBase,
+    commutative: opts.commutative,
+    fold: opts.fold,
+    signRule: opts.signRule,
+    scalarExpr: (a, b) => `${opts.cFn}(${a}, ${b})`,
+    runtimeDep: opts.runtimeDep,
+  });
+}
+
+function buildElemwiseRealBinary(opts: {
+  name: string;
+  helperBase: string;
+  commutative: boolean;
+  fold: (a: number, b: number) => number;
+  signRule: (a: NumericType, b: NumericType) => Sign;
+  scalarExpr: (aC: string, bC: string) => string;
+  runtimeDep: string;
+}): Builtin {
+  const {
+    name,
+    helperBase,
+    commutative,
+    fold,
+    signRule,
+    scalarExpr,
+    runtimeDep,
+  } = opts;
   return {
     name,
     arity: 2,
@@ -126,7 +181,7 @@ export function defineElemwiseRealBinary(
       const aMulti = isMultiElement(argTypes[0]);
       const bMulti = isMultiElement(argTypes[1]);
       if (!aMulti && !bMulti) {
-        return `(${argsC[0]} ${cOp} ${argsC[1]})`;
+        return scalarExpr(argsC[0], argsC[1]);
       }
       if (aMulti && bMulti) {
         return `mtoc2_tensor_${helperBase}_tt(${argsC[0]}, ${argsC[1]})`;
@@ -140,7 +195,7 @@ export function defineElemwiseRealBinary(
       }
       return `mtoc2_tensor_${helperBase}_st(${argsC[0]}, ${argsC[1]})`;
     },
-    runtimeDeps: ["mtoc2_tensor_elemwise_real"],
+    runtimeDeps: [runtimeDep],
   };
 }
 
