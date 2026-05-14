@@ -239,3 +239,22 @@ export function signProd(a: NumericType, b: NumericType): Sign {
   }
   return "unknown";
 }
+
+/** Sign of `a / b`. Almost the same shape as `signProd`, but the
+ *  divisor's sign tells a different story: `x / 0` is ±Inf (or NaN
+ *  when `x` is also 0), NOT zero, so a zero divisor degrades the
+ *  result to `unknown`. A zero numerator with a non-zero divisor is
+ *  zero. */
+export function signQuot(a: NumericType, b: NumericType): Sign {
+  if (b.sign === "zero") return "unknown";
+  if (a.sign === "zero") return "zero";
+  if (a.sign === "positive" && b.sign === "positive") return "positive";
+  if (a.sign === "negative" && b.sign === "negative") return "positive";
+  if (
+    (a.sign === "positive" && b.sign === "negative") ||
+    (a.sign === "negative" && b.sign === "positive")
+  ) {
+    return "negative";
+  }
+  return "unknown";
+}
