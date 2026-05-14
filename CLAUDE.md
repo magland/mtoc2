@@ -62,9 +62,24 @@ mtoc2 is a _static_ translator. Anything outside the supported subset raises
   lowers to a `TensorBuild` IR node (column-major flat array of element
   expressions), materialized at the use-site via `mtoc2_tensor_from_row`
   / `mtoc2_tensor_from_matrix`. (Special case: a 1×1 tensor literal
-  `[x]` lowers to the inner scalar — same as MATLAB.) Rank-N tensors
+  `[x]` lowers to the inner scalar — same as MATLAB.) When every
+  element of a tensor literal is exact and the total fits the
+  exact-array cap, the literal's type carries an `exact: Float64Array`
+  so downstream type-driven folding (e.g. `reshape`'s Form B dim
+  vector, `sum` on a known-data vector) can use it. Rank-N tensors
   (up to `MTOC2_MAX_NDIM = 8`) are constructed via `zeros` / `ones`
   with statically-known dims; bracket syntax stays 2-D-only.
+- **Reshape**: `reshape(A, d1, …, dN)` (Form A) and
+  `reshape(A, [d1, …, dN])` (Form B). Same dim discipline as
+  `zeros`/`ones` — each dim a statically-known finite non-negative
+  integer, 1..`MTOC2_MAX_NDIM` axes total, trailing singletons
+  stripped down to a 2-axis minimum. Element-count check at
+  translate time when the input shape is known; deferred to
+  `mtoc2_reshape_nd` (which aborts on mismatch) when not. Output
+  type carries the same `exact: Float64Array` (column-major
+  reinterpret) when input has it and the result fits the cap. The
+  `[]` auto-infer slot (`reshape(A, [], 3)`) is not yet supported
+  — specify all dims explicitly.
 - **Tensor arithmetic** — elementwise `+` `-` `.*` `./` `-` (unary)
   on same-shape tensors and tensor-with-scalar-broadcast. Each op
   emits a per-op runtime helper call

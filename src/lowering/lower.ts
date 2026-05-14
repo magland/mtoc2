@@ -47,6 +47,7 @@ import {
   type HandleType,
   type HandleCapture,
   type ClassType,
+  EXACT_ARRAY_MAX_ELEMENTS,
   scalarDouble,
   tensorDouble,
   classType,
@@ -1705,7 +1706,29 @@ export class Lowerer {
       return loweredFlat[0];
     }
 
-    const ty = tensorDouble([rows, cols]);
+    // Propagate `exact` when every element has a known scalar number
+    // value AND the total fits the exact-array cap. This is the same
+    // discipline as `zeros`/`ones`: the runtime helper still
+    // materializes the tensor, but downstream type-system consumers
+    // (e.g. `reshape`'s Form B dim-vector path, `sum` of a literal)
+    // can fold against the static data.
+    let ty: NumericType = tensorDouble([rows, cols]);
+    if (total <= EXACT_ARRAY_MAX_ELEMENTS) {
+      let allExact = true;
+      for (const el of loweredFlat) {
+        if (!(el.ty.kind === "Numeric" && typeof el.ty.exact === "number")) {
+          allExact = false;
+          break;
+        }
+      }
+      if (allExact) {
+        const data = new Float64Array(total);
+        for (let i = 0; i < total; i++) {
+          data[i] = (loweredFlat[i].ty as NumericType).exact as number;
+        }
+        ty = tensorDouble([rows, cols], data);
+      }
+    }
     return {
       kind: "TensorBuild",
       elements: loweredFlat,

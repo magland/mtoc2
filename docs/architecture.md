@@ -227,6 +227,25 @@ Today's builtins:
   introducing an ND tensor-literal emission path. ND values flow
   through the rest of the pipeline (assign / copy / free / elemwise
   / `disp`) unchanged.
+- **Rank-N reshape**: `reshape(A, d1, …, dN)` (variadic scalar dims,
+  Form A) and `reshape(A, [d1, …, dN])` (1-D dim vector, Form B).
+  Same dim discipline as `zeros`/`ones`: each dim is a statically-
+  known finite non-negative integer (scalar `exact: number` for
+  Form A, vector `exact: Float64Array` for Form B), 1..
+  `MTOC2_MAX_NDIM` axes total, trailing singletons stripped down
+  to a 2-axis minimum (mirroring numbl). Element-count check is
+  split: when the input shape is statically known, the lowerer
+  enforces `prod(input.dims) == prod(newShape)` at translate time
+  with a span-attributed `TypeError`; when the shape is only
+  tracked per-axis as `notOne`/`unknown` (e.g. an unshaped tensor
+  field), the check is deferred to `mtoc2_reshape_nd`, which
+  aborts on mismatch. Codegen always emits the runtime helper
+  (no fold-at-codegen rule); when the input has an exact
+  `Float64Array` and the result fits the exact-array cap, the
+  output type carries the same buffer (column-major reinterpret)
+  so downstream consumers (e.g. `sum`) can fold against it. The
+  `[]` auto-infer slot (`reshape(A, [], 3)`) is rejected with a
+  span — specify all dims explicitly in v1.
 - **Wall-clock stopwatch**: `tic`, `toc` — both 0-arg; runtime
   `mtoc2_tic()` / `mtoc2_toc()` (snippet `mtoc2_tic_toc`, backed by
   POSIX `clock_gettime(CLOCK_MONOTONIC)`). The bare-`toc;` ExprStmt

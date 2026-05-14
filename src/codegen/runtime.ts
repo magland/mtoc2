@@ -131,6 +131,10 @@ const REGISTRY: ReadonlyMap<string, RuntimeSnippet> = new Map<
     loadSnippet("tensor_ones_nd.h", ["mtoc2_tensor_alloc_nd"]),
   ],
   [
+    "mtoc2_reshape_nd",
+    loadSnippet("tensor_reshape_nd.h", ["mtoc2_tensor_alloc_nd"]),
+  ],
+  [
     "mtoc2_disp_tensor",
     loadSnippet("disp_tensor.h", ["mtoc2_tensor_t", "mtoc2_format_double"]),
   ],
