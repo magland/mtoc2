@@ -925,9 +925,14 @@ export class Lowerer {
       callNargout
     );
 
-    // 1-output callee: route to the classic single-output ABI
-    // (return-by-value) so we don't introduce a redundant sret path.
-    if (fnAst.outputs.length === 1) {
+    // 1-output spec: route to the classic single-output ABI (return-
+    // by-value) so we don't introduce a redundant sret path. Note
+    // this is `spec.outputTypes.length`, not `fnAst.outputs.length`
+    // — a multi-output declared callee specialized with nargout=1
+    // (because the call site only requested one output) truncates
+    // its spec to a single output and emits the return-by-value
+    // shape, even though `fnAst.outputs.length > 1`.
+    if (spec.outputTypes.length === 1) {
       const callExpr: IRExpr = {
         kind: "Call",
         cName: spec.cName,
@@ -949,11 +954,13 @@ export class Lowerer {
       return argHoists.length === 0 ? stmt : [...argHoists, stmt];
     }
 
-    // 0-output callee with no lvalues: reached via the bare-statement
-    // routing path. Pass through as ExprStmt(Call) with Void type, the
-    // same shape `lowerFuncCall` would produce for any 0-output bare
-    // call.
-    if (fnAst.outputs.length === 0) {
+    // 0-output spec with no lvalues: bare-statement routing path
+    // (`f(...);` with f declared 0-output, or a multi-output declared
+    // f called bare which truncates the spec to 0 outputs and emits
+    // a void function). Pass through as ExprStmt(Call) with Void
+    // type — the same shape `lowerFuncCall` would produce for any
+    // 0-output bare call.
+    if (spec.outputTypes.length === 0) {
       const callExpr: IRExpr = {
         kind: "Call",
         cName: spec.cName,
@@ -1537,17 +1544,14 @@ export class Lowerer {
         e.span
       );
       if (target?.kind === "userFunction") {
-        if (target.ast.outputs.length >= 2) {
-          throw new UnsupportedConstruct(
-            `function '${qname}' has ${target.ast.outputs.length} outputs ` +
-              `and cannot be used in an expression position; assign via ` +
-              `'[a, b, ...] = ${qname}(...)' or call as a bare statement ` +
-              `to drop all outputs`,
-            e.span
-          );
-        }
-        // Expression-context call site requests exactly 1 output
-        // (the rejection above filters out 2+-output packaged funcs).
+        // Expression-context call site requests exactly 1 output. A
+        // multi-output declared function specializes with nargout=1,
+        // which truncates the spec's output list — the callee then
+        // emits as a single-output C function (return-by-value), and
+        // any `if nargout >= N` branches dead-code via the nargout
+        // fold. A 0-output declared function specializes with
+        // nargout=0 (void); calling it in expression position is
+        // separately rejected by `requireValueType` at the consumer.
         const spec = this.specializeUserFunction(
           target.ast,
           argTypes,
@@ -2289,15 +2293,10 @@ export class Lowerer {
         };
       }
       case "userFunction": {
-        if (target.ast.outputs.length >= 2) {
-          throw new UnsupportedConstruct(
-            `function '${e.name}' has ${target.ast.outputs.length} outputs ` +
-              `and cannot be used in an expression position; assign via ` +
-              `'[a, b, ...] = ${e.name}(...)' or call as a bare statement ` +
-              `to drop all outputs`,
-            e.span
-          );
-        }
+        // Expression-context: request nargout=1 (the call site's
+        // single lvalue). A multi-output declared function specializes
+        // with truncated output list — see the dotted-name branch
+        // above and `specializeUserFunction` for the discipline.
         const spec = this.specializeUserFunction(
           target.ast,
           argTypes,
@@ -2921,6 +2920,13 @@ export class Lowerer {
     const cached = this.specializations.get(key);
     if (cached) return cached;
 
+    // Per-spec output list: truncate to the caller's requested nargout.
+    // A 3-output function called as `[a] = f(...)` or `x = f(...)`
+    // becomes a 1-output specialization (single-output C ABI); a bare
+    // `f(...)` becomes a 0-output (void) spec. The body's assignments
+    // to trailing outputs are kept but unused — the nargout fold may
+    // dead-code them via `if nargout >= N` branches.
+    const effectiveOutputs = decl.outputs.slice(0, effectiveNargout);
     // Insert placeholder to break recursion (not supported in MVP but
     // we'll throw a cleaner error than infinite recursion).
     const placeholder: IRFunc = {
@@ -2929,8 +2935,8 @@ export class Lowerer {
       params: decl.params.slice(),
       cParams: decl.params.map(cIdentForUserName),
       paramTypes: argTypes,
-      outputs: decl.outputs.slice(),
-      cOutputs: decl.outputs.map(cIdentForUserName),
+      outputs: effectiveOutputs.slice(),
+      cOutputs: effectiveOutputs.map(cIdentForUserName),
       outputTypes: [],
       body: [],
       span: decl.span,
@@ -2974,8 +2980,11 @@ export class Lowerer {
 
     const body = [...initStmts, ...this.lowerStmts(decl.body)];
 
-    // Output types come from the final env value of each output name.
-    const outputTypes: Type[] = decl.outputs.map(o => {
+    // Output types come from the final env value of each effective
+    // output name. Trailing outputs the caller dropped via nargout
+    // truncation aren't checked — they may legitimately be left
+    // unassigned by a `if nargout >= N` body branch.
+    const outputTypes: Type[] = effectiveOutputs.map(o => {
       const e = this.env.get(o);
       if (!e) {
         throw new TypeError(
