@@ -115,6 +115,21 @@ const REGISTRY: ReadonlyMap<string, RuntimeSnippet> = new Map<
     "mtoc2_tensor_from_matrix",
     loadSnippet("tensor_from_matrix.h", ["mtoc2_tensor_alloc"]),
   ],
+  // ND alloc + fill helpers — additive to the 2-D `mtoc2_tensor_alloc`
+  // fast path. `zeros`/`ones` builtins emit calls into these regardless
+  // of rank (the C compiler inlines the small fill loop just fine).
+  [
+    "mtoc2_tensor_alloc_nd",
+    loadSnippet("tensor_alloc_nd.h", ["mtoc2_tensor_t", "mtoc2_alloc"]),
+  ],
+  [
+    "mtoc2_tensor_zeros_nd",
+    loadSnippet("tensor_zeros_nd.h", ["mtoc2_tensor_alloc_nd"]),
+  ],
+  [
+    "mtoc2_tensor_ones_nd",
+    loadSnippet("tensor_ones_nd.h", ["mtoc2_tensor_alloc_nd"]),
+  ],
   [
     "mtoc2_disp_tensor",
     loadSnippet("disp_tensor.h", ["mtoc2_tensor_t", "mtoc2_format_double"]),

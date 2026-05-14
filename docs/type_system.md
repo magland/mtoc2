@@ -79,6 +79,11 @@ type Type =
 - `shape` is the statically-known integer shape when available
   (always set for exact tensors, and for scalars via the factories).
   Consistent with `dims`: `shape[i] === 1` ↔ `dims[i].kind === "one"`.
+- Both `dims` and `shape` are variable-length, capped at the same
+  `MTOC2_MAX_NDIM = 8` axes that the C runtime allows. ND tensors
+  (rank > 2) are constructed via the `zeros` / `ones` builtins;
+  every other code path (assign / copy / free / elemwise / `disp` /
+  `length` / `numel`) is shape-agnostic.
 - `sign` is one of `positive | nonneg | negative | nonpositive | zero
 | nonzero | unknown`. Coarser than exact but useful when exact isn't
   available (e.g. `unifySign("positive", "positive") === "positive"`).

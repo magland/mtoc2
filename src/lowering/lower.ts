@@ -85,6 +85,7 @@ import {
   binaryOpBuiltin,
   unaryOpBuiltin,
 } from "./builtins/index.js";
+import { arityAccepts, arityDescribe } from "./builtins/registry.js";
 
 interface EnvEntry {
   cName: string;
@@ -1224,9 +1225,9 @@ export class Lowerer {
             e.span
           );
         }
-        if (args.length !== b.arity) {
+        if (!arityAccepts(b.arity, args.length)) {
           throw new TypeError(
-            `'${e.name}' expects ${b.arity} arg(s), got ${args.length}`,
+            `'${e.name}' expects ${arityDescribe(b.arity)} arg(s), got ${args.length}`,
             e.span
           );
         }

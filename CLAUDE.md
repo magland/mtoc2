@@ -57,7 +57,9 @@ mtoc2 is a _static_ translator. Anything outside the supported subset raises
   lowers to a `TensorBuild` IR node (column-major flat array of element
   expressions), materialized at the use-site via `mtoc2_tensor_from_row`
   / `mtoc2_tensor_from_matrix`. (Special case: a 1×1 tensor literal
-  `[x]` lowers to the inner scalar — same as MATLAB.)
+  `[x]` lowers to the inner scalar — same as MATLAB.) Rank-N tensors
+  (up to `MTOC2_MAX_NDIM = 8`) are constructed via `zeros` / `ones`
+  with statically-known dims; bracket syntax stays 2-D-only.
 - **Tensor arithmetic** — elementwise `+` `-` `.*` `./` `-` (unary)
   on same-shape tensors and tensor-with-scalar-broadcast. Each op
   emits a per-op runtime helper call
@@ -88,12 +90,12 @@ mtoc2 is a _static_ translator. Anything outside the supported subset raises
   beats builtin) are inherited from numbl rather than reimplemented.
 
 Not yet supported: matrix multiplication / division, indexing
-(`a(k)`), runtime-shape constructors (`zeros(n)`), general broadcast
-(non-scalar mismatched shapes), complex, strings, chars, builtin
-handles, tensor captures on anonymous functions, `private/`
-directories, `+pkg/` namespaces, `@Class/` folders, `import`
-statements, `.numbl.js` user functions. Expanding scope is gated by
-the cross-runner.
+(`a(k)`), unknown-shape constructors (`zeros(n)` where `n` is a
+runtime-only scalar), general broadcast (non-scalar mismatched
+shapes), complex, strings, chars, builtin handles, tensor captures
+on anonymous functions, `private/` directories, `+pkg/` namespaces,
+`@Class/` folders, `import` statements, `.numbl.js` user functions.
+Expanding scope is gated by the cross-runner.
 
 ## Docs are part of the change
 

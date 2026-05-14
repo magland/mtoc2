@@ -31,6 +31,8 @@ import { disp } from "./io/disp.js";
 import { length } from "./reduction/length.js";
 import { numel } from "./reduction/numel.js";
 import { sum } from "./reduction/sum.js";
+import { zeros } from "./shape/zeros.js";
+import { ones } from "./shape/ones.js";
 
 for (const b of [
   plus,
@@ -50,6 +52,8 @@ for (const b of [
   length,
   numel,
   sum,
+  zeros,
+  ones,
 ]) {
   registerBuiltin(b);
 }

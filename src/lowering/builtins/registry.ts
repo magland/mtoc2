@@ -15,11 +15,17 @@
 import type { Span } from "../../parser/index.js";
 import type { Type } from "../types.js";
 
+/** Builtin arity. Most builtins have a single exact arity; a few
+ *  (`zeros`, `ones`) take a variable count of shape arguments, for
+ *  which `{ min, max }` is supplied. Either bound may be -1 for "no
+ *  bound on this side" but in practice both are concrete today. */
+export type BuiltinArity = number | { min: number; max: number };
+
 export interface Builtin {
   /** Source-level name. */
   name: string;
-  /** Arity (exact match for MVP). */
-  arity: number;
+  /** Arity (exact match, or a min/max range for variadic builtins). */
+  arity: BuiltinArity;
   /** Transfer function: returns output type (with exact when fold-able). */
   transfer(argTypes: Type[], span: Span): Type;
   /** Emit C expression. The caller wraps it as a statement when needed. */
@@ -29,6 +35,17 @@ export interface Builtin {
    *  The emitter activates each on every codegenC site so deps are
    *  pulled into the final output in topological order. */
   runtimeDeps?: ReadonlyArray<string>;
+}
+
+export function arityAccepts(arity: BuiltinArity, n: number): boolean {
+  if (typeof arity === "number") return n === arity;
+  return n >= arity.min && n <= arity.max;
+}
+
+export function arityDescribe(arity: BuiltinArity): string {
+  if (typeof arity === "number") return `${arity}`;
+  if (arity.min === arity.max) return `${arity.min}`;
+  return `${arity.min}..${arity.max}`;
 }
 
 const REGISTRY = new Map<string, Builtin>();

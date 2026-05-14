@@ -152,7 +152,18 @@ Today's builtins:
   `mtoc2_length` / `mtoc2_numel` on tensors; literal `1.0` for scalar
   args (the C arg type is `double`, not `mtoc2_tensor_t`). `sum` →
   `mtoc2_sum(t)` for tensors, identity for scalars. Matrix →
-  row-vector reduction deferred.
+  row-vector reduction deferred; `sum` on rank-N (N>2) tensors is
+  rejected at lowering.
+- **Rank-N constructors**: `zeros(d1, …, dN)` and `ones(d1, …, dN)`
+  (1..`MTOC2_MAX_NDIM` shape args, each a statically-known finite
+  non-negative integer). One-arg form means an n×n square (MATLAB
+  convention). The result type carries the shape and, when the
+  element count fits the exact-array cap, the fill data — but
+  codegen always materializes via the runtime helpers
+  `mtoc2_tensor_zeros_nd` / `mtoc2_tensor_ones_nd` rather than
+  introducing an ND tensor-literal emission path. ND values flow
+  through the rest of the pipeline (assign / copy / free / elemwise
+  / `disp`) unchanged.
 
 Operator-to-builtin maps live alongside the registry.
 

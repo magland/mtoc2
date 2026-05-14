@@ -34,7 +34,9 @@ export const sum: Builtin = {
         t.shape.length === 2 && (t.shape[0] === 1 || t.shape[1] === 1);
       if (!isVector) {
         throw new UnsupportedConstruct(
-          `'sum' on a non-vector tensor (matrix → row-vector reduction) is not yet supported`,
+          t.shape.length > 2
+            ? `'sum' on rank-${t.shape.length} tensors is not yet supported`
+            : `'sum' on a non-vector tensor (matrix → row-vector reduction) is not yet supported`,
           span
         );
       }
