@@ -529,10 +529,14 @@ function emitFunction(fn: IRFunc, state: RuntimeState): string {
       lines.push(`  double ${cOut} = 0.0;`);
     }
   }
-  // Pre-declare owned locals (excluding outputs, which we already
-  // handled above).
+  // Pre-declare owned locals (excluding outputs and params, both of
+  // which are already declared elsewhere — outputs above, params in
+  // the function signature). Without the paramNames filter, a body
+  // that reassigns an owned param (`function f(xs); xs = xs(:); ...`)
+  // would emit a duplicate `mtoc2_tensor_t xs = mtoc2_tensor_empty();`
+  // and the C compiler would reject the redeclaration.
   const owned = collectOwnedLocals(fn.body).filter(
-    o => !outputCNames.has(o.cName)
+    o => !outputCNames.has(o.cName) && !paramNames.has(o.cName)
   );
   for (const o of owned) {
     activateOwnedRuntime(o.ty, state);
