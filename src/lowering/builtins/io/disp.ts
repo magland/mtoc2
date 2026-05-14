@@ -2,6 +2,7 @@ import { TypeError } from "../../errors.js";
 import {
   isScalarRealNumeric,
   isNumeric,
+  isText,
   structTypedefName,
 } from "../../types.js";
 import type { Builtin } from "../registry.js";
@@ -24,13 +25,18 @@ export const disp: Builtin = {
       // tensor with statically-known shape (mtoc2_disp_tensor call).
       return { kind: "Unknown" };
     }
+    if (isText(t)) {
+      // Char ('foo') or String ("foo") — bridged to the runtime
+      // text-view helper via the kind's `_text_from_*` adapter.
+      return { kind: "Unknown" };
+    }
     if (t.kind === "Struct") {
       // Per-shape `<typedef>_disp` is program-emitted; routing
       // happens in codegenC.
       return { kind: "Unknown" };
     }
     throw new TypeError(
-      `'disp' arg must be a scalar real, a real tensor, or a struct ` +
+      `'disp' arg must be a scalar real, a real tensor, text, or a struct ` +
         `(got ${t.kind})`,
       span
     );
@@ -40,6 +46,12 @@ export const disp: Builtin = {
     if (t.kind === "Struct") {
       // Program-emitted helper; no runtime-snippet dep needed.
       return `${structTypedefName(t)}_disp(${argsC[0]})`;
+    }
+    if (t.kind === "String") {
+      return `mtoc2_disp_text(mtoc2_text_from_string(${argsC[0]}))`;
+    }
+    if (t.kind === "Char") {
+      return `mtoc2_disp_text(mtoc2_text_from_char_tensor(${argsC[0]}))`;
     }
     if (isNumeric(t) && !isScalarRealNumeric(t)) {
       // Runtime tensor — call the runtime disp helper. The arg is
@@ -51,5 +63,5 @@ export const disp: Builtin = {
     // Scalar runtime path.
     return `mtoc2_disp_double(${argsC[0]})`;
   },
-  runtimeDeps: ["mtoc2_disp_double", "mtoc2_disp_tensor"],
+  runtimeDeps: ["mtoc2_disp_double", "mtoc2_disp_tensor", "mtoc2_disp_text"],
 };

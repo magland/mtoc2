@@ -288,6 +288,8 @@ function cTypeFor(t: Type): string {
   if (isHandle(t)) return handleTypedefName(t);
   if (t.kind === "Struct") return structTypedefName(t);
   if (t.kind === "Class") return classTypedefName(t);
+  if (t.kind === "String") return "mtoc2_string_t";
+  if (t.kind === "Char") return "mtoc2_char_tensor_t";
   return "double";
 }
 
@@ -322,6 +324,24 @@ function ownedHelpersFor(t: Type): OwnedHelpers {
       assign: "mtoc2_tensor_assign",
       copy: "mtoc2_tensor_copy",
       free: "mtoc2_tensor_free",
+      isRuntime: true,
+    };
+  }
+  if (t.kind === "String") {
+    return {
+      empty: "mtoc2_string_empty",
+      assign: "mtoc2_string_assign",
+      copy: "mtoc2_string_copy",
+      free: "mtoc2_string_free",
+      isRuntime: true,
+    };
+  }
+  if (t.kind === "Char") {
+    return {
+      empty: "mtoc2_char_tensor_empty",
+      assign: "mtoc2_char_tensor_assign",
+      copy: "mtoc2_char_tensor_copy",
+      free: "mtoc2_char_tensor_free",
       isRuntime: true,
     };
   }
@@ -959,13 +979,29 @@ function emitExpr(e: IRExpr, state: RuntimeState): string {
   switch (e.kind) {
     case "NumLit":
       return formatDouble(e.value);
-    case "StringLit":
-      // Today only consumed by reducer builtins, whose `codegenC`
-      // drops the slot before emitting the C call. Render as a C
-      // string literal so the bare expression still compiles if it
-      // somehow reaches a site that doesn't filter (e.g. future
-      // builtins that DO pass strings through).
-      return JSON.stringify(e.value);
+    case "StringLit": {
+      // Text literal — kind comes from `e.ty`: `Char` (single-quoted,
+      // 1×N char array) or `String` (double-quoted, scalar handle).
+      // The reducer-builtin slot path (`sum(A, 'all')`, etc.) doesn't
+      // route through emitExpr — those builtins' codegenC drops the
+      // slot — so the bare C-string-literal fallback isn't load-bearing
+      // anymore. Every reached `StringLit` here is a value-producing
+      // text literal that needs the owned struct.
+      const { lit, byteLen } = cStringLiteral(e.value);
+      if (e.ty.kind === "String") {
+        useRuntimeByName(state, "mtoc2_string_from_literal");
+        return `mtoc2_string_from_literal(${lit}, ${byteLen})`;
+      }
+      if (e.ty.kind === "Char") {
+        useRuntimeByName(state, "mtoc2_char_tensor_from_literal");
+        return `mtoc2_char_tensor_from_literal(${lit}, ${byteLen})`;
+      }
+      // Reducer-builtin slot context (e.g. `'all'` to `sum`/`min`/`max`):
+      // the surrounding builtin reads `ty.exact` at transfer time and
+      // drops the slot in codegenC, so this bare literal is unreachable
+      // by emitted C. Return a plain C literal as a safe stub.
+      return lit;
+    }
     case "TensorBuild": {
       // Runtime tensor construction. Both row-vector and matrix cases
       // route through the same compound-literal flat array (the data
@@ -1129,6 +1165,49 @@ function formatDouble(v: number): string {
     return `${s}.0`;
   }
   return s;
+}
+
+/** Encode `s` as a C string literal `"..."` whose bytes are the UTF-8
+ *  encoding of `s`. Returns `{ lit, byteLen }` where `byteLen` is the
+ *  encoded byte count (excluding the trailing NUL). Non-printable bytes
+ *  use `\xHH`; backslash/quote/standard whitespace use the C escapes.
+ *
+ *  Why hex over `\uHHHH`: narrow C string literals don't accept
+ *  universal-character names; we need byte-level escapes to keep the
+ *  emitted code portable. */
+function cStringLiteral(s: string): { lit: string; byteLen: number } {
+  const bytes = new TextEncoder().encode(s);
+  let out = '"';
+  for (let i = 0; i < bytes.length; i++) {
+    const b = bytes[i];
+    if (b === 0x5c) {
+      out += "\\\\";
+    } else if (b === 0x22) {
+      out += '\\"';
+    } else if (b === 0x0a) {
+      out += "\\n";
+    } else if (b === 0x0d) {
+      out += "\\r";
+    } else if (b === 0x09) {
+      out += "\\t";
+    } else if (b >= 0x20 && b < 0x7f) {
+      out += String.fromCharCode(b);
+    } else {
+      // \xHH (lowercase). Wrap in `""` separator if a hex digit follows
+      // so the runtime hex escape doesn't gobble up valid following
+      // characters (e.g. "\x0a1" must be "\x0a" "1", not "\x0a1").
+      const hex = b.toString(16).padStart(2, "0");
+      const next = i + 1 < bytes.length ? bytes[i + 1] : 0;
+      const nextIsHex =
+        (next >= 0x30 && next <= 0x39) ||
+        (next >= 0x41 && next <= 0x46) ||
+        (next >= 0x61 && next <= 0x66);
+      out += `\\x${hex}`;
+      if (nextIsHex) out += '" "';
+    }
+  }
+  out += '"';
+  return { lit: out, byteLen: bytes.length };
 }
 
 /** Compute the column-major linear buffer offset for a scalar

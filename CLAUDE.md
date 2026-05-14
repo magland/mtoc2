@@ -182,16 +182,42 @@ mtoc2 is a _static_ translator. Anything outside the supported subset raises
   (`pkg_foo__<hex>` vs `other_foo__<hex>`). `@pkg.foo` works as a
   function handle. `import pkg.foo` / `import pkg.*` statements are
   not yet supported — calls must be fully qualified.
+- **Text** — two distinct owned kinds, matching numbl: `Char` (single-
+  quoted `'foo'`, 1×N row of bytes; `length('foo') == 3`) and `String`
+  (double-quoted `"foo"`, scalar handle; `length("foo") == 1`). Both
+  back to per-kind C structs (`mtoc2_char_tensor_t` /
+  `mtoc2_string_t`) that participate in the standard owned-value
+  lifecycle (empty/assign/copy/free). Literal sources route through
+  `_from_literal` builders that point at `.rodata` with `owned=0` so
+  no allocation happens at the literal site. The non-owning
+  `mtoc2_text_view_t` adapter lets read-only helpers (disp, error,
+  fprintf, sprintf, assert-with-msg) walk either source kind via
+  `mtoc2_text_from_string` / `mtoc2_text_from_char_tensor`. Concat
+  via `[...]`, char arithmetic (`'A' + 1`), and `strcmp` are deferred
+  until needed.
+- **Formatted I/O** — `fprintf(fmt, args...)` (stdout; leading-fid
+  form deferred), `error(msg)` / `error(fmt, args...)` /
+  `error(id, fmt, ...)` (writes to stderr + abort), `sprintf` (char
+  format returns Char, string format returns String), and the
+  printf-style `assert(cond, fmt, args...)` form. All share the
+  `format_engine.h` walker — numbl-compatible spec set
+  (`d/i/u/f/e/E/g/G/x/X/o/s/c/%`), flags, precision, `*` width,
+  escapes `\n/\t/\\`, column-major tensor flattening, and
+  format-string cycling. Complex args are rejected at lowering.
+  Argument transport is a per-call `mtoc2_fprintf_arg_t[]` compound
+  literal; the shared `_format_args.ts` helper builds the slots and
+  is the single source of truth for the slot tag values.
 
 Not yet supported: matrix division (`mrdivide` between two tensors),
 logical / vector-of-indices indexing (`a(mask)`, `a(idx_vec)`),
-member-rooted indexing
-(`obj.r(1, :, :)`, `obj.f(i) = rhs`), indexed-delete (`a(2:5) = []`),
-unknown-shape constructors (`zeros(n)` where `n` is a runtime-only
-scalar), general broadcast (non-scalar mismatched shapes), complex,
-strings, chars, builtin handles, `private/` directories, `@Class/`
-folders, `import` statements, `.numbl.js` user functions. Expanding
-scope is gated by the cross-runner.
+member-rooted indexing (`obj.r(1, :, :)`, `obj.f(i) = rhs`),
+indexed-delete (`a(2:5) = []`), unknown-shape constructors
+(`zeros(n)` where `n` is a runtime-only scalar), general broadcast
+(non-scalar mismatched shapes), complex, text concat (`[a, b]` of
+two chars), char arithmetic (`'A' + 1`), `strcmp`, builtin handles,
+`private/` directories, `@Class/` folders, `import` statements,
+`.numbl.js` user functions. Expanding scope is gated by the
+cross-runner.
 
 ## Docs are part of the change
 

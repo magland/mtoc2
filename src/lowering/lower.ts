@@ -433,9 +433,17 @@ export class Lowerer {
     const expr = this.lowerExpr(s.expr);
     // If the expression is a folded literal with no side effect, drop it.
     if (expr.kind === "NumLit") return null;
-    // Void-typed call (zero-output user function): emit as-is. No ANF
-    // (Void can't be hoisted; it's only valid at this very position).
+    // Void-typed call (zero-output user function, fprintf-style
+    // side-effecting builtin): the top-level expression itself can't
+    // be hoisted (Void has no value), but its OWN-producing
+    // sub-expressions still need ANF so they land in named locals
+    // that codegen can take the address of / scope-exit free.
     if (isVoid(expr.ty)) {
+      const hoists: IRStmt[] = [];
+      const hoisted = this.anfChildren(expr, hoists);
+      if (hoists.length > 0) {
+        return [...hoists, { kind: "ExprStmt", expr: hoisted, span: s.span }];
+      }
       return { kind: "ExprStmt", expr, span: s.span };
     }
     // A-normalize: hoist every owned-producing non-Var sub-expression
@@ -1325,13 +1333,15 @@ export class Lowerer {
         return {
           kind: "StringLit",
           value: inner,
-          ty: { kind: "String", exact: inner },
+          ty: { kind: "Char", exact: inner },
           span: e.span,
         };
       }
       case "String": {
-        // Double-quoted MATLAB string literal — same stripping rule
-        // as `Char` but with `""` as the escape sequence.
+        // Double-quoted MATLAB string literal — scalar string handle
+        // (`length("hi") == 1`); codegen emits via
+        // `mtoc2_string_from_literal`. Same stripping rule as Char but
+        // with `""` as the in-literal escape.
         const raw = e.value;
         const inner = raw.slice(1, raw.length - 1).replaceAll('""', '"');
         return {

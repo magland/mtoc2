@@ -1,6 +1,6 @@
 /**
- * `assert(cond)` / `assert(cond, msg)` — runtime + compile-time
- * assertion.
+ * `assert(cond)` / `assert(cond, msg)` / `assert(cond, fmt, args...)` —
+ * runtime + compile-time assertion.
  *
  * Numbl reference: `interpreter/builtins/utility.ts:151`. For
  * scalar/numeric conds the truth check is `v !== 0 && !isNaN(v)`;
@@ -9,32 +9,38 @@
  *
  * v1 scope:
  *   - cond is a scalar real numeric (double or logical).
- *   - optional msg is a string literal (numbl's `'…'` / `"…"`).
- *     `assert(cond, fmt, ...)` printf-style is deferred.
+ *   - msg may be omitted, a literal text value, or a literal format
+ *     plus printf args. The printf-style form routes through the
+ *     shared format engine via `mtoc2_assert_scalar_fmt`.
  *
  * Compile-time fold:
  *   - cond is exact-known truthy → emit nothing (no-op).
  *   - cond is exact-known falsy → throw TypeError at lowering time
  *     ("assertion failed at compile time: <msg>"). Catches accidental
- *     `assert(false, '...')` early, mirroring how the language treats
- *     a static contradiction.
+ *     `assert(false, '...')` early.
  *
  * Tensor-cond support (numbl: "every element nonzero and non-NaN")
  * is a small followup once we need it — chunkie_simple's only
  * `assert` call is a scalar comparison.
  *
- * Returns `Unknown` (same as `disp`) — the result is never consumed
- * and the call only makes sense as the expression of an `ExprStmt`.
+ * Returns `Unknown` — the result is never consumed and the call only
+ * makes sense as the expression of an `ExprStmt`.
  */
 
 import { TypeError, UnsupportedConstruct } from "../../errors.js";
-import { isNumeric, isScalar, typeToString } from "../../types.js";
+import { isNumeric, isScalar, isText, typeToString } from "../../types.js";
 import type { Builtin } from "../registry.js";
 import { exactDouble } from "../_shared.js";
+import {
+  emitFormatSlot,
+  emitFormatSlotArray,
+  emitTextView,
+  validateFormatArgs,
+} from "../io/_format_args.js";
 
 export const assert: Builtin = {
   name: "assert",
-  arity: { min: 1, max: 2 },
+  arity: { min: 1, max: 64 },
   transfer(argTypes, span) {
     const cond = argTypes[0];
     if (!isNumeric(cond)) {
@@ -53,16 +59,15 @@ export const assert: Builtin = {
         span
       );
     }
-
-    if (argTypes.length === 2) {
+    if (argTypes.length >= 2) {
       const m = argTypes[1];
-      if (m.kind !== "String") {
+      if (!isText(m)) {
         throw new UnsupportedConstruct(
-          `'assert' message must be a string literal in v1 ` +
-            `(got ${typeToString(m)}); printf-style \`assert(cond, fmt, ...)\` is a followup`,
+          `'assert' message must be char or string (got ${typeToString(m)})`,
           span
         );
       }
+      validateFormatArgs("assert", argTypes, 2, span);
     }
 
     // Compile-time fold.
@@ -70,9 +75,10 @@ export const assert: Builtin = {
     if (v !== undefined) {
       const truthy = v !== 0 && !Number.isNaN(v);
       if (!truthy) {
+        const m = argTypes.length >= 2 ? argTypes[1] : undefined;
         const msgPart =
-          argTypes.length === 2 && argTypes[1].kind === "String"
-            ? `: ${argTypes[1].exact ?? "(empty)"}`
+          m && (m.kind === "String" || m.kind === "Char")
+            ? `: ${m.exact ?? "(opaque)"}`
             : "";
         throw new TypeError(`'assert' is statically false${msgPart}`, span);
       }
@@ -82,20 +88,33 @@ export const assert: Builtin = {
     return { kind: "Unknown" };
   },
   codegenC(argsC, argTypes) {
-    // Compile-time-truthy case: the transfer step folds successfully
-    // without throwing; we want no runtime check. The emit pipeline
-    // expects an expression here, so emit a benign `(void)0`.
     const cond = argTypes[0];
     if (isNumeric(cond) && exactDouble(cond) !== undefined) {
-      // The transfer would have thrown on falsy-exact; truthy-exact
-      // reaches us — emit a no-op.
+      // Truthy-exact reaches codegen — emit a no-op (the transfer
+      // would have thrown on falsy-exact).
       return `((void)0)`;
     }
-    const msgArg =
-      argTypes.length === 2 && argTypes[1].kind === "String"
-        ? JSON.stringify(argTypes[1].exact ?? "")
-        : `(const char *)0`;
-    return `mtoc2_assert_scalar((double)(${argsC[0]}), ${msgArg})`;
+    const condC = `(double)(${argsC[0]})`;
+    if (argTypes.length < 2) {
+      return `mtoc2_assert_scalar(${condC}, (const char *)0)`;
+    }
+    // 2-arg form with a literal text message and no format args: keep
+    // the bare-string fast path so simple `assert(cond, 'msg')` calls
+    // don't activate the whole format engine.
+    if (argTypes.length === 2) {
+      const m = argTypes[1];
+      if ((m.kind === "Char" || m.kind === "String") && m.exact !== undefined) {
+        return `mtoc2_assert_scalar(${condC}, ${JSON.stringify(m.exact)})`;
+      }
+    }
+    // 3+ args, or 2-arg with an opaque text variable: route through
+    // the format engine.
+    const fmtView = emitTextView(argsC[1], argTypes[1]);
+    const slots: string[] = [];
+    for (let i = 2; i < argTypes.length; i++) {
+      slots.push(emitFormatSlot("assert", argsC[i], argTypes[i], i));
+    }
+    return `mtoc2_assert_scalar_fmt(${condC}, ${fmtView}, ${slots.length}, ${emitFormatSlotArray(slots)})`;
   },
-  runtimeDeps: ["mtoc2_assert_scalar"],
+  runtimeDeps: ["mtoc2_assert_scalar", "mtoc2_assert_scalar_fmt"],
 };

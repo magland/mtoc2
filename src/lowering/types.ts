@@ -144,8 +144,26 @@ export interface NumericType {
   exact?: NumericExact;
 }
 
+/** Scalar string handle — the double-quoted (`"foo"`) text type.
+ *  `length("foo") == 1` (numbl treats it as a single value, not a
+ *  byte array). Backed by `mtoc2_string_t` in emitted C; participates
+ *  in the standard owned-value lifecycle (empty/assign/copy/free).
+ *  `exact` carries the literal value when the source is a `"..."`
+ *  expression. */
 export interface StringType {
   kind: "String";
+  exact?: string;
+}
+
+/** 1×N row-vector of bytes — the single-quoted (`'foo'`) char-array
+ *  type. `length('foo') == 3` (numbl exposes the byte count). Backed
+ *  by `mtoc2_char_tensor_t` in emitted C; same owned-value lifecycle
+ *  as `String`. Multi-row chars aren't constructable in v1, so the
+ *  type doesn't carry a shape — `exact.length` is the column count.
+ *  `exact` carries the literal value when the source is a `'...'`
+ *  expression. */
+export interface CharType {
+  kind: "Char";
   exact?: string;
 }
 
@@ -228,6 +246,7 @@ export interface ClassType {
 export type Type =
   | NumericType
   | StringType
+  | CharType
   | UnknownType
   | VoidType
   | HandleType
@@ -385,6 +404,22 @@ export function isClass(t: Type): t is ClassType {
   return t.kind === "Class";
 }
 
+export function isString(t: Type): t is StringType {
+  return t.kind === "String";
+}
+
+export function isChar(t: Type): t is CharType {
+  return t.kind === "Char";
+}
+
+/** True when `t` can be consumed by a "text-accepting" runtime helper
+ *  via `mtoc2_text_view_t` — today: a `String` handle or a `Char` array.
+ *  The shared predicate lets builtins like `disp` / future
+ *  `error` / `fprintf` accept either source kind. */
+export function isText(t: Type): boolean {
+  return isString(t) || isChar(t);
+}
+
 /** Find a field on a struct/class by name. Returns the field's type
  *  or undefined if the type isn't a struct/class or no such field
  *  exists. */
@@ -456,6 +491,8 @@ export function isOwned(t: Type): boolean {
   if (t.kind === "Struct") return true;
   if (t.kind === "Class") return true;
   if (t.kind === "Handle") return true;
+  if (t.kind === "String") return true;
+  if (t.kind === "Char") return true;
   return false;
 }
 
@@ -525,6 +562,8 @@ export function stripExactFromEnv(
       });
     } else if (e.ty.kind === "String" && e.ty.exact !== undefined) {
       env.set(n, { cName: e.cName, ty: { kind: "String" } });
+    } else if (e.ty.kind === "Char" && e.ty.exact !== undefined) {
+      env.set(n, { cName: e.cName, ty: { kind: "Char" } });
     } else if (e.ty.kind === "Struct" || e.ty.kind === "Class") {
       env.set(n, { cName: e.cName, ty: withoutExact(e.ty) });
     }
@@ -576,6 +615,9 @@ export function withoutExact(t: Type): Type {
   }
   if (t.kind === "String" && t.exact !== undefined) {
     return { kind: "String" };
+  }
+  if (t.kind === "Char" && t.exact !== undefined) {
+    return { kind: "Char" };
   }
   if (t.kind === "Struct") {
     return {
@@ -641,6 +683,12 @@ export function unify(a: Type, b: Type): Type {
     }
     return { kind: "String" };
   }
+  if (a.kind === "Char" && b.kind === "Char") {
+    if (a.exact !== undefined && b.exact !== undefined && a.exact === b.exact) {
+      return { kind: "Char", exact: a.exact };
+    }
+    return { kind: "Char" };
+  }
   if (a.kind === "Handle" && b.kind === "Handle") {
     if (canonicalizeType(a) === canonicalizeType(b)) return a;
     return UNKNOWN;
@@ -694,6 +742,8 @@ export function typeToString(t: Type): string {
       return "void";
     case "String":
       return t.exact !== undefined ? `string="${t.exact}"` : "string";
+    case "Char":
+      return t.exact !== undefined ? `char='${t.exact}'` : "char";
     case "Numeric": {
       let s: string = t.elem;
       if (t.isComplex) s = `complex(${s})`;
@@ -805,6 +855,8 @@ function canon(t: Type): unknown {
       return { k: "V" };
     case "String":
       return t.exact !== undefined ? { k: "S", x: t.exact } : { k: "S" };
+    case "Char":
+      return t.exact !== undefined ? { k: "Ch", x: t.exact } : { k: "Ch" };
     case "Numeric": {
       const out: Record<string, unknown> = {
         k: "N",
@@ -907,6 +959,8 @@ export function cFieldTypeStr(t: Type): string {
     if (isMultiElement(t)) return "mtoc2_tensor_t";
     return "double";
   }
+  if (t.kind === "String") return "mtoc2_string_t";
+  if (t.kind === "Char") return "mtoc2_char_tensor_t";
   if (t.kind === "Handle") return handleTypedefName(t);
   if (t.kind === "Struct") return structTypedefName(t);
   if (t.kind === "Class") return classTypedefName(t);
