@@ -48,9 +48,12 @@ import {
   type HandleType,
   type HandleCapture,
   type ClassType,
+  type DimInfo,
+  DIM_ONE,
   EXACT_ARRAY_MAX_ELEMENTS,
   scalarDouble,
   tensorDouble,
+  tensorDoubleFromDims,
   classType,
   signFromExactArray,
   signFromNumber,
@@ -2103,7 +2106,8 @@ export class Lowerer {
 
     // Phase 1 — lower every cell and classify its shape.
     //   - scalar: kind=scalar, value carries the scalar IRExpr.
-    //   - tensor: kind=tensor, rows/cols carry the cell's static shape.
+    //   - tensor: kind=tensor, rows/cols carry the cell's per-axis dim
+    //             (number when exact, null when runtime-only).
     //   - empty:  kind=empty, contributes nothing (dropped below).
     type Cell =
       | { kind: "scalar"; expr: IRExpr; ty: NumericType }
@@ -2111,8 +2115,8 @@ export class Lowerer {
           kind: "tensor";
           expr: IRExpr;
           ty: NumericType;
-          rows: number;
-          cols: number;
+          rows: number | null;
+          cols: number | null;
         }
       | { kind: "empty"; ty: NumericType };
     const grid: Cell[][] = [];
@@ -2144,14 +2148,17 @@ export class Lowerer {
           out.push({ kind: "scalar", expr: lowered, ty });
           continue;
         }
-        // Tensor cell — must have a statically-known 2-D shape.
-        if (ty.shape === undefined || ty.shape.length !== 2) {
-          throw new UnsupportedConstruct(
-            `bracket concatenation requires statically-known cell shapes (got ${typeToString(ty)})`,
-            cell.span
-          );
-        }
-        const [cr, cc] = ty.shape;
+        // Tensor cell. Per-axis dim is `number` when exact, `null`
+        // when runtime-only. `dims.length === 2` is guaranteed
+        // (mtoc2 normalizes to min-2D and rejected rank>2 above).
+        const d0 = ty.dims[0];
+        const d1 = ty.dims[1];
+        const cr: number | null = d0.kind === "exact" ? d0.value : null;
+        const cc: number | null = d1.kind === "exact" ? d1.value : null;
+        // Statically-zero axis ⇒ empty cell. A runtime-only axis can
+        // be 0 at runtime, but we can't drop it from the grid here
+        // — codegen handles size-0 tensor cells inline (the copy
+        // loop iterates 0 times).
         if (cr === 0 || cc === 0) {
           out.push({ kind: "empty", ty });
           continue;
@@ -2221,38 +2228,44 @@ export class Lowerer {
     // Concat path. Compute per-row horzcat shapes, then vertcat.
     //
     // For each row, drop empty cells. The row's height is the unique
-    // non-empty cell's `rows` (validated against neighbors). The row's
-    // width is the sum of non-empty cells' `cols`. A row with no
-    // non-empty cells contributes nothing to the vertcat.
+    // non-empty cell's `rows` (validated against neighbors when both
+    // sides are static; mismatched runtime/static pairs trust the
+    // user — `mtoc2_check_concat_axis` could later validate at
+    // runtime, but the current emit just uses whichever value is
+    // known). A row with no non-empty cells contributes nothing to
+    // the vertcat.
     type NonEmptyCell = Exclude<Cell, { kind: "empty" }>;
     const rowsRetained: NonEmptyCell[][] = [];
-    const rowHeights: number[] = [];
-    const rowWidths: number[] = [];
-    const cellCols: number[][] = [];
+    const rowHeights: (number | null)[] = [];
+    const rowWidths: (number | null)[] = [];
+    const cellCols: (number | null)[][] = [];
     for (let i = 0; i < grid.length; i++) {
       const row = grid[i];
       const keptCells: NonEmptyCell[] = [];
-      const keptCols: number[] = [];
-      let height: number | null = null;
-      let width = 0;
+      const keptCols: (number | null)[] = [];
+      let height: number | null | undefined = undefined; // undefined = no cells seen yet
+      let width: number | null = 0;
       for (let j = 0; j < row.length; j++) {
         const cell = row[j];
         if (cell.kind === "empty") continue;
-        const h = cell.kind === "scalar" ? 1 : cell.rows;
-        const w = cell.kind === "scalar" ? 1 : cell.cols;
-        if (height === null) height = h;
-        else if (height !== h) {
+        const h: number | null = cell.kind === "scalar" ? 1 : cell.rows;
+        const w: number | null = cell.kind === "scalar" ? 1 : cell.cols;
+        if (height === undefined) {
+          height = h;
+        } else if (height !== null && h !== null && height !== h) {
           throw new TypeError(
             `bracket horzcat row-height mismatch: cell ${j + 1} on row ${i + 1} ` +
               `has ${h} row(s) but a neighbor in the same row has ${height}`,
             e.rows[i][j].span
           );
+        } else if (height === null && h !== null) {
+          height = h; // promote: prefer the static value
         }
         keptCells.push(cell);
         keptCols.push(w);
-        width += w;
+        width = width === null || w === null ? null : width + w;
       }
-      if (height === null) continue; // entire row was empty — drop it
+      if (height === undefined) continue; // entire row was empty — drop it
       rowsRetained.push(keptCells);
       rowHeights.push(height);
       rowWidths.push(width);
@@ -2270,19 +2283,31 @@ export class Lowerer {
       };
     }
 
-    // All retained rows must have the same width.
-    const width = rowWidths[0];
-    for (let i = 1; i < rowWidths.length; i++) {
-      if (rowWidths[i] !== width) {
+    // All retained rows must have the same width (statically when
+    // both sides are known; otherwise trust the user / runtime).
+    let staticWidth: number | null = null;
+    for (const w of rowWidths) {
+      if (w === null) continue;
+      if (staticWidth === null) {
+        staticWidth = w;
+      } else if (staticWidth !== w) {
         throw new TypeError(
-          `bracket vertcat column-count mismatch: row 1 has ${width} column(s), ` +
-            `row ${i + 1} has ${rowWidths[i]}`,
+          `bracket vertcat column-count mismatch: a row has ${staticWidth} ` +
+            `column(s), another has ${w}`,
           e.span
         );
       }
     }
-    const totalRows = rowHeights.reduce((p, q) => p + q, 0);
-    const totalCols = width;
+    const totalCols: number | null = staticWidth;
+    // Total rows = sum of row heights; null if any height is unknown.
+    let totalRows: number | null = 0;
+    for (const h of rowHeights) {
+      if (h === null) {
+        totalRows = null;
+        break;
+      }
+      totalRows += h;
+    }
 
     // Singleton case: one cell total, no concat needed — return the
     // cell's lowered IR unchanged. Matches MATLAB's `[v] === v`
@@ -2303,53 +2328,80 @@ export class Lowerer {
     // them.
     const cellsIR: IRExpr[][] = rowsRetained.map(row => row.map(c => c.expr));
 
-    // Try exact-fold. Every cell must be exact; total elements must
-    // fit the cap. Each cell's exact data is column-major and
-    // contiguous; we walk the destination's column-major slots.
+    // Try exact-fold. Only attempted when every dim is statically
+    // known (otherwise we can't allocate a fixed-size buffer or
+    // address into it). Every cell must be exact; total elements
+    // must fit the cap.
     let exactData: Float64Array | undefined;
-    const total = totalRows * totalCols;
-    if (total <= EXACT_ARRAY_MAX_ELEMENTS) {
-      const data = new Float64Array(total);
-      let allExact = true;
-      let rowOff = 0;
-      for (let i = 0; i < rowsRetained.length && allExact; i++) {
-        const row = rowsRetained[i];
-        let colOff = 0;
-        for (let j = 0; j < row.length && allExact; j++) {
-          const cell = row[j];
-          const cellRows = cellRowsOf(cell);
-          const cellCols_ = cellColsOf(cell);
-          if (cell.kind === "scalar") {
-            const v = exactDouble(cell.ty);
-            if (v === undefined) {
-              allExact = false;
-              break;
-            }
-            const dstIdx = rowOff + colOff * totalRows;
-            data[dstIdx] = v;
-          } else {
-            // tensor cell — must have exact buffer
-            const src = cell.ty.exact;
-            if (!(src instanceof Float64Array)) {
-              allExact = false;
-              break;
-            }
-            for (let sc = 0; sc < cellCols_; sc++) {
-              for (let sr = 0; sr < cellRows; sr++) {
-                const dstIdx = rowOff + sr + (colOff + sc) * totalRows;
-                const srcIdx = sr + sc * cellRows;
-                data[dstIdx] = src[srcIdx];
+    if (
+      totalRows !== null &&
+      totalCols !== null &&
+      rowHeights.every(h => h !== null) &&
+      cellCols.every(cc => cc.every(c => c !== null))
+    ) {
+      const total = totalRows * totalCols;
+      if (total <= EXACT_ARRAY_MAX_ELEMENTS) {
+        const data = new Float64Array(total);
+        let allExact = true;
+        let rowOff = 0;
+        for (let i = 0; i < rowsRetained.length && allExact; i++) {
+          const row = rowsRetained[i];
+          let colOff = 0;
+          for (let j = 0; j < row.length && allExact; j++) {
+            const cell = row[j];
+            const cellRowsKnown =
+              cell.kind === "scalar" ? 1 : (cell.rows as number);
+            const cellColsKnown =
+              cell.kind === "scalar" ? 1 : (cell.cols as number);
+            if (cell.kind === "scalar") {
+              const v = exactDouble(cell.ty);
+              if (v === undefined) {
+                allExact = false;
+                break;
+              }
+              const dstIdx = rowOff + colOff * totalRows;
+              data[dstIdx] = v;
+            } else {
+              const src = cell.ty.exact;
+              if (!(src instanceof Float64Array)) {
+                allExact = false;
+                break;
+              }
+              for (let sc = 0; sc < cellColsKnown; sc++) {
+                for (let sr = 0; sr < cellRowsKnown; sr++) {
+                  const dstIdx = rowOff + sr + (colOff + sc) * totalRows;
+                  const srcIdx = sr + sc * cellRowsKnown;
+                  data[dstIdx] = src[srcIdx];
+                }
               }
             }
+            colOff += cellColsKnown;
           }
-          colOff += cellCols_;
+          rowOff += rowHeights[i] as number;
         }
-        rowOff += rowHeights[i];
+        if (allExact) exactData = data;
       }
-      if (allExact) exactData = data;
     }
 
-    const resultTy = tensorDouble([totalRows, totalCols], exactData);
+    // Build the result type. Use `tensorDoubleFromDims` so a
+    // runtime-only axis lands as `{ kind: "unknown" }`.
+    const resultDims: DimInfo[] = [
+      totalRows === null
+        ? { kind: "unknown" }
+        : totalRows === 1
+          ? DIM_ONE
+          : { kind: "exact", value: totalRows },
+      totalCols === null
+        ? { kind: "unknown" }
+        : totalCols === 1
+          ? DIM_ONE
+          : { kind: "exact", value: totalCols },
+    ];
+    const resultTy = tensorDoubleFromDims(resultDims);
+    if (exactData !== undefined && resultTy.shape !== undefined) {
+      resultTy.exact = exactData;
+      resultTy.sign = signFromExactArray(exactData);
+    }
     return {
       kind: "TensorConcat",
       cells: cellsIR,
@@ -2359,13 +2411,6 @@ export class Lowerer {
       ty: resultTy,
       span: e.span,
     };
-
-    function cellRowsOf(c: NonEmptyCell): number {
-      return c.kind === "scalar" ? 1 : c.rows;
-    }
-    function cellColsOf(c: NonEmptyCell): number {
-      return c.kind === "scalar" ? 1 : c.cols;
-    }
   }
 
   private lowerBinary(e: Extract<Expr, { type: "Binary" }>): IRExpr {

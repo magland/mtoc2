@@ -32,6 +32,7 @@ import {
   isMultiElement,
   isNumeric,
   isOwned,
+  isScalar,
   scalarDouble,
   structTypedefName,
   typeToString,
@@ -1402,12 +1403,21 @@ function emitSliceSlotSetup(
 }
 
 /** Emit a `TensorConcat` as a GCC statement-expression: alloc a fresh
- *  tensor, write every cell into its (statically-known) rectangle of
- *  the destination, then evaluate to the tensor. Scalar cells write
- *  a single slot; tensor cells run a nested loop over the cell's
- *  rectangle copying column-major source data into the destination.
- *  ANF guarantees every tensor cell is already a `Var`, so reads
- *  from the cell carry no allocation cost.
+ *  tensor, write every cell into its rectangle of the destination,
+ *  then evaluate to the tensor. Scalar cells write a single slot;
+ *  tensor cells run a nested loop over the cell's rectangle copying
+ *  column-major source data into the destination. ANF guarantees
+ *  every tensor cell is already a `Var`, so reads from the cell
+ *  carry no allocation cost.
+ *
+ *  Two codegen paths:
+ *    - All-static: every per-cell dim and the output shape are known
+ *      compile-time integers. We unroll row / col offsets into
+ *      bake-in literals and emit straight-line copies.
+ *    - Dynamic: at least one dim is `null` in the IR (runtime-only).
+ *      Per-cell rows / cols come from `<cell>.dims[k]`; we accumulate
+ *      row / col offsets in `long` locals and walk the cells the
+ *      same way.
  *
  *  Mirrors numbl's `catAlongDim` (runtime/tensor-construction.ts:402+)
  *  output layout — column-major destination, per-cell rectangle. */
@@ -1418,34 +1428,52 @@ function emitTensorConcat(
   useRuntimeByName(state, "mtoc2_tensor_t");
   useRuntimeByName(state, "mtoc2_tensor_alloc_nd");
 
-  const [totalRows, totalCols] = e.shape;
+  const allStatic =
+    e.shape.every(s => s !== null) &&
+    e.rowHeights.every(h => h !== null) &&
+    e.cellCols.every(row => row.every(c => c !== null));
+  if (allStatic) {
+    return emitTensorConcatStatic(
+      e.cells,
+      e.shape as number[],
+      e.rowHeights as number[],
+      e.cellCols as number[][],
+      state
+    );
+  }
+  return emitTensorConcatDynamic(e, state);
+}
+
+function emitTensorConcatStatic(
+  cells: IRExpr[][],
+  shape: number[],
+  rowHeights: number[],
+  cellCols: number[][],
+  state: RuntimeState
+): string {
+  const [totalRows, totalCols] = shape;
+  void totalCols;
   const lines: string[] = [];
   lines.push(
-    `mtoc2_tensor_t _mtoc2_t = mtoc2_tensor_alloc_nd(2, (long[]){${totalRows}L, ${totalCols}L});`
+    `mtoc2_tensor_t _mtoc2_t = mtoc2_tensor_alloc_nd(2, (long[]){${totalRows}L, ${shape[1]}L});`
   );
 
   let rowOff = 0;
-  for (let i = 0; i < e.cells.length; i++) {
-    const row = e.cells[i];
-    const cellRows = e.rowHeights[i];
+  for (let i = 0; i < cells.length; i++) {
+    const row = cells[i];
+    const cellRows = rowHeights[i];
     let colOff = 0;
     for (let j = 0; j < row.length; j++) {
       const cell = row[j];
-      const cellCols = e.cellCols[i][j];
+      const cellColsHere = cellCols[i][j];
       const cellStr = emitExpr(cell, state);
 
-      if (cellRows === 1 && cellCols === 1) {
-        // Scalar cell — single slot write. `dst_idx = rowOff + colOff*totalRows`.
+      if (cellRows === 1 && cellColsHere === 1) {
         const dstIdx = `${rowOff}L + ${colOff}L * ${totalRows}L`;
         lines.push(`_mtoc2_t.real[${dstIdx}] = ${cellStr};`);
       } else {
-        // Tensor cell — nested column-major copy. cell.real is the
-        // source buffer; ANF has made it a Var, so `cellStr` is a
-        // bare identifier (no allocation cost on every iteration).
-        // The inner loop walks `sr` (source rows) — unit-stride on
-        // source — and the outer `sc` (source cols).
         lines.push(
-          `for (long _mtoc2_sc = 0; _mtoc2_sc < ${cellCols}L; _mtoc2_sc++) {`
+          `for (long _mtoc2_sc = 0; _mtoc2_sc < ${cellColsHere}L; _mtoc2_sc++) {`
         );
         lines.push(
           `  for (long _mtoc2_sr = 0; _mtoc2_sr < ${cellRows}L; _mtoc2_sr++) {`
@@ -1458,9 +1486,106 @@ function emitTensorConcat(
         lines.push(`  }`);
         lines.push(`}`);
       }
-      colOff += cellCols;
+      colOff += cellColsHere;
     }
     rowOff += cellRows;
+  }
+  lines.push(`_mtoc2_t;`);
+  return `({ ${lines.join(" ")} })`;
+}
+
+function emitTensorConcatDynamic(
+  e: Extract<IRExpr, { kind: "TensorConcat" }>,
+  state: RuntimeState
+): string {
+  const lines: string[] = [];
+  // Resolve every cell's emitted C expression up front and cache it.
+  // After ANF every tensor cell is a `Var` (bare identifier) and
+  // scalar cells are simple expressions — neither has side effects
+  // we'd be doubling up on by referencing twice.
+  const cellStrs: string[][] = e.cells.map(row =>
+    row.map(c => emitExpr(c, state))
+  );
+  // Per-cell row / col extent expressions.
+  const cellRowsExpr = (i: number, j: number): string => {
+    const c = e.cells[i][j];
+    if (c.ty.kind !== "Numeric") return "1L";
+    if (c.ty.dims.length === 0 || isScalar(c.ty)) return "1L";
+    const r = e.rowHeights[i];
+    if (r !== null) return `${r}L`;
+    return `${cellStrs[i][j]}.dims[0]`;
+  };
+  const cellColsExpr = (i: number, j: number): string => {
+    const c = e.cells[i][j];
+    if (c.ty.kind !== "Numeric") return "1L";
+    if (c.ty.dims.length === 0 || isScalar(c.ty)) return "1L";
+    const k = e.cellCols[i][j];
+    if (k !== null) return `${k}L`;
+    return `${cellStrs[i][j]}.dims[1]`;
+  };
+  // Emit row-height locals so we don't recompute the witness cell's
+  // `.dims[0]` more than once per row.
+  const rhLocals: string[] = [];
+  for (let i = 0; i < e.cells.length; i++) {
+    const name = `_mtoc2_rh_${i}`;
+    rhLocals.push(name);
+    // Pick the first cell's height as the witness — every cell in
+    // the row is required to share it (validated statically at
+    // lowering when both sides are known).
+    lines.push(`long ${name} = ${cellRowsExpr(i, 0)};`);
+  }
+  // Total height = sum of row heights.
+  const trExpr = e.shape[0] !== null ? `${e.shape[0]}L` : rhLocals.join(" + ");
+  lines.push(`long _mtoc2_tr = ${trExpr};`);
+  // Total width = first row's width = sum of its cells' cols.
+  const widthExpr = (() => {
+    if (e.shape[1] !== null) return `${e.shape[1]}L`;
+    if (e.cells.length === 0) return "0L";
+    return e.cells[0].map((_, j) => cellColsExpr(0, j)).join(" + ");
+  })();
+  lines.push(`long _mtoc2_tc = ${widthExpr};`);
+  lines.push(
+    `mtoc2_tensor_t _mtoc2_t = mtoc2_tensor_alloc_nd(2, (long[]){_mtoc2_tr, _mtoc2_tc});`
+  );
+
+  // Track destination row offset as a running long. Cells inside a
+  // row use their column-offset accumulator too.
+  lines.push(`long _mtoc2_row_off = 0;`);
+  for (let i = 0; i < e.cells.length; i++) {
+    const row = e.cells[i];
+    lines.push(`long _mtoc2_col_off_${i} = 0;`);
+    for (let j = 0; j < row.length; j++) {
+      const cell = row[j];
+      const cellStr = cellStrs[i][j];
+      const rowsHere = cellRowsExpr(i, j);
+      const colsHere = cellColsExpr(i, j);
+      const isScalarCell =
+        cell.ty.kind === "Numeric" &&
+        (cell.ty.dims.length === 0 || isScalar(cell.ty));
+      if (isScalarCell) {
+        const dstIdx = `_mtoc2_row_off + _mtoc2_col_off_${i} * _mtoc2_tr`;
+        lines.push(`_mtoc2_t.real[${dstIdx}] = ${cellStr};`);
+        lines.push(`_mtoc2_col_off_${i} += 1;`);
+      } else {
+        const sc = `_mtoc2_sc_${i}_${j}`;
+        const sr = `_mtoc2_sr_${i}_${j}`;
+        const cw = `_mtoc2_cw_${i}_${j}`;
+        const ch = `_mtoc2_ch_${i}_${j}`;
+        lines.push(`long ${cw} = ${colsHere};`);
+        lines.push(`long ${ch} = ${rowsHere};`);
+        lines.push(`for (long ${sc} = 0; ${sc} < ${cw}; ${sc}++) {`);
+        lines.push(`  for (long ${sr} = 0; ${sr} < ${ch}; ${sr}++) {`);
+        const dstIdx = `(_mtoc2_row_off + ${sr}) + (_mtoc2_col_off_${i} + ${sc}) * _mtoc2_tr`;
+        const srcIdx = `${sr} + ${sc} * ${ch}`;
+        lines.push(
+          `    _mtoc2_t.real[${dstIdx}] = ${cellStr}.real[${srcIdx}];`
+        );
+        lines.push(`  }`);
+        lines.push(`}`);
+        lines.push(`_mtoc2_col_off_${i} += ${cw};`);
+      }
+    }
+    lines.push(`_mtoc2_row_off += ${rhLocals[i]};`);
   }
   lines.push(`_mtoc2_t;`);
   return `({ ${lines.join(" ")} })`;

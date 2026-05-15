@@ -29,14 +29,18 @@
 
 import { UnsupportedConstruct } from "../../errors.js";
 import {
+  DIM_ONE,
+  type DimInfo,
   type NumericType,
   type Sign,
   EXACT_ARRAY_MAX_ELEMENTS,
+  isDimOne,
   isMultiElement,
   scalarDouble,
   signFromNumber,
   signIsNonneg,
   tensorDouble,
+  tensorDoubleFromDims,
 } from "../../types.js";
 import type { Span } from "../../../parser/index.js";
 import type { Builtin } from "../registry.js";
@@ -115,34 +119,60 @@ function checkDomain(a: NumericType, b: NumericType): string | null {
   );
 }
 
-/** Shape-compat check (same shape, or scalar on one side). Mirrors
- *  `elemwiseResultShape` in `_elemwise.ts`. */
+/** Shape resolution for `.^`. Returns `null` for scalar+scalar;
+ *  otherwise the output dim list plus a flag for whether broadcasting
+ *  is required. Same rules as `elemwiseResultShape` in `_elemwise.ts`:
+ *  align dims on axis 1, pad with trailing 1s, axis-wise
+ *  `da == db || da == 1 || db == 1`. */
 function powerShape(
   a: NumericType,
   b: NumericType,
   span: Span
-): number[] | null {
+): { outDims: DimInfo[]; bcast: boolean } | null {
   const aMulti = isMultiElement(a);
   const bMulti = isMultiElement(b);
   if (!aMulti && !bMulti) return null;
-  if (!aMulti) return b.shape ? b.shape.slice() : null;
-  if (!bMulti) return a.shape ? a.shape.slice() : null;
-  if (!a.shape || !b.shape) {
-    throw new UnsupportedConstruct(
-      `'.^' on tensors of unknown shape not yet supported`,
-      span
-    );
+  if (!aMulti) return { outDims: b.dims.slice(), bcast: false };
+  if (!bMulti) return { outDims: a.dims.slice(), bcast: false };
+  const rnd = Math.max(a.dims.length, b.dims.length);
+  const outDims: DimInfo[] = new Array(rnd);
+  let bcast = a.dims.length !== b.dims.length;
+  for (let i = 0; i < rnd; i++) {
+    const da: DimInfo = i < a.dims.length ? a.dims[i] : DIM_ONE;
+    const db: DimInfo = i < b.dims.length ? b.dims[i] : DIM_ONE;
+    const aOne = isDimOne(da);
+    const bOne = isDimOne(db);
+    if (aOne && bOne) {
+      outDims[i] = DIM_ONE;
+      continue;
+    }
+    if (aOne) {
+      outDims[i] = db;
+      bcast = true;
+      continue;
+    }
+    if (bOne) {
+      outDims[i] = da;
+      bcast = true;
+      continue;
+    }
+    if (da.kind === "exact" && db.kind === "exact") {
+      if (da.value !== db.value) {
+        throw new UnsupportedConstruct(
+          `'.^' shape mismatch: axis ${i + 1} is ${da.value} vs ${db.value}; incompatible for implicit expansion`,
+          span
+        );
+      }
+      outDims[i] = da;
+    } else if (da.kind === "exact") {
+      outDims[i] = da;
+    } else if (db.kind === "exact") {
+      outDims[i] = db;
+    } else {
+      outDims[i] = { kind: "unknown" };
+    }
   }
-  if (
-    a.shape.length !== b.shape.length ||
-    !a.shape.every((s, i) => s === b.shape![i])
-  ) {
-    throw new UnsupportedConstruct(
-      `'.^' shape mismatch (${a.shape.join("×")} vs ${b.shape.join("×")}); broadcast beyond scalar-on-one-side is not yet supported`,
-      span
-    );
-  }
-  return a.shape.slice();
+  return { outDims, bcast };
 }
 
 export const power: Builtin = {
@@ -157,9 +187,9 @@ export const power: Builtin = {
     const reject = checkDomain(a, b);
     if (reject !== null) throw new UnsupportedConstruct(reject, span);
 
-    const outShape = powerShape(a, b, span);
+    const resolved = powerShape(a, b, span);
 
-    if (outShape === null) {
+    if (resolved === null) {
       // Pure scalar OP scalar.
       const ax = exactDouble(a);
       const bx = exactDouble(b);
@@ -170,41 +200,99 @@ export const power: Builtin = {
       return scalarDouble(powerSign(a, b));
     }
 
-    // Tensor result — try exact-fold within the element cap.
+    // Tensor result — try exact-fold when the output shape is fully
+    // known and small enough.
+    const outTy = tensorDoubleFromDims(resolved.outDims);
     const aArr = exactRealArray(a);
     const bArr = exactRealArray(b);
     const ax = exactDouble(a);
     const bx = exactDouble(b);
     const aIsExact = aArr !== undefined || ax !== undefined;
     const bIsExact = bArr !== undefined || bx !== undefined;
-    const total = outShape.reduce((p, q) => p * q, 1);
-    if (aIsExact && bIsExact && total <= EXACT_ARRAY_MAX_ELEMENTS) {
+    if (
+      aIsExact &&
+      bIsExact &&
+      outTy.shape !== undefined &&
+      outTy.shape.reduce((p, q) => p * q, 1) <= EXACT_ARRAY_MAX_ELEMENTS
+    ) {
+      const outShape = outTy.shape;
+      const total = outShape.reduce((p, q) => p * q, 1);
+      // Mirror the broadcast-aware fold in `_elemwise.ts`: stride 0 on
+      // singleton axes, column-major output walk.
+      const rnd = outShape.length;
+      const aShape: number[] = new Array(rnd);
+      const bShape: number[] = new Array(rnd);
+      for (let i = 0; i < rnd; i++) {
+        const da = i < a.dims.length ? a.dims[i] : DIM_ONE;
+        const db = i < b.dims.length ? b.dims[i] : DIM_ONE;
+        aShape[i] = da.kind === "exact" ? da.value : 1;
+        bShape[i] = db.kind === "exact" ? db.value : 1;
+      }
+      const aStride: number[] = new Array(rnd);
+      const bStride: number[] = new Array(rnd);
+      let aAcc = 1;
+      let bAcc = 1;
+      for (let i = 0; i < rnd; i++) {
+        aStride[i] = aShape[i] === 1 ? 0 : aAcc;
+        bStride[i] = bShape[i] === 1 ? 0 : bAcc;
+        aAcc *= aShape[i];
+        bAcc *= bShape[i];
+      }
       const data = new Float64Array(total);
+      const ix = new Array(rnd).fill(0);
       let allFinite = true;
-      for (let i = 0; i < total; i++) {
-        const av = aArr ? aArr[i] : (ax as number);
-        const bv = bArr ? bArr[i] : (bx as number);
+      for (let k = 0; k < total; k++) {
+        let ai = 0;
+        let bi = 0;
+        for (let i = 0; i < rnd; i++) {
+          ai += ix[i] * aStride[i];
+          bi += ix[i] * bStride[i];
+        }
+        const av = aArr ? aArr[ai] : (ax as number);
+        const bv = bArr ? bArr[bi] : (bx as number);
         const v = Math.pow(av, bv);
         if (!Number.isFinite(v)) {
           allFinite = false;
           break;
         }
-        data[i] = v;
+        data[k] = v;
+        for (let i = 0; i < rnd; i++) {
+          ix[i]++;
+          if (ix[i] < outShape[i]) break;
+          ix[i] = 0;
+        }
       }
       if (allFinite) return tensorDouble(outShape, data);
     }
-    const out = tensorDouble(outShape);
-    out.sign = powerSign(a, b);
-    return out;
+    outTy.sign = powerSign(a, b);
+    return outTy;
   },
   codegenC(argsC, argTypes) {
-    const aMulti = isMultiElement(argTypes[0]);
-    const bMulti = isMultiElement(argTypes[1]);
+    const aN = argTypes[0] as NumericType;
+    const bN = argTypes[1] as NumericType;
+    const aMulti = isMultiElement(aN);
+    const bMulti = isMultiElement(bN);
     if (!aMulti && !bMulti) {
       return `pow(${argsC[0]}, ${argsC[1]})`;
     }
     if (aMulti && bMulti) {
-      return `mtoc2_tensor_power_tt(${argsC[0]}, ${argsC[1]})`;
+      // Re-derive broadcast vs same-shape from the arg types, same
+      // discipline as `_elemwise.ts`'s shared infix path.
+      const rnd = Math.max(aN.dims.length, bN.dims.length);
+      let needsBcast = aN.dims.length !== bN.dims.length;
+      if (!needsBcast) {
+        for (let i = 0; i < rnd; i++) {
+          const aOne = isDimOne(aN.dims[i]);
+          const bOne = isDimOne(bN.dims[i]);
+          if (aOne !== bOne) {
+            needsBcast = true;
+            break;
+          }
+        }
+      }
+      return needsBcast
+        ? `mtoc2_tensor_power_bcast_tt(${argsC[0]}, ${argsC[1]})`
+        : `mtoc2_tensor_power_tt(${argsC[0]}, ${argsC[1]})`;
     }
     if (aMulti) {
       return `mtoc2_tensor_power_ts(${argsC[0]}, ${argsC[1]})`;

@@ -18,12 +18,12 @@ import {
   type Sign,
   scalarDouble,
   tensorDouble,
+  tensorDoubleFromDims,
   signFromNumber,
   isScalar,
   isMultiElement,
   EXACT_ARRAY_MAX_ELEMENTS,
 } from "../../types.js";
-import { UnsupportedConstruct } from "../../errors.js";
 import type { Builtin } from "../registry.js";
 import { requireRealDouble, exactDouble, exactRealArray } from "../_shared.js";
 
@@ -62,30 +62,27 @@ export function defineUnaryRealMath(opts: UnaryRealMathOpts): Builtin {
         return scalarDouble(signRule(a));
       }
 
-      if (a.shape === undefined) {
-        throw new UnsupportedConstruct(
-          `'${name}' on a tensor of unknown shape not yet supported`,
-          span
-        );
-      }
-
-      // Tensor — try exact-fold within the element-count cap.
-      const arr = exactRealArray(a);
-      const total = a.shape.reduce((p, q) => p * q, 1);
-      if (arr !== undefined && total <= EXACT_ARRAY_MAX_ELEMENTS) {
-        const out = new Float64Array(arr.length);
-        let allFinite = true;
-        for (let i = 0; i < arr.length; i++) {
-          const v = jsFn(arr[i]);
-          if (!Number.isFinite(v)) {
-            allFinite = false;
-            break;
+      // Tensor input. The C helper walks `prod(dims)` regardless of
+      // static shape knowledge, so unknown-dim tensors are fine — we
+      // just can't fold their values.
+      if (a.shape !== undefined) {
+        const arr = exactRealArray(a);
+        const total = a.shape.reduce((p, q) => p * q, 1);
+        if (arr !== undefined && total <= EXACT_ARRAY_MAX_ELEMENTS) {
+          const out = new Float64Array(arr.length);
+          let allFinite = true;
+          for (let i = 0; i < arr.length; i++) {
+            const v = jsFn(arr[i]);
+            if (!Number.isFinite(v)) {
+              allFinite = false;
+              break;
+            }
+            out[i] = v;
           }
-          out[i] = v;
+          if (allFinite) return tensorDouble(a.shape, out);
         }
-        if (allFinite) return tensorDouble(a.shape, out);
       }
-      const out = tensorDouble(a.shape);
+      const out = tensorDoubleFromDims(a.dims.slice());
       out.sign = signRule(a);
       return out;
     },

@@ -230,22 +230,30 @@ export interface EndRef {
  *    numeric or a multi-element tensor `Var` (ANF hoists owned-
  *    producing non-Var cells to temps first).
  *  - `rowHeights[i]` is the row count of every cell in row `i` (rows
- *    are vertically aligned).
+ *    are vertically aligned). `null` means at least one cell on the
+ *    row has a runtime-only row count — codegen queries the witness
+ *    cell's `dims[0]` and trusts that all cells on the row match
+ *    (`mtoc2_check_concat_*` validates at runtime when both sides
+ *    are uncertain).
  *  - `cellCols[i][j]` is the column count of cell `j` in row `i`
- *    (cells horizontally concatenate along the row).
- *  - The result's shape `[totalRows, totalCols]` is statically known.
+ *    (cells horizontally concatenate along the row). `null` mirrors
+ *    `rowHeights`: runtime-only, queried from the cell's `dims[1]`.
+ *  - The result's shape `[totalRows, totalCols]` may contain `null`
+ *    for runtime-only axes; codegen computes the value from per-row
+ *    / per-cell dim queries and feeds it to `mtoc2_tensor_alloc_nd`.
  *
- *  Empty cells (any cell whose shape contains a 0) are filtered out
- *  during lowering — they evaporate per numbl's `catAlongDim` rule.
- *  The cell grid here only contains cells whose product is positive.
+ *  Empty cells (any cell whose shape contains a statically-known 0)
+ *  are filtered out during lowering — they evaporate per numbl's
+ *  `catAlongDim` rule. The cell grid here only contains cells whose
+ *  product is statically positive OR runtime-only.
  *
  *  Owned producer. Same ANF discipline as `TensorBuild`. */
 export interface TensorConcat {
   kind: "TensorConcat";
   cells: IRExpr[][];
-  rowHeights: number[];
-  cellCols: number[][];
-  shape: number[];
+  rowHeights: (number | null)[];
+  cellCols: (number | null)[][];
+  shape: (number | null)[];
   ty: Type;
   span: Span;
 }

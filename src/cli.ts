@@ -1,14 +1,19 @@
 #!/usr/bin/env tsx
 /**
- * mtoc2 CLI entry. Two subcommands:
- *   run <script.m>          translate, compile, execute; forward stdout
+ * mtoc2 CLI entry. Three subcommands:
+ *   run <script.m>                   translate + compile + execute
+ *   eval "<code>"                    same but from an inline code string
  *   translate <script.m> [-o out.c]  emit C only
  *
- * The script's directory is the workspace search path: every sibling
- * `.m` file is registered as a workspace file, so cross-file calls
- * (e.g. `helper(x)` referring to `helper.m`) resolve through numbl's
- * vendored resolver. Mirrors numbl's CLI exactly so the cross-runner
- * sees the same workspace shape from both runners.
+ * For `run`, the script's directory is the workspace search path: every
+ * sibling `.m` file is registered as a workspace file, so cross-file
+ * calls (`helper(x)` → `helper.m`) resolve through numbl's vendored
+ * resolver. For `eval`, the workspace is empty by default; pass
+ * `--path <dir>` to add a search directory (mirrors numbl's
+ * `numbl eval --path`).
+ *
+ * Mirrors numbl's CLI shape so the cross-runner sees the same
+ * workspace and run-mode options from both runners.
  */
 
 import {
@@ -20,15 +25,32 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve, basename } from "node:path";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
+import { createInterface } from "node:readline";
 
 import { translateProject, type SourceFile } from "./translate.js";
+import { applyPlotRecord, newPlotDispatchState } from "./utils/plotAdapter.js";
+import type { PlotRecord } from "./utils/wasmRunner.worker.js";
+import { createPlotHandler } from "../../numbl/src/cli-plot-handler.js";
+import type { PlotInstruction } from "../../numbl/src/graphics/types.js";
 
 function usage(): never {
-  console.error("usage: mtoc2 run <script.m>");
+  console.error(
+    "usage: mtoc2 run [--plot] [--check-leaks] [--path <dir>...] <script.m>"
+  );
+  console.error(
+    '       mtoc2 eval [--plot] [--check-leaks] [--path <dir>...] "<code>"'
+  );
   console.error("       mtoc2 translate <script.m> [-o out.c]");
   process.exit(2);
 }
+
+/** Byte prefix that `mtoc2_plot_dispatch` writes ahead of every JSON
+ *  plot record. Kept in lockstep with `runtime/plot_dispatch.h` and
+ *  the cross-runner's `GLOBAL_DROPS` (which is now redundant for
+ *  mtoc2's CLI output since we strip the prefix here, but kept as a
+ *  defensive backstop). */
+const PLOT_PREFIX = "\x1emtoc2:plot\t";
 
 /** Recursively scan `dir` for sibling `.m` files. Descends into
  *  `+pkg/` namespace dirs (so `+pkg/foo.m` is picked up as `pkg.foo`)
@@ -74,7 +96,28 @@ function scanSiblings(dir: string, excludeAbs: string): SourceFile[] {
   return out;
 }
 
-function translate(scriptPath: string): string {
+/** Lower-level translator. The caller assembles the workspace file
+ *  list and search paths; both `translateFile` and `cmdEval` route
+ *  through here so the in-memory-source path doesn't accidentally
+ *  diverge from the on-disk one. */
+function translateFiles(
+  files: SourceFile[],
+  mainName: string,
+  searchPaths: string[]
+): string {
+  const result = translateProject(files, mainName, { searchPaths });
+  if (result.error) {
+    const e = result.error;
+    const file = e.fileName ?? mainName;
+    const where =
+      e.startOffset !== undefined ? ` (offset ${e.startOffset})` : "";
+    console.error(`${file}: ${e.kind}: ${e.message}${where}`);
+    process.exit(1);
+  }
+  return result.c ?? "";
+}
+
+function translateFile(scriptPath: string, extraPaths: string[] = []): string {
   const absScript = resolve(scriptPath);
   const source = readFileSync(absScript, "utf8");
   const dir = dirname(absScript);
@@ -82,16 +125,32 @@ function translate(scriptPath: string): string {
     { name: absScript, source },
     ...scanSiblings(dir, absScript),
   ];
-  const result = translateProject(files, absScript, { searchPaths: [dir] });
-  if (result.error) {
-    const e = result.error;
-    const file = e.fileName ?? absScript;
-    const where =
-      e.startOffset !== undefined ? ` (offset ${e.startOffset})` : "";
-    console.error(`${file}: ${e.kind}: ${e.message}${where}`);
-    process.exit(1);
+  const searchPaths = [dir];
+  for (const p of extraPaths) {
+    const abs = resolve(p);
+    if (searchPaths.indexOf(abs) === -1) {
+      searchPaths.push(abs);
+      files.push(...scanSiblings(abs, absScript));
+    }
   }
-  return result.c ?? "";
+  return translateFiles(files, absScript, searchPaths);
+}
+
+function translateInline(code: string, extraPaths: string[] = []): string {
+  // "eval.m" is the same synthetic name numbl uses (`cmdEval` in
+  // numbl/src/cli.ts) so diagnostics from the cross-runner reference
+  // the same file in both runners.
+  const evalName = "eval.m";
+  const files: SourceFile[] = [{ name: evalName, source: code }];
+  const searchPaths: string[] = [];
+  for (const p of extraPaths) {
+    const abs = resolve(p);
+    if (searchPaths.indexOf(abs) === -1) {
+      searchPaths.push(abs);
+      files.push(...scanSiblings(abs, evalName));
+    }
+  }
+  return translateFiles(files, evalName, searchPaths);
 }
 
 interface RunOptions {
@@ -101,10 +160,21 @@ interface RunOptions {
    *  and the process exits non-zero. ~2x slowdown; off by default,
    *  but the cross-runner enables it for every script. */
   checkLeaks?: boolean;
+  /** Start numbl's plot server on the first plotting call. The server
+   *  serves numbl's `dist-plot-viewer` SPA and opens a browser tab;
+   *  records arriving on the C binary's stdout get translated into
+   *  numbl `PlotInstruction`s and pushed over SSE. Off by default —
+   *  scripts that emit plot records still have those records stripped
+   *  from stdout (so the user's console stays clean), they just aren't
+   *  rendered anywhere. */
+  plot?: boolean;
 }
 
-function runScript(scriptPath: string, opts: RunOptions = {}): void {
-  const cSrc = translate(scriptPath);
+/** Compile and execute a translated C source. Shared by `run` and
+ *  `eval` so both subcommands take the identical post-translate
+ *  pipeline (compile via `cc`, spawn the binary, intercept plot
+ *  records, wait for exit + plot server close). */
+async function runCSource(cSrc: string, opts: RunOptions = {}): Promise<void> {
   const dir = mkdtempSync(join(tmpdir(), "mtoc2-"));
   const cFile = join(dir, "out.c");
   const exeFile = join(dir, "out");
@@ -128,33 +198,105 @@ function runScript(scriptPath: string, opts: RunOptions = {}): void {
     process.exit(cc.status ?? 1);
   }
 
-  const run = spawnSync(exeFile, [], {
-    stdio: ["ignore", "inherit", "inherit"],
+  // Pipe the binary's stdout through a line-splitter so we can
+  // intercept plot-dispatch records before they reach the user's
+  // terminal. Without --plot, the records are still stripped — they're
+  // wire-protocol bytes, not user-facing output. With --plot, each
+  // record is translated through numbl's `dispatchPlotBuiltin` and
+  // pushed to numbl's plot server (which lazy-starts on the first
+  // batch and opens the standard plot-viewer in a browser tab).
+  const { onDrawnow, flushAndWait } = createPlotHandler(!opts.plot);
+  const plotState = newPlotDispatchState();
+
+  const child = spawn(exeFile, [], {
+    stdio: ["ignore", "pipe", "inherit"],
   });
-  process.exit(run.status ?? 0);
+
+  const rl = createInterface({ input: child.stdout });
+  rl.on("line", line => {
+    if (line.startsWith(PLOT_PREFIX)) {
+      if (!onDrawnow) return; // --plot disabled: silently drop
+      const body = line.slice(PLOT_PREFIX.length);
+      let record: PlotRecord;
+      try {
+        record = JSON.parse(body) as PlotRecord;
+      } catch {
+        process.stderr.write(`[mtoc2] malformed plot record: ${body}\n`);
+        return;
+      }
+      const batch: PlotInstruction[] = [];
+      applyPlotRecord(record, batch, plotState);
+      if (batch.length > 0) onDrawnow(batch);
+      return;
+    }
+    process.stdout.write(line + "\n");
+  });
+
+  const exitCode: number = await new Promise(res => {
+    child.on("exit", code => res(code ?? 0));
+  });
+  // Wait for the readline buffer to drain before flushing the plot
+  // server — last-line records would otherwise lose the race against
+  // server-close.
+  await new Promise<void>(res => rl.on("close", res));
+  await flushAndWait();
+  process.exit(exitCode);
 }
 
-function main(): void {
+/** Parse the shared flag set for `run` and `eval`: `--check-leaks`,
+ *  `--plot`, `--path <dir>` (repeatable), plus a single positional
+ *  (script path or code string). Two-token flags consume their next
+ *  arg. Unknown options or a missing positional abort to `usage()`. */
+function parseRunEvalArgs(argv: string[]): {
+  positional: string;
+  extraPaths: string[];
+  opts: RunOptions;
+} {
+  let checkLeaks = false;
+  let plot = false;
+  const extraPaths: string[] = [];
+  let positional: string | null = null;
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a === "--check-leaks") checkLeaks = true;
+    else if (a === "--plot") plot = true;
+    else if (a === "--path") {
+      if (i + 1 >= argv.length) {
+        console.error("Error: --path requires a directory argument");
+        process.exit(2);
+      }
+      extraPaths.push(argv[++i]);
+    } else if (a.startsWith("--")) {
+      console.error(`Error: unknown option '${a}'`);
+      usage();
+    } else if (positional === null) {
+      positional = a;
+    } else {
+      usage();
+    }
+  }
+  if (positional === null) usage();
+  return { positional, extraPaths, opts: { checkLeaks, plot } };
+}
+
+async function main(): Promise<void> {
   const argv = process.argv.slice(2);
   if (argv.length === 0) usage();
   const cmd = argv[0];
   if (cmd === "run") {
-    let checkLeaks = false;
-    let script: string | null = null;
-    for (let i = 1; i < argv.length; i++) {
-      const a = argv[i];
-      if (a === "--check-leaks") checkLeaks = true;
-      else if (script === null) script = a;
-      else usage();
-    }
-    if (script === null) usage();
-    runScript(script, { checkLeaks });
+    const { positional, extraPaths, opts } = parseRunEvalArgs(argv.slice(1));
+    await runCSource(translateFile(positional, extraPaths), opts);
+    return;
+  }
+  if (cmd === "eval") {
+    const { positional, extraPaths, opts } = parseRunEvalArgs(argv.slice(1));
+    await runCSource(translateInline(positional, extraPaths), opts);
     return;
   }
   if (cmd === "translate") {
     if (argv.length < 2) usage();
     const script = argv[1];
-    const c = translate(script);
+    const c = translateFile(script);
     let outPath: string | null = null;
     for (let i = 2; i < argv.length; i++) {
       if (argv[i] === "-o" && i + 1 < argv.length) {
@@ -171,11 +313,16 @@ function main(): void {
   }
   // Bare script path: default to `run`.
   if (cmd.endsWith(".m")) {
-    runScript(cmd);
+    await runCSource(translateFile(cmd));
     return;
   }
   usage();
   void basename;
 }
 
-main();
+main().catch(err => {
+  console.error(
+    err instanceof Error ? (err.stack ?? err.message) : String(err)
+  );
+  process.exit(1);
+});
