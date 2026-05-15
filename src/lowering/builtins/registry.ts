@@ -30,6 +30,16 @@ export interface Builtin {
   transfer(argTypes: Type[], span: Span): Type;
   /** Emit C expression. The caller wraps it as a statement when needed. */
   codegenC(argsC: string[], argTypes: Type[]): string;
+  /** Optional: per-slot C expression for the elementwise-fused emit
+   *  path (`src/codegen/emitTensorFused.ts`). Given the per-slot C
+   *  expression for each argument (scalar operands stay as-is; a
+   *  tensor operand is `<var>.real[i]`), return the per-slot C
+   *  expression for this builtin's result. The fused emitter only
+   *  calls this when *every* argument shape is compatible with the
+   *  enclosing iter loop's shape, so the builtin doesn't need to
+   *  reason about broadcasting. Builtins without this hook stay on
+   *  the helper-call path (the un-fused emit). */
+  perSlotC?(argsC: string[], argTypes: Type[]): string;
   /** Runtime-snippet names this builtin's codegenC output calls into.
    *  Registered names live in `src/codegen/runtime.ts`'s REGISTRY.
    *  The emitter activates each on every codegenC site so deps are

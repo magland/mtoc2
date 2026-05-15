@@ -1,0 +1,261 @@
+/**
+ * Elementwise-fused tensor Assign emission.
+ *
+ * For an Assign whose RHS is a pure elementwise expression and whose
+ * multi-element operands all share the target's static shape, emit a
+ * single inline iter loop instead of nested runtime-helper calls:
+ *
+ *     // c = a + b;     emits:
+ *     {
+ *       mtoc2_tensor_t _r = mtoc2_tensor_alloc_nd(a.ndim, a.dims);
+ *       long n = 1; for (int i = 0; i < _r.ndim; i++) n *= _r.dims[i];
+ *       MTOC2_OMP_PARFOR_N
+ *       for (long i = 0; i < n; i++) _r.real[i] = (a.real[i] + b.real[i]);
+ *       mtoc2_tensor_assign(&c, _r);
+ *     }
+ *
+ * For a single-Binary RHS this is equivalent (post-`-O3`) to the
+ * existing `mtoc2_tensor_assign(&c, mtoc2_tensor_plus_tt(a, b))`
+ * path — the helper's body is literally the same loop. The point of
+ * doing the inlining at the IR level is that the `--inline-temps`
+ * pass (phase 2) can fold a chain like `_t1 = a * b; c = _t1 + d`
+ * into `c = (a * b) + d`, which the fused emitter then renders as
+ * one loop with no intermediate tensor allocation.
+ *
+ * Phase 1 (this file) only handles the *same-static-shape* case. If
+ * any multi-element operand has a statically-different shape from
+ * the target, the Assign falls back to the runtime-helper path
+ * (`mtoc2_tensor_<op>_bcast_tt(...)`). Broadcast fusion is phase 3.
+ */
+
+import type { Assign, IRExpr } from "../lowering/ir.js";
+import type { NumericType } from "../lowering/types.js";
+import { isMultiElement, isNumeric } from "../lowering/types.js";
+import { getBuiltin } from "../lowering/builtins/index.js";
+import { useRuntimeByName, type RuntimeState } from "./runtime.js";
+
+/** True iff `e` is a pure-elementwise expression — only NumLit / Var /
+ *  Binary / Unary / Call to a builtin that has a `perSlotC` hook. No
+ *  owned producers (TensorBuild, TensorConcat, IndexSlice), no
+ *  non-elementwise calls (mtimes, reshape, sum, …), no user-fn calls,
+ *  no HandleLit, no IndexLoad/HandleCaptureLoad/MemberLoad, etc.
+ *
+ *  These are exactly the node kinds the per-slot renderer below
+ *  knows how to walk. */
+export function isPureElementwiseExpr(e: IRExpr): boolean {
+  switch (e.kind) {
+    case "NumLit":
+    case "Var":
+      return true;
+    case "Binary": {
+      // `Binary` covers more than elementwise ops — `mtimes` /
+      // `mrdivide` are matrix ops that need a runtime helper, not a
+      // per-slot template. Check the builtin's `perSlotC` hook.
+      const b = getBuiltin(e.builtin);
+      if (!b || !b.perSlotC) return false;
+      return isPureElementwiseExpr(e.left) && isPureElementwiseExpr(e.right);
+    }
+    case "Unary": {
+      const b = getBuiltin(e.builtin);
+      if (!b || !b.perSlotC) return false;
+      return isPureElementwiseExpr(e.operand);
+    }
+    case "Call": {
+      const b = getBuiltin(e.name);
+      if (!b || !b.perSlotC) return false;
+      return e.args.every(isPureElementwiseExpr);
+    }
+    default:
+      return false;
+  }
+}
+
+/** True iff the fused emitter can handle this Assign. Requires:
+ *    - target is a real-double multi-element tensor
+ *    - RHS is pure elementwise (see `isPureElementwiseExpr`)
+ *    - every multi-element Var in the RHS shares the target's static
+ *      shape (no broadcasting in this phase) */
+export function isFusableAssign(s: Assign): boolean {
+  if (!isNumeric(s.ty)) return false;
+  if (s.ty.isComplex) return false;
+  if (!isMultiElement(s.ty)) return false;
+  if (!isPureElementwiseExpr(s.expr)) return false;
+  return everyTensorVarMatchesShape(s.expr, s.ty);
+}
+
+function everyTensorVarMatchesShape(e: IRExpr, target: NumericType): boolean {
+  let ok = true;
+  walkExpr(e, sub => {
+    if (
+      sub.kind === "Var" &&
+      isNumeric(sub.ty) &&
+      isMultiElement(sub.ty) &&
+      !sameStaticShape(sub.ty, target)
+    ) {
+      ok = false;
+    }
+  });
+  return ok;
+}
+
+function sameStaticShape(a: NumericType, b: NumericType): boolean {
+  if (a.dims.length !== b.dims.length) return false;
+  for (let i = 0; i < a.dims.length; i++) {
+    const da = a.dims[i];
+    const db = b.dims[i];
+    if (da.kind !== db.kind) return false;
+    if (
+      da.kind === "exact" &&
+      db.kind === "exact" &&
+      da.value !== db.value
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function walkExpr(e: IRExpr, visit: (sub: IRExpr) => void): void {
+  visit(e);
+  switch (e.kind) {
+    case "Binary":
+      walkExpr(e.left, visit);
+      walkExpr(e.right, visit);
+      return;
+    case "Unary":
+      walkExpr(e.operand, visit);
+      return;
+    case "Call":
+      for (const a of e.args) walkExpr(a, visit);
+      return;
+    default:
+      return;
+  }
+}
+
+/** Render the per-slot C expression for `e`. Multi-element Vars
+ *  become `<cName>.real[i]`; scalar Vars stay as their bare cName;
+ *  NumLits render as their double form; Binary/Unary/Call routes
+ *  through each builtin's `perSlotC`. The fixed iter variable name
+ *  `i` matches the outer loop emitted by
+ *  `emitTensorAssignFused`. */
+function emitPerSlotExpr(e: IRExpr, state: RuntimeState): string {
+  switch (e.kind) {
+    case "NumLit":
+      return formatDouble(e.value);
+    case "Var":
+      if (isNumeric(e.ty) && isMultiElement(e.ty)) {
+        return `${e.cName}.real[i]`;
+      }
+      return e.cName;
+    case "Binary": {
+      const b = getBuiltin(e.builtin);
+      if (!b || !b.perSlotC) {
+        throw new Error(
+          `emitTensorFused internal: builtin '${e.builtin}' has no perSlotC`
+        );
+      }
+      activate(b.runtimeDeps, state);
+      return b.perSlotC(
+        [emitPerSlotExpr(e.left, state), emitPerSlotExpr(e.right, state)],
+        [e.left.ty, e.right.ty]
+      );
+    }
+    case "Unary": {
+      const b = getBuiltin(e.builtin);
+      if (!b || !b.perSlotC) {
+        throw new Error(
+          `emitTensorFused internal: builtin '${e.builtin}' has no perSlotC`
+        );
+      }
+      activate(b.runtimeDeps, state);
+      return b.perSlotC(
+        [emitPerSlotExpr(e.operand, state)],
+        [e.operand.ty]
+      );
+    }
+    case "Call": {
+      const b = getBuiltin(e.name);
+      if (!b || !b.perSlotC) {
+        throw new Error(
+          `emitTensorFused internal: builtin '${e.name}' has no perSlotC`
+        );
+      }
+      activate(b.runtimeDeps, state);
+      return b.perSlotC(
+        e.args.map(a => emitPerSlotExpr(a, state)),
+        e.args.map(a => a.ty)
+      );
+    }
+    default:
+      throw new Error(
+        `emitTensorFused internal: unexpected IR node '${e.kind}'`
+      );
+  }
+}
+
+function activate(
+  deps: ReadonlyArray<string> | undefined,
+  state: RuntimeState
+): void {
+  if (!deps) return;
+  for (const d of deps) useRuntimeByName(state, d);
+}
+
+/** Emit the fused inline iter loop. Pre-condition:
+ *  `isFusableAssign(s)` returned true. */
+export function emitTensorAssignFused(
+  s: Assign,
+  indent: string,
+  state: RuntimeState
+): string {
+  // Find a shape source. `isFusableAssign` guarantees at least one
+  // multi-element Var in the RHS (otherwise the target couldn't be
+  // multi-element — the lowering type system enforces this).
+  let shapeSrcCName: string | null = null;
+  walkExpr(s.expr, sub => {
+    if (
+      shapeSrcCName === null &&
+      sub.kind === "Var" &&
+      isNumeric(sub.ty) &&
+      isMultiElement(sub.ty)
+    ) {
+      shapeSrcCName = sub.cName;
+    }
+  });
+  if (shapeSrcCName === null) {
+    throw new Error(
+      `emitTensorFused internal: fusable Assign '${s.cName}' has no shape-source Var`
+    );
+  }
+
+  // Allocate via the N-D helper. `MTOC2_OMP_PARFOR_N` comes with the
+  // tensor typedef (transitively pulled in by `mtoc2_tensor_alloc_nd`).
+  useRuntimeByName(state, "mtoc2_tensor_alloc_nd");
+  useRuntimeByName(state, "mtoc2_tensor_assign");
+
+  const slot = emitPerSlotExpr(s.expr, state);
+  const lines = [
+    `${indent}{`,
+    `${indent}  mtoc2_tensor_t _r = mtoc2_tensor_alloc_nd(${shapeSrcCName}.ndim, ${shapeSrcCName}.dims);`,
+    `${indent}  long n = 1;`,
+    `${indent}  for (int i = 0; i < _r.ndim; i++) n *= _r.dims[i];`,
+    `${indent}  MTOC2_OMP_PARFOR_N`,
+    `${indent}  for (long i = 0; i < n; i++) _r.real[i] = ${slot};`,
+    `${indent}  mtoc2_tensor_assign(&${s.cName}, _r);`,
+    `${indent}}`,
+  ];
+  return lines.join("\n");
+}
+
+/** Format a JS number as a C double literal that round-trips. Mirrors
+ *  the formatter in `emit.ts` — duplicated here to keep this module
+ *  free of churn-prone emit.ts internals. */
+function formatDouble(v: number): string {
+  if (Number.isNaN(v)) return "NAN";
+  if (!Number.isFinite(v)) return v > 0 ? "INFINITY" : "(-INFINITY)";
+  if (Number.isInteger(v) && Math.abs(v) < 1e16) {
+    return `${v}.0`;
+  }
+  return v.toString();
+}

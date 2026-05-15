@@ -88,6 +88,11 @@ export const uminus: Builtin = {
     }
     return `(-${argsC[0]})`;
   },
+  perSlotC(argsC, argTypes) {
+    const ty = argTypes[0] as NumericType;
+    if (ty.isComplex) return `mtoc2_cneg(${argsC[0]})`;
+    return `(-${argsC[0]})`;
+  },
   runtimeDeps: [
     "mtoc2_tensor_elemwise_real",
     "mtoc2_tensor_elemwise_complex",

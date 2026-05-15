@@ -496,6 +496,24 @@ function buildElemwiseRealBinary(opts: {
       }
       return `mtoc2_tensor_${helperBase}_st(${argsC[0]}, ${argsC[1]})`;
     },
+    /** Per-slot template for the elementwise-fused emitter. The same
+     *  `scalarExpr` the scalar codegen path already uses — the fused
+     *  emitter feeds in `<var>.real[i]` for each tensor operand and a
+     *  bare C expression for each scalar operand. */
+    perSlotC(argsC, argTypes) {
+      const anyComplex =
+        (argTypes[0] as NumericType).isComplex ||
+        (argTypes[1] as NumericType).isComplex;
+      if (anyComplex) {
+        if (complexScalarExpr === undefined) {
+          throw new Error(
+            `internal: '${name}' missing complexScalarExpr in perSlotC`
+          );
+        }
+        return complexScalarExpr(argsC[0], argsC[1]);
+      }
+      return scalarExpr(argsC[0], argsC[1]);
+    },
     runtimeDeps: [...allDeps, "mtoc2_tensor_elemwise_complex", "mtoc2_cscalar"],
   };
 }

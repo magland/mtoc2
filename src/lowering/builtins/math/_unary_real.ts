@@ -121,6 +121,9 @@ export function defineUnaryRealMath(opts: UnaryRealMathOpts): Builtin {
       }
       return `${cFnReal}(${argsC[0]})`;
     },
+    perSlotC(argsC) {
+      return `${cFnReal}(${argsC[0]})`;
+    },
     runtimeDeps: ["mtoc2_tensor_unary_real_math"],
   };
 }

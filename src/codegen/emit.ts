@@ -68,6 +68,10 @@ import {
   specForHandle,
   specForStruct,
 } from "./emitNamedTypedef.js";
+import {
+  emitTensorAssignFused,
+  isFusableAssign,
+} from "./emitTensorFused.js";
 
 export interface EmitOptions {
   /** Include the activated runtime helper bodies in the output.
@@ -667,6 +671,15 @@ function emitStmt(
       return `${indent}${emitExpr(s.expr, state)};`;
     case "Assign": {
       if (isOwned(s.ty)) {
+        // Pure-elementwise same-shape tensor RHS goes through the
+        // fused inline-loop emitter — same generated work as the
+        // helper-call path for a depth-1 expression, but lets the
+        // (phase-2) inliner produce deeper expressions that share a
+        // single iter loop. See `emitTensorFused.ts`.
+        if (s.kind === "Assign" && isFusableAssign(s)) {
+          activateOwnedRuntime(s.ty, state);
+          return emitTensorAssignFused(s, indent, state);
+        }
         activateOwnedRuntime(s.ty, state);
         const h = requireOwnedHelpers(s.ty);
         const rhs = emitOwnedRhs(s.expr, state);
