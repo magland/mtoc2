@@ -54,3 +54,21 @@ typedef struct {
   int  ndim;
   long dims[MTOC2_MAX_NDIM];
 } mtoc2_tensor_t;
+
+/* OpenMP `#pragma omp parallel for if(n > 1024)` for elementwise
+ * loops that iterate over a length-`n` index. Active only when the
+ * C compiler runs with `-fopenmp` (which mtoc2's build adds when
+ * `--threads` is `auto` or a number `>= 2`); otherwise `_OPENMP` is
+ * undefined and the macro expands to nothing — the loop stays
+ * serial and the pragma never reaches the compiler. The
+ * `if(n > 1024)` clause keeps small loops serial regardless, so
+ * OpenMP region startup doesn't dominate for tensors that don't
+ * amortize the overhead. Defined once here because every elementwise
+ * runtime helper depends transitively on `mtoc2_tensor_t`. */
+#ifndef MTOC2_OMP_PARFOR_N
+# ifdef _OPENMP
+#  define MTOC2_OMP_PARFOR_N _Pragma("omp parallel for if(n > 1024)")
+# else
+#  define MTOC2_OMP_PARFOR_N
+# endif
+#endif

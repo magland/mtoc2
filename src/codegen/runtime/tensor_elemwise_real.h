@@ -32,6 +32,7 @@
     r.imag = NULL;                                                          \
     r.ndim = a.ndim;                                                        \
     for (int i = 0; i < a.ndim; i++) r.dims[i] = a.dims[i];                 \
+    MTOC2_OMP_PARFOR_N                                                      \
     for (long i = 0; i < n; i++) r.real[i] = a.real[i] OP b.real[i];        \
     return r;                                                               \
   }
@@ -45,6 +46,7 @@
     r.imag = NULL;                                                          \
     r.ndim = a.ndim;                                                        \
     for (int i = 0; i < a.ndim; i++) r.dims[i] = a.dims[i];                 \
+    MTOC2_OMP_PARFOR_N                                                      \
     for (long i = 0; i < n; i++) r.real[i] = a.real[i] OP s;                \
     return r;                                                               \
   }
@@ -58,6 +60,7 @@
     r.imag = NULL;                                                          \
     r.ndim = b.ndim;                                                        \
     for (int i = 0; i < b.ndim; i++) r.dims[i] = b.dims[i];                 \
+    MTOC2_OMP_PARFOR_N                                                      \
     for (long i = 0; i < n; i++) r.real[i] = s OP b.real[i];                \
     return r;                                                               \
   }
@@ -98,11 +101,14 @@
       long d0 = rdim[0], d1 = rdim[1];                                      \
       long as0 = astride[0], as1 = astride[1];                              \
       long bs0 = bstride[0], bs1 = bstride[1];                              \
-      long k = 0;                                                           \
+      /* Compute each row's `k` offset (`i1 * d0`) per outer iteration so   \
+       * the outer loop has no carried state — required for the OpenMP     \
+       * parallel-for below to be safe. */                                  \
+      MTOC2_OMP_PARFOR_N                                                    \
       for (long i1 = 0; i1 < d1; i1++) {                                    \
-        long aoff1 = i1 * as1, boff1 = i1 * bs1;                            \
+        long aoff1 = i1 * as1, boff1 = i1 * bs1, koff1 = i1 * d0;           \
         for (long i0 = 0; i0 < d0; i0++) {                                  \
-          r.real[k++] = a.real[aoff1 + i0 * as0] OP b.real[boff1 + i0 * bs0]; \
+          r.real[koff1 + i0] = a.real[aoff1 + i0 * as0] OP b.real[boff1 + i0 * bs0]; \
         }                                                                   \
       }                                                                     \
       return r;                                                             \
@@ -153,6 +159,7 @@ static mtoc2_tensor_t mtoc2_tensor_uminus(mtoc2_tensor_t a) {
   r.imag = NULL;
   r.ndim = a.ndim;
   for (int i = 0; i < a.ndim; i++) r.dims[i] = a.dims[i];
+  MTOC2_OMP_PARFOR_N
   for (long i = 0; i < n; i++) r.real[i] = -a.real[i];
   return r;
 }

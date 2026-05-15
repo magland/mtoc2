@@ -40,6 +40,7 @@ static double mtoc2_signum(double x) {
     r.imag = NULL;                                                          \
     r.ndim = a.ndim;                                                        \
     for (int i = 0; i < a.ndim; i++) r.dims[i] = a.dims[i];                 \
+    MTOC2_OMP_PARFOR_N                                                      \
     for (long i = 0; i < n; i++) r.real[i] = FN(a.real[i]);                 \
     return r;                                                               \
   }

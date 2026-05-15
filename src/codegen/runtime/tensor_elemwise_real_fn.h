@@ -35,6 +35,7 @@ static double mtoc2_mod_real(double a, double b) {
     r.imag = NULL;                                                          \
     r.ndim = a.ndim;                                                        \
     for (int i = 0; i < a.ndim; i++) r.dims[i] = a.dims[i];                 \
+    MTOC2_OMP_PARFOR_N                                                      \
     for (long i = 0; i < n; i++) r.real[i] = FN(a.real[i], b.real[i]);      \
     return r;                                                               \
   }
@@ -48,6 +49,7 @@ static double mtoc2_mod_real(double a, double b) {
     r.imag = NULL;                                                          \
     r.ndim = a.ndim;                                                        \
     for (int i = 0; i < a.ndim; i++) r.dims[i] = a.dims[i];                 \
+    MTOC2_OMP_PARFOR_N                                                      \
     for (long i = 0; i < n; i++) r.real[i] = FN(a.real[i], s);              \
     return r;                                                               \
   }
@@ -61,6 +63,7 @@ static double mtoc2_mod_real(double a, double b) {
     r.imag = NULL;                                                          \
     r.ndim = b.ndim;                                                        \
     for (int i = 0; i < b.ndim; i++) r.dims[i] = b.dims[i];                 \
+    MTOC2_OMP_PARFOR_N                                                      \
     for (long i = 0; i < n; i++) r.real[i] = FN(s, b.real[i]);              \
     return r;                                                               \
   }

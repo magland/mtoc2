@@ -74,10 +74,13 @@ export interface EmitOptions {
    *  Default true. When false, headers + a placeholder stub replace
    *  them so the user sees only their generated code. */
   includeRuntime?: boolean;
+  /** Max-threads OpenMP setting. See `TranslateOptions.threads`. */
+  threads?: number | "auto";
 }
 
 export function emitProgram(prog: IRProgram, opts: EmitOptions = {}): string {
   const includeRuntime = opts.includeRuntime ?? true;
+  const threads = opts.threads;
   const state = newRuntimeState();
   const userParts: string[] = [];
 
@@ -114,6 +117,15 @@ export function emitProgram(prog: IRProgram, opts: EmitOptions = {}): string {
 
   // Main.
   userParts.push("int main(void) {");
+  // `--threads N` (numeric, >= 2) → pin the OpenMP team size at
+  // startup; subsequent `#pragma omp parallel for` regions cap at N.
+  // `--threads auto` doesn't emit anything here — OpenMP picks from
+  // `OMP_NUM_THREADS` / core count via its own defaults. The
+  // `omp_set_num_threads` symbol comes from `<omp.h>`, which the
+  // header block below pulls in conditionally on the same predicate.
+  if (typeof threads === "number" && threads > 1) {
+    userParts.push(`  omp_set_num_threads(${threads});`);
+  }
   const mainLocals = collectLocals(prog.topLevelStmts);
   const mainOwned = mainLocals.owned;
   for (const o of mainOwned) {
@@ -162,8 +174,13 @@ export function emitProgram(prog: IRProgram, opts: EmitOptions = {}): string {
   userParts.push("");
 
   // Headers: BASE_HEADERS ∪ activated-snippet headers, deduped.
+  // `<omp.h>` only when we actually emit a call into the OpenMP API
+  // (`omp_set_num_threads(N)` for numeric `--threads N >= 2`). The
+  // `_Pragma("omp ...")` lines in the elementwise macros are
+  // preprocessor-handled and need no header.
   const headers = new Set<string>(BASE_HEADERS);
   for (const h of collectRuntimeHeaders(state)) headers.add(h);
+  if (typeof threads === "number" && threads > 1) headers.add("<omp.h>");
 
   const out: string[] = [];
   for (const h of headers) out.push(`#include ${h}`);

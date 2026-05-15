@@ -47,6 +47,13 @@ export interface TranslateOptions {
   includeRuntime?: boolean;
   /** Reserved for future use. */
   searchPaths?: ReadonlyArray<string>;
+  /** Max-threads OpenMP setting. Affects codegen only when set to a
+   *  numeric value `>= 2`: in that case `<omp.h>` is included and the
+   *  emitted `main()` calls `omp_set_num_threads(N)` once at startup.
+   *  `"auto"` and `1` (default) emit no OMP-specific code; the
+   *  `_Pragma("omp parallel for …")` lines in the elementwise runtime
+   *  macros activate purely via `-fopenmp` defining `_OPENMP`. */
+  threads?: number | "auto";
 }
 
 export function translateProject(
@@ -97,7 +104,9 @@ export function translateProject(
   try {
     const lowerer = new Lowerer(workspace);
     const prog = lowerer.lowerProgram(activeWsFile.ast);
-    return { c: emitProgram(prog, { includeRuntime }) };
+    return {
+      c: emitProgram(prog, { includeRuntime, threads: opts.threads }),
+    };
   } catch (e) {
     if (e instanceof UnsupportedConstruct || e instanceof TypeError) {
       return {

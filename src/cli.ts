@@ -35,15 +35,36 @@ import { PLOT_PREFIX } from "./utils/plotProtocol.js";
 import type { PlotRecord } from "./utils/wasmRunner.worker.js";
 import { createPlotHandler } from "../../numbl/src/cli-plot-handler.js";
 import type { PlotInstruction } from "../../numbl/src/graphics/types.js";
+import { buildCcArgs } from "./build.js";
+import {
+  isOptProfile,
+  OPT_PROFILES,
+  resolveOptSettings,
+  type OptProfile,
+  type OptSettings,
+} from "./optProfile.js";
 
 function usage(): never {
   console.error(
-    "usage: mtoc2 run [--js] [--plot] [--check-leaks] [--dump-c <path>] [--dump-js <path>] [--path <dir>...] <script.m>"
+    [
+      "usage:",
+      "  mtoc2 run [--js] [--plot] [--check-leaks] [--dump-c <path>] [--dump-js <path>]",
+      "    [--opt PROFILE] [--fast-math|--no-fast-math] [--threads N|auto]",
+      "    [--path <dir>...] <script.m>",
+      "  mtoc2 eval [--js] [--plot] [--check-leaks] [--dump-c <path>] [--dump-js <path>]",
+      '    [--opt PROFILE] [--fast-math|--no-fast-math] [--threads N|auto]',
+      '    [--path <dir>...] "<code>"',
+      "  mtoc2 translate <script.m> [-o out.c]",
+      "",
+      `--opt PROFILE: one of ${OPT_PROFILES.join(", ")}.`,
+      "    none       — fast-math off, threads 1 (single-threaded baseline)",
+      "    safe       — fast-math off, threads auto (the default)",
+      "    default    — same as safe",
+      "    aggressive — fast-math on, threads auto (numerics may drift in the last few ulps)",
+      "    `-O3 -march=native` is unconditional. `--fast-math`/`--no-fast-math` and",
+      "    `--threads` override individual profile settings.",
+    ].join("\n")
   );
-  console.error(
-    '       mtoc2 eval [--js] [--plot] [--check-leaks] [--dump-c <path>] [--dump-js <path>] [--path <dir>...] "<code>"'
-  );
-  console.error("       mtoc2 translate <script.m> [-o out.c]");
   process.exit(2);
 }
 
@@ -98,9 +119,10 @@ function scanSiblings(dir: string, excludeAbs: string): SourceFile[] {
 function translateFiles(
   files: SourceFile[],
   mainName: string,
-  searchPaths: string[]
+  searchPaths: string[],
+  threads?: number | "auto"
 ): string {
-  const result = translateProject(files, mainName, { searchPaths });
+  const result = translateProject(files, mainName, { searchPaths, threads });
   if (result.error) {
     const e = result.error;
     const file = e.fileName ?? mainName;
@@ -112,7 +134,11 @@ function translateFiles(
   return result.c ?? "";
 }
 
-function translateFile(scriptPath: string, extraPaths: string[] = []): string {
+function translateFile(
+  scriptPath: string,
+  extraPaths: string[] = [],
+  threads?: number | "auto"
+): string {
   const absScript = resolve(scriptPath);
   const source = readFileSync(absScript, "utf8");
   const dir = dirname(absScript);
@@ -128,10 +154,14 @@ function translateFile(scriptPath: string, extraPaths: string[] = []): string {
       files.push(...scanSiblings(abs, absScript));
     }
   }
-  return translateFiles(files, absScript, searchPaths);
+  return translateFiles(files, absScript, searchPaths, threads);
 }
 
-function translateInline(code: string, extraPaths: string[] = []): string {
+function translateInline(
+  code: string,
+  extraPaths: string[] = [],
+  threads?: number | "auto"
+): string {
   // "eval.m" is the same synthetic name numbl uses (`cmdEval` in
   // numbl/src/cli.ts) so diagnostics from the cross-runner reference
   // the same file in both runners.
@@ -145,7 +175,7 @@ function translateInline(code: string, extraPaths: string[] = []): string {
       files.push(...scanSiblings(abs, evalName));
     }
   }
-  return translateFiles(files, evalName, searchPaths);
+  return translateFiles(files, evalName, searchPaths, threads);
 }
 
 interface RunOptions {
@@ -178,29 +208,35 @@ interface RunOptions {
   /** If set, write the c2js-translated JavaScript source to this path
    *  before running it. Only meaningful with `--js`. */
   dumpJs?: string;
+  /** Resolved optimization settings — profile defaults composed with
+   *  any explicit `--fast-math` / `--threads` overrides. Drives both
+   *  the build flags and (for `--threads`) the codegen. Ignored on
+   *  the `--js` path: the JS runtime is single-threaded and has no
+   *  `-ffast-math` equivalent. */
+  opt: OptSettings;
 }
 
 /** Compile and execute a translated C source. Shared by `run` and
  *  `eval` so both subcommands take the identical post-translate
  *  pipeline (compile via `cc`, spawn the binary, intercept plot
  *  records, wait for exit + plot server close). */
-async function runCSource(cSrc: string, opts: RunOptions = {}): Promise<void> {
+async function runCSource(cSrc: string, opts: RunOptions): Promise<void> {
   if (opts.dumpC) writeFileSync(opts.dumpC, cSrc);
   const dir = mkdtempSync(join(tmpdir(), "mtoc2-"));
   const cFile = join(dir, "out.c");
   const exeFile = join(dir, "out");
   writeFileSync(cFile, cSrc);
 
-  const ccArgs = [
-    "-O0",
-    "-Wno-unused-label",
-    "-Wno-unused-function",
-    "-o",
-    exeFile,
-    cFile,
-    "-lm",
-  ];
-  if (opts.checkLeaks) ccArgs.unshift("-fsanitize=address", "-g");
+  const ccArgs = buildCcArgs(cFile, exeFile, {
+    checkLeaks: opts.checkLeaks,
+    fastMath: opts.opt.fastMath,
+    threads: opts.opt.threads,
+  });
+  // mtoc2's elementwise loops live in macro-defined helpers; the
+  // generated user code occasionally produces unused labels / static
+  // helpers that the C compiler warns about at -O3. Silence those so
+  // a `run` build doesn't spam stderr.
+  ccArgs.push("-Wno-unused-label", "-Wno-unused-function");
   const cc = spawnSync("cc", ccArgs, {
     stdio: ["ignore", "inherit", "inherit"],
   });
@@ -259,7 +295,7 @@ async function runCSource(cSrc: string, opts: RunOptions = {}): Promise<void> {
  *  intercepted with the same line-splitter as `runCSource` — the JS
  *  runtime writes `printf` output to `process.stdout`, so the plot
  *  prefix is byte-for-byte identical to the C path. */
-async function runJsSource(cSrc: string, opts: RunOptions = {}): Promise<void> {
+async function runJsSource(cSrc: string, opts: RunOptions): Promise<void> {
   if (opts.dumpC) writeFileSync(opts.dumpC, cSrc);
   const jsSrc = translateCToJs(cSrc);
   if (opts.dumpJs) writeFileSync(opts.dumpJs, jsSrc);
@@ -302,10 +338,11 @@ async function runJsSource(cSrc: string, opts: RunOptions = {}): Promise<void> {
   process.exit(exitCode);
 }
 
-/** Parse the shared flag set for `run` and `eval`: `--check-leaks`,
- *  `--plot`, `--path <dir>` (repeatable), plus a single positional
- *  (script path or code string). Two-token flags consume their next
- *  arg. Unknown options or a missing positional abort to `usage()`. */
+/** Parse the shared flag set for `run` and `eval`. Two-token flags
+ *  consume their next arg; unknown options or a missing positional
+ *  abort to `usage()`. The optimization flags (`--opt`, `--fast-math`/
+ *  `--no-fast-math`, `--threads N|auto`) mirror mtoc's CLI surface;
+ *  see [optProfile.ts](./optProfile.ts) for the profile semantics. */
 function parseRunEvalArgs(argv: string[]): {
   positional: string;
   extraPaths: string[];
@@ -316,6 +353,8 @@ function parseRunEvalArgs(argv: string[]): {
   let js = false;
   let dumpC: string | undefined;
   let dumpJs: string | undefined;
+  let profile: OptProfile | undefined;
+  const overrides: Partial<OptSettings> = {};
   const extraPaths: string[] = [];
   let positional: string | null = null;
   for (let i = 0; i < argv.length; i++) {
@@ -341,6 +380,42 @@ function parseRunEvalArgs(argv: string[]): {
         process.exit(2);
       }
       dumpJs = argv[++i];
+    } else if (a === "--opt") {
+      const v = argv[++i];
+      if (!isOptProfile(v)) {
+        console.error(
+          `Error: --opt requires one of ${OPT_PROFILES.join(", ")} (got '${v ?? ""}')`
+        );
+        process.exit(2);
+      }
+      profile = v;
+    } else if (a === "--fast-math") {
+      overrides.fastMath = true;
+    } else if (a === "--no-fast-math") {
+      overrides.fastMath = false;
+    } else if (a === "--threads") {
+      const v = argv[++i];
+      if (v === undefined) {
+        console.error("Error: --threads requires a value (N or 'auto')");
+        process.exit(2);
+      }
+      if (v === "auto") {
+        overrides.threads = "auto";
+      } else {
+        const n = parseInt(v, 10);
+        if (!Number.isFinite(n) || n < 1 || String(n) !== v) {
+          console.error(
+            `Error: --threads value must be a positive integer or 'auto' (got '${v}')`
+          );
+          process.exit(2);
+        }
+        overrides.threads = n;
+      }
+    } else if (a === "--inline-temps" || a === "--no-inline-temps") {
+      console.error(
+        `Error: ${a} is not supported by mtoc2 (no temp-inlining pass yet)`
+      );
+      process.exit(2);
     } else if (a.startsWith("--")) {
       console.error(`Error: unknown option '${a}'`);
       usage();
@@ -351,11 +426,18 @@ function parseRunEvalArgs(argv: string[]): {
     }
   }
   if (positional === null) usage();
+  const opt = resolveOptSettings(profile, overrides);
   return {
     positional,
     extraPaths,
-    opts: { checkLeaks, plot, js, dumpC, dumpJs },
+    opts: { checkLeaks, plot, js, dumpC, dumpJs, opt },
   };
+}
+
+/** Default-init a `RunOptions` for callers that don't go through
+ *  `parseRunEvalArgs` (the bare-script fallback). */
+function defaultRunOptions(): RunOptions {
+  return { opt: resolveOptSettings() };
 }
 
 async function main(): Promise<void> {
@@ -364,13 +446,13 @@ async function main(): Promise<void> {
   const cmd = argv[0];
   if (cmd === "run") {
     const { positional, extraPaths, opts } = parseRunEvalArgs(argv.slice(1));
-    const cSrc = translateFile(positional, extraPaths);
+    const cSrc = translateFile(positional, extraPaths, opts.opt.threads);
     await (opts.js ? runJsSource(cSrc, opts) : runCSource(cSrc, opts));
     return;
   }
   if (cmd === "eval") {
     const { positional, extraPaths, opts } = parseRunEvalArgs(argv.slice(1));
-    const cSrc = translateInline(positional, extraPaths);
+    const cSrc = translateInline(positional, extraPaths, opts.opt.threads);
     await (opts.js ? runJsSource(cSrc, opts) : runCSource(cSrc, opts));
     return;
   }
@@ -394,7 +476,7 @@ async function main(): Promise<void> {
   }
   // Bare script path: default to `run`.
   if (cmd.endsWith(".m")) {
-    await runCSource(translateFile(cmd));
+    await runCSource(translateFile(cmd), defaultRunOptions());
     return;
   }
   usage();
