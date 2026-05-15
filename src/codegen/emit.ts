@@ -22,7 +22,13 @@
  * it's a viewing aid.
  */
 
-import type { IRExpr, IRStmt, IRFunc, IRProgram } from "../lowering/ir.js";
+import type {
+  IRExpr,
+  IRStmt,
+  IRFunc,
+  IRProgram,
+  IndexSliceArg,
+} from "../lowering/ir.js";
 import { getBuiltin } from "../lowering/builtins/index.js";
 import { cTypeFor, requireOwnedHelpers } from "./cHelpers.js";
 import {
@@ -337,68 +343,16 @@ function fnParamList(fn: IRFunc): string {
  *  the surrounding function's stack frame (every local declaration
  *  is hoisted to function top to keep the free-on-exit walk
  *  simple). */
-function collectOwnedLocals(stmts: IRStmt[]): { cName: string; ty: Type }[] {
-  const seen = new Map<string, Type>();
-  const order: string[] = [];
-  const visit = (ss: IRStmt[]): void => {
-    for (const s of ss) {
-      switch (s.kind) {
-        case "Assign":
-          if (isOwned(s.ty) && !seen.has(s.cName)) {
-            seen.set(s.cName, s.ty);
-            order.push(s.cName);
-          }
-          break;
-        case "MultiAssignCall":
-          // Owned-typed N-output slot bindings need the same top-of-
-          // function predeclaration treatment as ordinary owned
-          // Assigns. v1 restricts slots to scalar real numeric, so
-          // this loop is structurally a no-op today — kept for the
-          // future-tensor-output extension.
-          for (const slot of s.outputs) {
-            if (
-              slot.binding !== null &&
-              isOwned(slot.ty) &&
-              !seen.has(slot.binding.cName)
-            ) {
-              seen.set(slot.binding.cName, slot.ty);
-              order.push(slot.binding.cName);
-            }
-          }
-          break;
-        case "If":
-          visit(s.thenBody);
-          visit(s.elseBody);
-          break;
-        case "While":
-          visit(s.body);
-          break;
-        case "For":
-          visit(s.body);
-          break;
-      }
-    }
-  };
-  visit(stmts);
-  return order.map(cName => ({ cName, ty: seen.get(cName)! }));
-}
-
-/** Walk the body and collect every non-owned local (scalars, including
- *  For loop vars and multi-assign slot bindings) so they can be
- *  pre-declared at function top with `double v = 0.0;`. Symmetric with
- *  `collectOwnedLocals`: every local is declared at function top, every
- *  Assign / loop-var rebinding is a plain `v = rhs;`. Without this,
- *  inner-block declarations would scope to the block and a later read
- *  (now reachable after the `mergeBranchEnvs` change that keeps
- *  partial-branch variables in scope) would reference an undeclared C
- *  variable. */
-function collectHoistedScalarLocals(
-  stmts: IRStmt[]
-): { cName: string; ty: Type }[] {
+/** Walk the body and collect every local (any kind) that needs a top-
+ *  of-function predeclaration. Includes Assign LHSes, MultiAssignCall
+ *  slot bindings, and For loop vars (the For node carries its own
+ *  loop var so reads after the loop see the last iteration's value).
+ *  Owned vs scalar is decided downstream by the caller — see
+ *  `collectOwnedLocals` and `collectHoistedScalarLocals`. */
+function collectAllLocals(stmts: IRStmt[]): { cName: string; ty: Type }[] {
   const seen = new Map<string, Type>();
   const order: string[] = [];
   const note = (cName: string, ty: Type): void => {
-    if (isOwned(ty)) return;
     if (seen.has(cName)) return;
     seen.set(cName, ty);
     order.push(cName);
@@ -410,6 +364,9 @@ function collectHoistedScalarLocals(
           note(s.cName, s.ty);
           break;
         case "MultiAssignCall":
+          // v1 restricts slots to scalar real numeric, so owned-typed
+          // bindings won't appear here today; kept for the future
+          // tensor-output extension.
           for (const slot of s.outputs) {
             if (slot.binding !== null) note(slot.binding.cName, slot.ty);
           }
@@ -422,9 +379,6 @@ function collectHoistedScalarLocals(
           visit(s.body);
           break;
         case "For":
-          // Loop var is intrinsic to the For node (declared by
-          // `for (...) { double k = ...; ... }` in codegen); hoist it
-          // so reads after the loop see the last iteration's value.
           note(s.cVar, scalarDouble());
           visit(s.body);
           break;
@@ -433,6 +387,24 @@ function collectHoistedScalarLocals(
   };
   visit(stmts);
   return order.map(cName => ({ cName, ty: seen.get(cName)! }));
+}
+
+function collectOwnedLocals(stmts: IRStmt[]): { cName: string; ty: Type }[] {
+  return collectAllLocals(stmts).filter(({ ty }) => isOwned(ty));
+}
+
+/** Non-owned locals (scalars, including For loop vars and multi-assign
+ *  slot bindings) so they can be pre-declared at function top with
+ *  `double v = 0.0;`. Symmetric with `collectOwnedLocals`: every local
+ *  is declared at function top, every Assign / loop-var rebinding is a
+ *  plain `v = rhs;`. Without this, inner-block declarations would scope
+ *  to the block and a later read (now reachable after the
+ *  `mergeBranchEnvs` change that keeps partial-branch variables in
+ *  scope) would reference an undeclared C variable. */
+function collectHoistedScalarLocals(
+  stmts: IRStmt[]
+): { cName: string; ty: Type }[] {
+  return collectAllLocals(stmts).filter(({ ty }) => !isOwned(ty));
 }
 
 function emitFunction(fn: IRFunc, state: RuntimeState): string {
@@ -1218,7 +1190,7 @@ function emitSliceSlotSetup(
   state: RuntimeState,
   lines: string[],
   indent: string,
-  slotsTyped: ReadonlyArray<import("../lowering/ir.js").IndexSliceArg>,
+  slotsTyped: ReadonlyArray<IndexSliceArg>,
   baseCName: string
 ): string[] {
   const slotSrc: string[] = [];
@@ -1502,6 +1474,74 @@ function emitTensorConcatDynamic(
   return `({ ${lines.join(" ")} })`;
 }
 
+/** Emit a single-slot linear Range slice's setup block: pushes locals
+ *  `_mtoc2_start`/`_mtoc2_end`/`_mtoc2_n`, gates a
+ *  `mtoc2_check_linear_range` call on a non-empty range, and returns a
+ *  function that maps a loop-counter expression to the corresponding
+ *  source/destination buffer offset. Shared by `emitIndexSliceProducer`
+ *  (read) and `emitIndexSliceStore` (write). */
+function emitLinearRangeSetup(
+  slot: Extract<IndexSliceArg, { kind: "Range" }>,
+  baseCName: string,
+  lines: string[],
+  indent: string,
+  state: RuntimeState
+): (kVar: string) => string {
+  if (slot.step.kind !== "NumLit") {
+    throw new Error("emit internal: index-slot Range step must be NumLit");
+  }
+  useRuntimeByName(state, "mtoc2_loop_count");
+  useRuntimeByName(state, "mtoc2_oob_abort");
+  const startStr = emitExpr(slot.start, state);
+  const endStr = emitExpr(slot.end, state);
+  const stepStr = formatDouble(slot.step.value);
+  const loc = locStringOf(slot.span);
+  lines.push(`${indent}double _mtoc2_start = ${startStr};`);
+  lines.push(`${indent}double _mtoc2_end = ${endStr};`);
+  lines.push(
+    `${indent}long _mtoc2_n = mtoc2_loop_count(_mtoc2_start, _mtoc2_end, ${stepStr});`
+  );
+  // Single-slot range slice indexes linearly over numel(base), not
+  // against a single axis dim. Skip the check on an empty range
+  // (MATLAB allows `v(5:4)` to yield 1×0).
+  lines.push(`${indent}if (_mtoc2_n > 0) {`);
+  lines.push(`${indent}  long _mtoc2_first = (long)_mtoc2_start;`);
+  lines.push(
+    `${indent}  long _mtoc2_last = (long)(_mtoc2_start + ${stepStr} * (double)(_mtoc2_n - 1));`
+  );
+  lines.push(
+    `${indent}  mtoc2_check_linear_range(&${baseCName}, _mtoc2_first, _mtoc2_last, ${loc});`
+  );
+  lines.push(`${indent}}`);
+  return k => `(long)(_mtoc2_start + ${stepStr} * (double)${k}) - 1L`;
+}
+
+/** Emit a "lhs/rhs element count mismatch" runtime check for a tensor
+ *  RHS in a slice store. Assumes `_mtoc2_n` is already declared as the
+ *  lhs slice element count. Pushes `_mtoc2_rhs_n` and the abort branch;
+ *  uses `exit(1)` rather than `abort()` so the CLI's
+ *  `process.exit(run.status ?? 0)` sees a non-zero status (SIGABRT
+ *  surfaces as `signal`, which the CLI would treat as a clean run). */
+function emitTensorRhsSizeCheck(
+  rhs: Extract<IRExpr, { kind: "Var" }>,
+  lines: string[],
+  indent: string
+): void {
+  const rhsParts: string[] = [];
+  if (rhs.ty.kind === "Numeric") {
+    for (let i = 0; i < rhs.ty.dims.length; i++) {
+      rhsParts.push(`${rhs.cName}.dims[${i}]`);
+    }
+  }
+  lines.push(`${indent}long _mtoc2_rhs_n = ${rhsParts.join(" * ")};`);
+  lines.push(`${indent}if (_mtoc2_n != _mtoc2_rhs_n) {`);
+  lines.push(
+    `${indent}  fprintf(stderr, "mtoc2: Subscripted assignment dimension mismatch (lhs slice has %ld elements, rhs has %ld)\\n", _mtoc2_n, _mtoc2_rhs_n);`
+  );
+  lines.push(`${indent}  exit(1);`);
+  lines.push(`${indent}}`);
+}
+
 /** Emit an `IndexSlice` as a C statement-expression-style block that
  *  allocates the result tensor, fills it, and evaluates to the result
  *  via a comma expression. The result is consumed at an owned consume
@@ -1544,36 +1584,8 @@ function emitIndexSliceProducer(
       resultRows = "_mtoc2_n";
       resultCols = "1";
     } else if (slot.kind === "Range") {
-      if (slot.step.kind !== "NumLit") {
-        throw new Error("emit internal: index-slot Range step must be NumLit");
-      }
-      useRuntimeByName(state, "mtoc2_loop_count");
-      useRuntimeByName(state, "mtoc2_oob_abort");
-      const startStr = emitExpr(slot.start, state);
-      const endStr = emitExpr(slot.end, state);
-      const stepStr = formatDouble(slot.step.value);
-      const loc = locStringOf(slot.span);
-      lines.push(`double _mtoc2_start = ${startStr};`);
-      lines.push(`double _mtoc2_end = ${endStr};`);
-      lines.push(
-        `long _mtoc2_n = mtoc2_loop_count(_mtoc2_start, _mtoc2_end, ${stepStr});`
-      );
-      // Single-slot range slice indexes linearly over numel(base),
-      // not against a single axis dim — `v(2:10)` on a 4-element row
-      // vector is OOB regardless of `dims[0]`. Skip the check on an
-      // empty range (MATLAB allows `v(5:4)` to yield 1×0).
-      lines.push(`if (_mtoc2_n > 0) {`);
-      lines.push(`  long _mtoc2_first = (long)_mtoc2_start;`);
-      lines.push(
-        `  long _mtoc2_last = (long)(_mtoc2_start + ${stepStr} * (double)(_mtoc2_n - 1));`
-      );
-      lines.push(
-        `  mtoc2_check_linear_range(&${baseCName}, _mtoc2_first, _mtoc2_last, ${loc});`
-      );
-      lines.push(`}`);
+      srcIndexFor = emitLinearRangeSetup(slot, baseCName, lines, "", state);
       count = "_mtoc2_n";
-      srcIndexFor = k =>
-        `(long)(_mtoc2_start + ${stepStr} * (double)${k}) - 1L`;
       // Single-slot range: row-vec → row, col-vec → col, matrix/N-D → row.
       const isColVec = e.base.ty.kind === "Numeric" && isColVecTy(e.base.ty);
       if (isColVec) {
@@ -1661,34 +1673,13 @@ function emitIndexSliceStore(
       lines.push(`${indent}  long _mtoc2_n = ${parts.join(" * ")};`);
       dstOffsetFor = k => k;
     } else if (slot.kind === "Range") {
-      if (slot.step.kind !== "NumLit") {
-        throw new Error("emit internal: index-slot Range step must be NumLit");
-      }
-      useRuntimeByName(state, "mtoc2_loop_count");
-      useRuntimeByName(state, "mtoc2_oob_abort");
-      const startStr = emitExpr(slot.start, state);
-      const endStr = emitExpr(slot.end, state);
-      const stepStr = formatDouble(slot.step.value);
-      const loc = locStringOf(slot.span);
-      lines.push(`${indent}  double _mtoc2_start = ${startStr};`);
-      lines.push(`${indent}  double _mtoc2_end = ${endStr};`);
-      lines.push(
-        `${indent}  long _mtoc2_n = mtoc2_loop_count(_mtoc2_start, _mtoc2_end, ${stepStr});`
+      dstOffsetFor = emitLinearRangeSetup(
+        slot,
+        baseCName,
+        lines,
+        `${indent}  `,
+        state
       );
-      // Linear-form bounds check (single-slot range slice writes
-      // index linearly over numel(base)). Skip the check on an
-      // empty range to allow `v(5:4) = []`-style no-ops.
-      lines.push(`${indent}  if (_mtoc2_n > 0) {`);
-      lines.push(`${indent}    long _mtoc2_first = (long)_mtoc2_start;`);
-      lines.push(
-        `${indent}    long _mtoc2_last = (long)(_mtoc2_start + ${stepStr} * (double)(_mtoc2_n - 1));`
-      );
-      lines.push(
-        `${indent}    mtoc2_check_linear_range(&${baseCName}, _mtoc2_first, _mtoc2_last, ${loc});`
-      );
-      lines.push(`${indent}  }`);
-      dstOffsetFor = k =>
-        `(long)(_mtoc2_start + ${stepStr} * (double)${k}) - 1L`;
     } else {
       throw new Error(
         "emit internal: single-slot Scalar IndexSliceStore should have routed to IndexStore"
@@ -1710,32 +1701,13 @@ function emitIndexSliceStore(
           `emit internal: IndexSliceStore tensor RHS must be a Var (got ${s.rhs.kind})`
         );
       }
-      const rhsCName = s.rhs.cName;
-      const rhsTy = s.rhs.ty;
-      const rhsParts: string[] = [];
-      if (rhsTy.kind === "Numeric") {
-        for (let i = 0; i < rhsTy.dims.length; i++) {
-          rhsParts.push(`${rhsCName}.dims[${i}]`);
-        }
-      }
-      lines.push(`${indent}  long _mtoc2_rhs_n = ${rhsParts.join(" * ")};`);
-      lines.push(`${indent}  if (_mtoc2_n != _mtoc2_rhs_n) {`);
-      lines.push(
-        `${indent}    fprintf(stderr, "mtoc2: Subscripted assignment dimension mismatch (lhs slice has %ld elements, rhs has %ld)\\n", _mtoc2_n, _mtoc2_rhs_n);`
-      );
-      // exit(1) rather than abort(): abort raises SIGABRT, which
-      // spawnSync surfaces as `signal` instead of `status`, so the
-      // CLI's `process.exit(run.status ?? 0)` would report a clean
-      // run despite the diagnostic. exit(1) gives a non-zero status
-      // the cross-runner sees.
-      lines.push(`${indent}    exit(1);`);
-      lines.push(`${indent}  }`);
+      emitTensorRhsSizeCheck(s.rhs, lines, `${indent}  `);
       lines.push(
         `${indent}  for (long _mtoc2_k = 0; _mtoc2_k < _mtoc2_n; _mtoc2_k++) {`
       );
       lines.push(`${indent}    long _mtoc2_dst = ${dstOffsetFor("_mtoc2_k")};`);
       lines.push(
-        `${indent}    ${baseCName}.real[_mtoc2_dst] = ${rhsCName}.real[_mtoc2_k];`
+        `${indent}    ${baseCName}.real[_mtoc2_dst] = ${s.rhs.cName}.real[_mtoc2_k];`
       );
       lines.push(`${indent}  }`);
     }
@@ -1765,23 +1737,7 @@ function emitIndexSliceStore(
         `emit internal: IndexSliceStore tensor RHS must be a Var (got ${s.rhs.kind})`
       );
     }
-    const rhsCName = s.rhs.cName;
-    const rhsTy = s.rhs.ty;
-    const rhsParts: string[] = [];
-    if (rhsTy.kind === "Numeric") {
-      for (let i = 0; i < rhsTy.dims.length; i++) {
-        rhsParts.push(`${rhsCName}.dims[${i}]`);
-      }
-    }
-    lines.push(`${indent}  long _mtoc2_rhs_n = ${rhsParts.join(" * ")};`);
-    lines.push(`${indent}  if (_mtoc2_n != _mtoc2_rhs_n) {`);
-    lines.push(
-      `${indent}    fprintf(stderr, "mtoc2: Subscripted assignment dimension mismatch (lhs slice has %ld elements, rhs has %ld)\\n", _mtoc2_n, _mtoc2_rhs_n);`
-    );
-    // exit(1), not abort() — see emitIndexSliceStore single-slot path
-    // for rationale (CLI swallows SIGABRT).
-    lines.push(`${indent}    exit(1);`);
-    lines.push(`${indent}  }`);
+    emitTensorRhsSizeCheck(s.rhs, lines, `${indent}  `);
   }
 
   for (let i = ndim - 1; i >= 0; i--) {
