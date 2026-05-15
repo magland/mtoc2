@@ -45,7 +45,7 @@ jobs:
         working-directory: mtoc2
 
       - name: Build numbl stdlib
-        run: npm run bundle:stdlib
+        run: npm install && npm run bundle:stdlib
         working-directory: numbl
 
       - name: Build
