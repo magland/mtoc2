@@ -15,12 +15,7 @@
 import type { Expr, LValue, Span } from "../parser/index.js";
 import { TypeError, UnsupportedConstruct } from "./errors.js";
 import type { IRStmt, IndexSliceArg } from "./ir.js";
-import {
-  isScalarRealNumeric,
-  isMultiElement,
-  isNumeric,
-  typeToString,
-} from "./types.js";
+import { isMultiElement, isNumeric, typeToString } from "./types.js";
 import type { Lowerer } from "./lower.js";
 import { lowerSliceArg } from "./lowerIndexSlice.js";
 import { resolveIndexBase } from "./indexResolve.js";
@@ -62,10 +57,18 @@ export function lowerIndexSliceStore(
       exprAst.span
     );
   }
-  if (rawRhs.ty.isComplex || rawRhs.ty.elem !== "double") {
+  if (rawRhs.ty.elem !== "double") {
     throw new UnsupportedConstruct(
-      `right-hand side of a range/colon indexed write must be real ` +
-        `double (got ${typeToString(rawRhs.ty)})`,
+      `right-hand side of a range/colon indexed write must be a double ` +
+        `(got ${typeToString(rawRhs.ty)})`,
+      exprAst.span
+    );
+  }
+  if (!r.baseTy.isComplex && rawRhs.ty.isComplex) {
+    throw new TypeError(
+      `cannot store a complex RHS into a real-typed tensor '${name}' ` +
+        `(would silently drop the imaginary part). Promote the base to ` +
+        `complex first (e.g. via 'x = x + 0i' before the indexed write).`,
       exprAst.span
     );
   }
@@ -78,7 +81,9 @@ export function lowerIndexSliceStore(
   // uniform. Same ANF rule used by every other owned consume site.
   const hoists: IRStmt[] = [];
   let rhs: typeof rawRhs;
-  if (isScalarRealNumeric(rawRhs.ty)) {
+  const rhsIsScalar =
+    isNumeric(rawRhs.ty) && rawRhs.ty.dims.every(d => d.kind === "exact" && d.value === 1);
+  if (rhsIsScalar) {
     rhs = rawRhs;
   } else if (isMultiElement(rawRhs.ty)) {
     rhs = this.anfRequireScalarOrVar(rawRhs, hoists);

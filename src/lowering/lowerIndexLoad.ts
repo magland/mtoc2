@@ -16,6 +16,7 @@ import type { IRExpr } from "./ir.js";
 import {
   isNumeric,
   isScalarRealNumeric,
+  scalarComplex,
   scalarDouble,
   signFromNumber,
   typeToString,
@@ -68,11 +69,12 @@ export function lowerIndexLoad(
   // (e.g. `zeros(sz(1)-1, sz(2))` after `sz = size(x)`) — can see the
   // value. Same discipline as scalarDouble exact: it propagates
   // through the type system but never substitutes a literal in C.
+  const folded = foldedElemType(baseTy, indices);
   return {
     kind: "IndexLoad",
     base,
     indices,
-    ty: foldedElemType(baseTy, indices) ?? scalarDouble("unknown"),
+    ty: folded ?? (baseTy.isComplex ? scalarComplex() : scalarDouble("unknown")),
     span,
   };
 }
@@ -86,8 +88,24 @@ function foldedElemType(
   indices: ReadonlyArray<IRExpr>
 ): NumericType | undefined {
   const shape = baseTy.shape;
+  if (shape === undefined) return undefined;
+
+  // Real path: data must be a flat Float64Array exact carrier.
+  // Complex path: data must be the split-buffer `{re, im}` carrier.
   const data = baseTy.exact;
-  if (shape === undefined || !(data instanceof Float64Array)) return undefined;
+  let realData: Float64Array | undefined;
+  let complexData: { re: Float64Array; im: Float64Array } | undefined;
+  if (data instanceof Float64Array) {
+    realData = data;
+  } else if (
+    data !== undefined &&
+    typeof data === "object" &&
+    (data as { re?: unknown }).re instanceof Float64Array
+  ) {
+    complexData = data as { re: Float64Array; im: Float64Array };
+  } else {
+    return undefined;
+  }
 
   const idxVals: number[] = [];
   for (const ix of indices) {
@@ -120,6 +138,12 @@ function foldedElemType(
     return undefined;
   }
 
-  const v = data[offset];
+  if (complexData !== undefined) {
+    return scalarComplex({
+      re: complexData.re[offset],
+      im: complexData.im[offset],
+    });
+  }
+  const v = realData![offset];
   return scalarDouble(signFromNumber(v), v);
 }

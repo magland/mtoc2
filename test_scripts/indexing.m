@@ -53,6 +53,12 @@ test_sort_col_vec();
 test_sort_two_output();
 test_sort_then_gather();
 
+test_complex_scalar_read();
+test_complex_scalar_write();
+test_complex_slice_read();
+test_complex_slice_write();
+test_complex_index_in_loop();
+
 % -------- scalar index --------
 
 function test_index_read_2d()
@@ -460,4 +466,66 @@ function test_sort_then_gather()
   %!numbl:opaque ab key
   [~, isort] = sort(key);
   disp(ab(:, isort));
+end
+
+% -------- complex indexing --------
+
+% Scalar reads of a complex tensor element: linear and per-axis.
+function test_complex_scalar_read()
+  a = [1+1i, 2+2i, 3+3i; 4+4i, 5+5i, 6+6i];
+  disp(a(1, 1));
+  disp(a(2, 3));
+  disp(a(4));  % linear column-major
+  % Same with an opaque base (no fold).
+  %!numbl:opaque a
+  disp(a(1, 2));
+  disp(a(2, 2));
+end
+
+% Scalar writes of a complex tensor element. Mixed complex/real RHS
+% into a complex base: real RHS writes imag=0.
+function test_complex_scalar_write()
+  b = [0i, 0i, 0i];
+  b(1) = 1 + 1i;
+  b(2) = 5;          % real RHS into complex base → imag = 0
+  b(3) = 2 - 3i;
+  disp(b);
+end
+
+% Slice reads of a complex tensor.
+function test_complex_slice_read()
+  a = [1+1i, 2+2i, 3+3i; 4+4i, 5+5i, 6+6i];
+  disp(a(:, 1));      % column
+  disp(a(1, :));      % row
+  disp(a(:));         % linear → column vec
+  disp(a(2, 1:2));    % range
+  % opaque
+  %!numbl:opaque a
+  disp(a(:, 2));
+end
+
+% Slice writes into a complex tensor.
+function test_complex_slice_write()
+  c = [0i, 0i, 0i, 0i, 0i];
+  c(2:4) = [1+1i, 2+2i, 3+3i];
+  disp(c);
+  % Scalar broadcast across all slots.
+  c(:) = 0;
+  disp(c);
+  c(:) = 7 - 7i;
+  disp(c);
+  % Real-tensor RHS into complex base via slice.
+  c = [0i, 0i, 0i];
+  c(:) = [10, 20, 30];
+  disp(c);
+end
+
+% Loop-driven complex indexed write — exercises the env-widening
+% / exact-strip path with an isComplex'd base.
+function test_complex_index_in_loop()
+  z = [0i, 0i, 0i, 0i];
+  for k = 1:4
+    z(k) = k + k*1i;
+  end
+  disp(z);
 end

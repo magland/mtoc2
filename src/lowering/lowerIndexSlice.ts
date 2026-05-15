@@ -26,6 +26,8 @@ import {
   isRowVecTy,
   isScalarRealNumeric,
   isNumeric,
+  tensorComplex,
+  tensorComplexFromDims,
   tensorDouble,
   tensorDoubleFromDims,
   type DimInfo,
@@ -110,6 +112,7 @@ export function lowerIndexSlice(
     slots.push(lowerSliceArg.call(this, baseCName, baseTy, axis, argExprs[i]));
   }
 
+  const wantComplex = baseTy.isComplex;
   let resultTy: Type;
   if (isSingleSlot) {
     const slot = slots[0];
@@ -119,12 +122,15 @@ export function lowerIndexSlice(
       // leading axis is runtime-only.
       if (baseTy.shape !== undefined) {
         const n = baseTy.shape.reduce((a, b) => a * b, 1);
-        resultTy = tensorDouble([n, 1]);
+        resultTy = wantComplex ? tensorComplex([n, 1]) : tensorDouble([n, 1]);
       } else {
-        resultTy = tensorDoubleFromDims([
+        const dims: DimInfo[] = [
           { kind: "unknown" },
           { kind: "exact", value: 1 },
-        ]);
+        ];
+        resultTy = wantComplex
+          ? tensorComplexFromDims(dims)
+          : tensorDoubleFromDims(dims);
       }
     } else if (slot.kind === "Range") {
       // For an index slot the parser-side range step must be a NumLit,
@@ -144,7 +150,9 @@ export function lowerIndexSlice(
         : isRowVec
           ? [oneDim, countDim]
           : [oneDim, countDim];
-      resultTy = tensorDoubleFromDims(resultDims);
+      resultTy = wantComplex
+        ? tensorComplexFromDims(resultDims)
+        : tensorDoubleFromDims(resultDims);
     } else {
       throw new UnsupportedConstruct(
         `internal: single-slot scalar slice should have routed through ` +
@@ -158,7 +166,9 @@ export function lowerIndexSlice(
     const resultDims: DimInfo[] = slots.map((slot, k) =>
       resultDimForSlot(slot, baseTy.dims[k])
     );
-    resultTy = tensorDoubleFromDims(resultDims);
+    resultTy = wantComplex
+      ? tensorComplexFromDims(resultDims)
+      : tensorDoubleFromDims(resultDims);
   }
 
   return {

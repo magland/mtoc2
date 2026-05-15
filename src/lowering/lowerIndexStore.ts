@@ -10,7 +10,12 @@
 import type { Expr, LValue, Span } from "../parser/index.js";
 import { TypeError, UnsupportedConstruct } from "./errors.js";
 import type { IRExpr, IRStmt } from "./ir.js";
-import { isScalarRealNumeric, typeToString } from "./types.js";
+import {
+  isNumeric,
+  isScalar,
+  isScalarRealNumeric,
+  typeToString,
+} from "./types.js";
 import type { Lowerer } from "./lower.js";
 import { resolveIndexBase } from "./indexResolve.js";
 
@@ -74,12 +79,33 @@ export function lowerIndexStore(
   }
 
   const rhs = this.lowerExpr(exprAst);
-  if (!isScalarRealNumeric(rhs.ty)) {
-    throw new TypeError(
-      `right-hand side of an indexed assignment must be a numeric scalar ` +
-        `(got ${typeToString(rhs.ty)})`,
-      exprAst.span
-    );
+  if (baseTy.isComplex) {
+    // Base is complex: RHS may be either real or complex scalar.
+    // The codegen splits a complex RHS via creal/cimag and writes
+    // both lanes; a real RHS goes to .real with .imag = 0.
+    if (!isNumeric(rhs.ty) || !isScalar(rhs.ty)) {
+      throw new TypeError(
+        `right-hand side of an indexed assignment must be a numeric scalar ` +
+          `(got ${typeToString(rhs.ty)})`,
+        exprAst.span
+      );
+    }
+  } else {
+    if (!isScalarRealNumeric(rhs.ty)) {
+      if (isNumeric(rhs.ty) && rhs.ty.isComplex && isScalar(rhs.ty)) {
+        throw new TypeError(
+          `cannot store a complex value into a real-typed tensor '${name}' ` +
+            `(would silently drop the imaginary part). Promote the base to ` +
+            `complex first (e.g. via 'x = x + 0i' before the indexed write).`,
+          exprAst.span
+        );
+      }
+      throw new TypeError(
+        `right-hand side of an indexed assignment must be a numeric scalar ` +
+          `(got ${typeToString(rhs.ty)})`,
+        exprAst.span
+      );
+    }
   }
 
   return { kind: "IndexStore", base, indices, rhs, span };

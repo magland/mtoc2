@@ -99,9 +99,9 @@ export function resolveIndexBase(
     );
   }
 
-  // v1 limit: real-double only. Logical / complex / char tensors are
-  // not yet a thing — when they land, expand here.
-  if (looked.ty.isComplex || looked.ty.elem !== "double") {
+  // Both real-double and complex-double tensors are supported.
+  // Logical / char tensors stay rejected until they're plumbed.
+  if (looked.ty.elem !== "double") {
     throw new UnsupportedConstruct(
       `${opPrefix(operation)} into ${typeToString(looked.ty)} is not yet supported`,
       span

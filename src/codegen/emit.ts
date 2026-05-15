@@ -699,6 +699,37 @@ function emitStmt(
     case "IndexStore": {
       const offset = emitNdScalarOffset(state, s.indices, s.base.cName);
       const rhs = emitExpr(s.rhs, state);
+      const baseIsComplex =
+        isNumeric(s.base.ty) && s.base.ty.isComplex;
+      const rhsIsComplex = isNumeric(s.rhs.ty) && s.rhs.ty.isComplex;
+      if (baseIsComplex) {
+        // Both lanes must be written. The offset expression may have
+        // side effects (function calls, autoinc, etc.), so hoist it to
+        // a local. RHS may be real (project imag → 0) or complex
+        // (split via `mtoc2_creal/cimag`).
+        useRuntimeByName(state, "mtoc2_cscalar");
+        if (rhsIsComplex) {
+          const lines: string[] = [];
+          lines.push(`${indent}{`);
+          lines.push(`${indent}  long _mtoc2_off = ${offset};`);
+          lines.push(`${indent}  double _Complex _mtoc2_rhs = ${rhs};`);
+          lines.push(
+            `${indent}  ${s.base.cName}.real[_mtoc2_off] = mtoc2_creal(_mtoc2_rhs);`
+          );
+          lines.push(
+            `${indent}  ${s.base.cName}.imag[_mtoc2_off] = mtoc2_cimag(_mtoc2_rhs);`
+          );
+          lines.push(`${indent}}`);
+          return lines.join("\n");
+        }
+        const lines: string[] = [];
+        lines.push(`${indent}{`);
+        lines.push(`${indent}  long _mtoc2_off = ${offset};`);
+        lines.push(`${indent}  ${s.base.cName}.real[_mtoc2_off] = ${rhs};`);
+        lines.push(`${indent}  ${s.base.cName}.imag[_mtoc2_off] = 0.0;`);
+        lines.push(`${indent}}`);
+        return lines.join("\n");
+      }
       return `${indent}${s.base.cName}.real[${offset}] = ${rhs};`;
     }
     case "IndexSliceStore":
@@ -1145,6 +1176,15 @@ function emitExpr(e: IRExpr, state: RuntimeState): string {
         );
       }
       const offset = emitNdScalarOffset(state, e.indices, e.base.cName);
+      if (isNumeric(e.base.ty) && e.base.ty.isComplex) {
+        // Compose the complex value from both lanes via `mtoc2_cmake`
+        // so the c2js side reuses its `{re, im}` JS impl. Avoid
+        // recomputing the offset twice by hoisting through a GCC
+        // statement-expression — the offset may include autoinc /
+        // bounds-checked sub-calls we don't want to re-evaluate.
+        useRuntimeByName(state, "mtoc2_cscalar");
+        return `({ long _mtoc2_off = ${offset}; mtoc2_cmake(${e.base.cName}.real[_mtoc2_off], ${e.base.cName}.imag[_mtoc2_off]); })`;
+      }
       return `${e.base.cName}.real[${offset}]`;
     }
     case "IndexSlice":
@@ -1679,9 +1719,24 @@ function emitIndexSliceProducer(
     );
   }
   useRuntimeByName(state, "mtoc2_tensor_t");
-  useRuntimeByName(state, "mtoc2_tensor_alloc_nd");
+  const baseIsComplex = isNumeric(e.base.ty) && e.base.ty.isComplex;
+  if (baseIsComplex) {
+    useRuntimeByName(state, "mtoc2_tensor_alloc_nd_complex");
+  } else {
+    useRuntimeByName(state, "mtoc2_tensor_alloc_nd");
+  }
+  const allocFn = baseIsComplex
+    ? "mtoc2_tensor_alloc_nd_complex"
+    : "mtoc2_tensor_alloc_nd";
   const baseCName = e.base.cName;
   const lines: string[] = [];
+
+  // Per-element copy: real lane unconditionally; imag lane only when
+  // base is complex (its `imag` is non-NULL).
+  const copyElem = (dstK: string, srcK: string): string =>
+    baseIsComplex
+      ? `_mtoc2_t.real[${dstK}] = ${baseCName}.real[${srcK}]; _mtoc2_t.imag[${dstK}] = ${baseCName}.imag[${srcK}];`
+      : `_mtoc2_t.real[${dstK}] = ${baseCName}.real[${srcK}];`;
 
   if (e.index.length === 1) {
     // Single-slot linear form.
@@ -1720,12 +1775,10 @@ function emitIndexSliceProducer(
       );
     }
     lines.push(
-      `mtoc2_tensor_t _mtoc2_t = mtoc2_tensor_alloc_nd(2, (long[]){${resultRows}, ${resultCols}});`
+      `mtoc2_tensor_t _mtoc2_t = ${allocFn}(2, (long[]){${resultRows}, ${resultCols}});`
     );
     lines.push(`for (long _mtoc2_k = 0; _mtoc2_k < ${count}; _mtoc2_k++) {`);
-    lines.push(
-      `  _mtoc2_t.real[_mtoc2_k] = ${baseCName}.real[${srcIndexFor("_mtoc2_k")}];`
-    );
+    lines.push(`  ${copyElem("_mtoc2_k", srcIndexFor("_mtoc2_k"))}`);
     lines.push(`}`);
     lines.push(`_mtoc2_t;`);
     return `({ ${lines.join(" ")} })`;
@@ -1741,7 +1794,7 @@ function emitIndexSliceProducer(
     dimsList.push(i < ndim ? `_mtoc2_n_${i}` : `1L`);
   }
   lines.push(
-    `mtoc2_tensor_t _mtoc2_t = mtoc2_tensor_alloc_nd(${resultRank}, (long[]){${dimsList.join(", ")}});`
+    `mtoc2_tensor_t _mtoc2_t = ${allocFn}(${resultRank}, (long[]){${dimsList.join(", ")}});`
   );
   for (let i = ndim - 1; i >= 0; i--) {
     lines.push(
@@ -1757,9 +1810,7 @@ function emitIndexSliceProducer(
       j => `_mtoc2_n_${j}`
     )};`
   );
-  lines.push(
-    `_mtoc2_t.real[_mtoc2_dst_off] = ${baseCName}.real[_mtoc2_src_off];`
-  );
+  lines.push(copyElem("_mtoc2_dst_off", "_mtoc2_src_off"));
   for (let i = ndim - 1; i >= 0; i--) {
     lines.push(`}`);
   }
@@ -1776,6 +1827,33 @@ function emitIndexSliceStore(
   const baseCName = s.base.cName;
   const rhsIsScalar =
     s.rhs.ty.kind === "Numeric" && s.rhs.ty.dims.every(isDimOne);
+  const baseIsComplex = isNumeric(s.base.ty) && s.base.ty.isComplex;
+  const rhsIsComplex = isNumeric(s.rhs.ty) && s.rhs.ty.isComplex;
+  if (baseIsComplex) {
+    useRuntimeByName(state, "mtoc2_cscalar");
+  }
+  // Per-element write template — handles 4 cases:
+  //   real base                 → write real lane only
+  //   complex base, real rhs    → real lane = src, imag lane = 0
+  //   complex base, complex rhs scalar → split via creal/cimag
+  //   complex base, complex rhs tensor → copy both lanes from source
+  // The `src*` arguments name the per-iteration C expressions for
+  // accessing the RHS (either a scalar local or `rhsTensor.real[k]`/
+  // `rhsTensor.imag[k]`).
+  const writeAt = (
+    dstK: string,
+    srcReal: string,
+    srcImag: string | undefined
+  ): string => {
+    if (!baseIsComplex) {
+      return `${baseCName}.real[${dstK}] = ${srcReal};`;
+    }
+    const imagExpr = srcImag !== undefined ? srcImag : "0.0";
+    return (
+      `${baseCName}.real[${dstK}] = ${srcReal}; ` +
+      `${baseCName}.imag[${dstK}] = ${imagExpr};`
+    );
+  };
   const lines: string[] = [];
   lines.push(`${indent}{`);
 
@@ -1807,12 +1885,22 @@ function emitIndexSliceStore(
 
     if (rhsIsScalar) {
       const rhsExpr = emitExpr(s.rhs, state);
-      lines.push(`${indent}  double _mtoc2_rhs = ${rhsExpr};`);
+      let srcReal: string;
+      let srcImag: string | undefined;
+      if (rhsIsComplex) {
+        lines.push(`${indent}  double _Complex _mtoc2_rhs = ${rhsExpr};`);
+        srcReal = "mtoc2_creal(_mtoc2_rhs)";
+        srcImag = "mtoc2_cimag(_mtoc2_rhs)";
+      } else {
+        lines.push(`${indent}  double _mtoc2_rhs = ${rhsExpr};`);
+        srcReal = "_mtoc2_rhs";
+        srcImag = undefined;
+      }
       lines.push(
         `${indent}  for (long _mtoc2_k = 0; _mtoc2_k < _mtoc2_n; _mtoc2_k++) {`
       );
       lines.push(`${indent}    long _mtoc2_dst = ${dstOffsetFor("_mtoc2_k")};`);
-      lines.push(`${indent}    ${baseCName}.real[_mtoc2_dst] = _mtoc2_rhs;`);
+      lines.push(`${indent}    ${writeAt("_mtoc2_dst", srcReal, srcImag)}`);
       lines.push(`${indent}  }`);
     } else {
       if (s.rhs.kind !== "Var") {
@@ -1825,8 +1913,14 @@ function emitIndexSliceStore(
         `${indent}  for (long _mtoc2_k = 0; _mtoc2_k < _mtoc2_n; _mtoc2_k++) {`
       );
       lines.push(`${indent}    long _mtoc2_dst = ${dstOffsetFor("_mtoc2_k")};`);
+      // RHS imag lane: prefer the source's imag when it has one;
+      // otherwise write 0 (real-typed tensor RHS into complex base).
+      const srcImag =
+        baseIsComplex && rhsIsComplex
+          ? `${s.rhs.cName}.imag[_mtoc2_k]`
+          : undefined;
       lines.push(
-        `${indent}    ${baseCName}.real[_mtoc2_dst] = ${s.rhs.cName}.real[_mtoc2_k];`
+        `${indent}    ${writeAt("_mtoc2_dst", `${s.rhs.cName}.real[_mtoc2_k]`, srcImag)}`
       );
       lines.push(`${indent}  }`);
     }
@@ -1847,9 +1941,18 @@ function emitIndexSliceStore(
   for (let i = 0; i < ndim; i++) totalParts.push(`_mtoc2_n_${i}`);
   lines.push(`${indent}  long _mtoc2_n = ${totalParts.join(" * ")};`);
 
+  let scalarSrcReal: string | undefined;
+  let scalarSrcImag: string | undefined;
   if (rhsIsScalar) {
     const rhsExpr = emitExpr(s.rhs, state);
-    lines.push(`${indent}  double _mtoc2_rhs = ${rhsExpr};`);
+    if (rhsIsComplex) {
+      lines.push(`${indent}  double _Complex _mtoc2_rhs = ${rhsExpr};`);
+      scalarSrcReal = "mtoc2_creal(_mtoc2_rhs)";
+      scalarSrcImag = "mtoc2_cimag(_mtoc2_rhs)";
+    } else {
+      lines.push(`${indent}  double _mtoc2_rhs = ${rhsExpr};`);
+      scalarSrcReal = "_mtoc2_rhs";
+    }
   } else {
     if (s.rhs.kind !== "Var") {
       throw new Error(
@@ -1871,7 +1974,7 @@ function emitIndexSliceStore(
   );
   if (rhsIsScalar) {
     lines.push(
-      `${indent}  ${innerInd}${baseCName}.real[_mtoc2_dst] = _mtoc2_rhs;`
+      `${indent}  ${innerInd}${writeAt("_mtoc2_dst", scalarSrcReal!, scalarSrcImag)}`
     );
   } else {
     const rhs = s.rhs as Extract<IRExpr, { kind: "Var" }>;
@@ -1881,8 +1984,10 @@ function emitIndexSliceStore(
         j => `_mtoc2_n_${j}`
       )};`
     );
+    const srcImag =
+      baseIsComplex && rhsIsComplex ? `${rhs.cName}.imag[_mtoc2_k]` : undefined;
     lines.push(
-      `${indent}  ${innerInd}${baseCName}.real[_mtoc2_dst] = ${rhs.cName}.real[_mtoc2_k];`
+      `${indent}  ${innerInd}${writeAt("_mtoc2_dst", `${rhs.cName}.real[_mtoc2_k]`, srcImag)}`
     );
   }
   for (let i = ndim - 1; i >= 0; i--) {
