@@ -353,6 +353,13 @@ const REGISTRY: ReadonlyMap<string, RuntimeSnippet> = new Map<
   // `norm(v)` vector 2-norm. One snippet defines both `_real` and
   // `_complex` variants; the type-system decides which one to call.
   ["mtoc2_tensor_norm", loadSnippet("tensor_norm.h", ["mtoc2_tensor_t"])],
+  // `besselh(nu, 1, x)` for nu in {0, 1} via POSIX `j0/j1/y0/y1`.
+  // One snippet defines both scalar and tensor entry points; the
+  // builtin dispatches via the exact value of `nu`.
+  [
+    "mtoc2_tensor_besselh",
+    loadSnippet("tensor_besselh.h", ["mtoc2_tensor_t", "mtoc2_alloc"]),
+  ],
   // Elementwise logical ops on real tensors. `~` (unary not) is the
   // only resident today; `|` / `&` will share the same snippet when
   // they land. Result tensors are logical-typed; the storage is still
