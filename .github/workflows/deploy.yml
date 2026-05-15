@@ -44,6 +44,10 @@ jobs:
         run: npm ci
         working-directory: mtoc2
 
+      - name: Build numbl stdlib
+        run: npm run bundle:stdlib
+        working-directory: numbl
+
       - name: Build
         run: npm run build
         working-directory: mtoc2

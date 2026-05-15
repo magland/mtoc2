@@ -77,6 +77,10 @@ jobs:
       - name: Install dependencies
         run: npm ci
         working-directory: mtoc2
+      
+      - name: Build numbl stdlib
+        run: npm run bundle:stdlib
+        working-directory: numbl
 
       - name: Run tests
         run: npm run test
