@@ -9,6 +9,8 @@ test_sum_known_row_vector();
 test_sum_known_col_vector();
 test_sum_unknown_shape_row_vector_field();
 test_exact_finite_discipline();
+test_eye_basics();
+test_eye_runtime();
 
 function test_construct_trim_trailing()
   A = zeros(3, 2, 1);
@@ -89,4 +91,26 @@ end
 
 function y = use_exact(t)
   y = sum(t);
+end
+
+function test_eye_basics()
+  % Empty, scalar-collapse, square, and non-square exact forms.
+  disp(size(eye(0)));
+  disp(eye(1));
+  disp(eye(3));
+  disp(eye(2, 3));
+  disp(eye(3, 2));
+  disp(eye(4, 4));
+  disp(size(eye(2, 0)));
+  disp(size(eye(0, 3)));
+end
+
+function test_eye_runtime()
+  % Runtime (non-exact) dims: both single-arg square and 2-arg rect.
+  n = 3;
+  %!numbl:opaque n
+  disp(eye(n));
+  m = 2;
+  %!numbl:opaque m
+  disp(eye(m, n));
 end

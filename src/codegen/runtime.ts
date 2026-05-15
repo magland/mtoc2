@@ -252,6 +252,11 @@ const REGISTRY: ReadonlyMap<string, RuntimeSnippet> = new Map<
     "mtoc2_tensor_ones_square",
     loadSnippet("tensor_ones_square.h", ["mtoc2_tensor_ones_nd"]),
   ],
+  // 2-D identity matrix. One file defines both the rectangular and
+  // single-eval square entry points; the snippet is keyed under one
+  // name (`mtoc2_tensor_eye`) and the `eye` builtin pulls it in via
+  // a single dep.
+  ["mtoc2_tensor_eye", loadSnippet("tensor_eye.h", ["mtoc2_tensor_alloc"])],
   [
     "mtoc2_reshape_nd",
     loadSnippet("tensor_reshape_nd.h", [
