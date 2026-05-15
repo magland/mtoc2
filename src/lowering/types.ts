@@ -527,9 +527,9 @@ export function isOwned(t: Type): boolean {
 
 /** Types that may appear in an N≥2-output multi-assign slot. Scalar
  *  real numeric outputs are stored by `*_mtoc2_o<i> = <local>` struct-
- *  copy; owned outputs use the kind's `_assign` helper to transfer
- *  ownership of the buffer pointer. Void / Unknown / String have no
- *  C representation that fits the sret slot and stay rejected. */
+ *  copy; owned outputs (tensor, struct, class instance, function
+ *  handle, Char, String) use the kind's `_assign` helper to transfer
+ *  ownership of the buffer pointer. Only Void / Unknown stay rejected. */
 export function isMultiOutputSlotType(t: Type): boolean {
   if (isScalarRealNumeric(t)) return true;
   if (isOwned(t)) return true;

@@ -49,6 +49,7 @@ enforces this byte-for-byte.
 type Type =
   | NumericType
   | StringType
+  | CharType
   | UnknownType
   | VoidType
   | HandleType
@@ -70,46 +71,19 @@ type Type =
 }
 ```
 
-- `elem` is the underlying element type. Today's path uses `double`
-  (and `logical` for comparison results).
-- `isComplex` is a separate axis from `elem` so the lattice stays flat.
-- `dims` is a per-axis lattice — each entry is either
-  `{kind: "exact", value: n}` (the axis length is statically known to
-  be the non-negative integer `n`) or `{kind: "unknown"}` (no static
-  info). Scalars carry `[{exact, 1}, {exact, 1}]`. The convenience
-  predicate `isDimOne(d)` covers the common "statically 1" check; call
-  sites that need "definitely > 1" inline
-  `d.kind === "exact" && d.value > 1`.
-- `shape` is the statically-known integer shape when available
-  (always set when every `dims[i]` is `exact`, and for scalars via the
-  factories). When set, `shape[i]` equals `dims[i].value`.
-- Both `dims` and `shape` are variable-length, capped at the same
-  `MTOC2_MAX_NDIM = 8` axes that the C runtime allows. ND tensors
-  (rank > 2) are constructed via the `zeros` / `ones` builtins;
-  every other code path (assign / copy / free / elemwise / `disp` /
-  `length` / `numel`) is shape-agnostic.
-- `provablyNonEmpty(t: NumericType)` is the lattice-aware
-  "definitely contains ≥ 1 element" predicate the reducer family
-  uses to refine sign / exact bounds (empty `sum → 0`, `prod → 1`,
-  `min/max → NaN`, etc.). True iff every `dims[i]` is `exact` with a
-  positive value (equivalently: `shape` is concrete with no zeros).
-  Scalars are always provably non-empty.
-- `sign` is one of `positive | nonneg | negative | nonpositive | zero
-| nonzero | unknown`. Coarser than exact but useful when exact isn't
-  available (e.g. `unifySign("positive", "positive") === "positive"`).
-  - On **scalars**, set by the factory (`scalarDouble(sign, exact?)`)
-    or derived via `signFromNumber` at exact-fold sites.
-  - On **tensors**, `tensorDouble(shape, exact?)` auto-derives the
-    sign from the exact data via `signFromExactArray`: a literal like
-    `[0 1 4 9]` carries `nonneg`, `[1 4 9]` carries `positive`, etc.
-    Tensors without exact data inherit `unknown` unless the caller
-    sets sign explicitly — the `zeros`/`ones` shape constructors do
-    this for results too large to carry exact data, so domain checks
-    like `sqrt(zeros(N, N))` succeed at translation time. The
-    `%!numbl:opaque` directive only strips `exact`; the derived
-    `sign` survives, so an opaque'd tensor that started life as
-    `[1 2 3]` is still statically `positive`.
-- `exact` is the precise value, when known. See below.
+- `elem` and `isComplex` are independent axes (complex isn't yet
+  wired through codegen).
+- `dims` is a per-axis lattice — each axis is either `{kind:
+"exact", value: n}` or `{kind: "unknown"}`. `shape` mirrors `dims`
+  as a plain `number[]` when every axis is exact, for convenience.
+  Both cap at `MTOC2_MAX_NDIM = 8` axes.
+- `sign` ∈ `{ positive, nonneg, negative, nonpositive, zero,
+  nonzero, unknown }` — coarser than exact but stays useful after
+  ops that lose `exact`. Tensor sign is derived from the exact data
+  when present (so `sqrt(zeros(N, N))` passes the domain check
+  without needing a runtime branch); the `%!numbl:opaque` directive
+  strips `exact` but leaves `sign` intact.
+- `exact` is the precise value when known. See below.
 
 ### StringType
 
@@ -117,8 +91,19 @@ type Type =
 { kind: "String"; exact?: string }
 ```
 
-Atomic strings (MATLAB string scalars). Char arrays are a separate
-shape that goes under `NumericType` with `elem: "char"`.
+Atomic strings (MATLAB string scalars; `"foo"`). Owned, backed by
+`mtoc2_string_t`. `length("foo") == 1`.
+
+### CharType
+
+```ts
+{ kind: "Char"; exact?: string }
+```
+
+1×N row of bytes — the single-quoted (`'foo'`) MATLAB char-array.
+Owned, backed by `mtoc2_char_tensor_t`. Distinct from `StringType`:
+`length('foo') == 3`. Multi-row chars aren't constructable in v1, so
+the type has no shape field — `exact.length` is the column count.
 
 ### UnknownType
 
@@ -336,33 +321,11 @@ body. Arithmetic still emits as runtime C.
 
 ## What's not in the lattice yet
 
-- **Logical as a distinct kind** — comparisons return `elem: "logical"`
-  today, but in C they're still emitted as `double` (0.0 or 1.0). Once
-  the codegen layer cares (e.g. for bit ops), this might split off.
-- **Multiple outputs**. Functions are restricted to 0 or 1 outputs for
-  now (a 0-output call yields the `Void` type, valid only as an
-  `ExprStmt` expression — see [architecture.md](architecture.md) for
-  the lowering rule). The lattice would extend trivially with a tuple
-  variant for multi-output.
-- **Structs and class instances** ARE in the lattice now
-  (`StructType` / `ClassType`) — both owned, both program-emit one
-  typedef per canonical shape. v1 caveats: structs must be introduced
-  via the `struct(...)` literal (no auto-create from `s.x = v`),
-  class properties must declare a default-value expression, and
-  classes have no inheritance / no operator overloads / no
-  `get.`/`set.` accessors. See the `StructType` / `ClassType`
-  sections above.
-- **Cells, sparse, dictionaries** — all live in numbl's RuntimeValue
-  model but mtoc2 hasn't grown the corresponding type-system entries
-  yet. Add them when the lowering scope reaches them.
-- **Function handles** ARE in the lattice (`HandleType`) — for any
-  user-function target, with captures of any non-String / non-Void
-  type (scalar real numeric, tensor, struct, class instance, or
-  another handle). See [architecture.md](architecture.md) for the
-  static-dispatch model and the codegen rule that emits one C typedef
-  plus owned-helpers per distinct capture-shape.
-  `canonicalizeType` for handles shards on `(targetName, captures)` so
-  higher-order calls like `apply(@foo, x)` vs `apply(@bar, x)` produce
-  distinct specializations. Builtin handles (`@disp`) and capture-
-  shape unification across CFG joins are not yet supported and produce
-  span-carrying lowering errors.
+- **Complex** — `isComplex` is reserved on `NumericType` but no
+  codegen path wires it through. Builtins with no real-only result
+  (e.g. `sqrt` of a negative) currently reject at translate.
+- **Logical as a distinct kind** — comparisons carry `elem:
+"logical"` but emit as `double` in C. Splitting it off would only
+  matter once codegen cares (bit ops, packed storage, etc.).
+- **Cells, sparse, dictionaries** — present in numbl's RuntimeValue
+  model, absent here. Add when the lowering scope reaches them.

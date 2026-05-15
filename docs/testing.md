@@ -149,18 +149,11 @@ directives, so cross-runner output is unaffected.
 
 ## Vitest (unit-level)
 
-Reserved for assertions that aren't ergonomic to express as `.m`
-scripts: emitted-C shape checks, type-lattice invariants, error-
-attribution coverage, edge cases in the canonicalize/hash pair.
-
-Current cases live under `tests/`:
-
-- `tests/directives.test.ts` — pins the `showtype` comment shape
-  and the `printtype` stderr-line format (incl. per-spec firing
-  and error-on-unknown-name).
-
-Don't add per-script entries to vitest — the cross-runner
-parallelizes much better and stays the oracle.
+Reserved for assertions that aren't ergonomic as `.m` scripts:
+type-lattice invariants, spec-key edge cases, and diagnostic error
+paths the cross-runner collapses to a single "errored" line.
+Cases live under `tests/`. Don't add per-script entries to vitest
+— the cross-runner parallelizes better and stays the oracle.
 
 ## Pre-merge checklist
 
@@ -180,10 +173,17 @@ script (`run_test_scripts.ts path/to/foo.m`).
 
 ## Test corpus organization
 
-`test_scripts/mvp/` holds the smoke set — ~12 short scripts covering
-scalar arithmetic, conditions, loops, and user-function specialization.
-These are the floor: if any of them fails, mtoc2 is broken.
+`test_scripts/` is organized as topic files (one `.m` per topic, with
+a thin top-level block that calls local `test_*` functions — see
+`indexing.m`, `tensors.m`, etc.). `mvp.m` is the smoke floor —
+scalar arithmetic, conditions, loops, and user-function
+specialization. If it fails, mtoc2 is broken.
 
-Future categories will mirror feature growth (strings, complex,
-arrays, structs, etc.). Keep each category small and focused — a few
-scripts per topic is plenty.
+New regression cases join the existing topic file (an indexing
+regression goes into `indexing.m`, a tensor-arithmetic regression
+into `tensors.m`, etc.). Start a fresh file only when the topic
+is genuinely new or the script needs its own
+`% mtoc2-test-mask:` / `% mtoc2-test-drop:` directive that would
+contaminate unrelated scripts. Per-script overhead is substantial
+(numbl spawn + mtoc2 spawn + `cc` + run), so keeping the count low
+matters.

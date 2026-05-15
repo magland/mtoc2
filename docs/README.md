@@ -1,8 +1,22 @@
 # mtoc2 developer docs
 
-Orientation material for people (and agents) extending mtoc2. The codebase
-is in early flux — these docs deliberately avoid line numbers and talk in
-terms of _concepts and roles_ so they stay accurate as files move around.
+These docs are written **for developers (and coding agents) who need
+to understand how mtoc2 works** — the pipeline, the type system, the
+owned-value contract, where each subsystem lives, and how to extend
+it. They are not a user manual for the numbl dialect (numbl owns
+that) and not an API reference for every builtin or runtime helper
+(the source is the reference).
+
+The codebase is in early flux. Docs avoid line numbers and talk in
+terms of _concepts and roles_ so they stay accurate as files move
+around. They cover what's load-bearing: things you'd otherwise have
+to reverse-engineer from the source, divergences from numbl that
+would confuse a reader of cross-runner output, and architectural
+rules that constrain future changes. They deliberately omit
+exhaustive enumerations — if a fact lives one `grep` away in
+well-named code, it doesn't need a doc entry. See the "Keep the
+docs lean" section in [CLAUDE.md](../CLAUDE.md) for the inclusion
+criteria.
 
 ## Where to start
 
@@ -13,10 +27,15 @@ terms of _concepts and roles_ so they stay accurate as files move around.
   specialization. This is the most distinctive subsystem; read it second.
 - [testing.md](testing.md) — the cross-runner harness, where new tests go.
 
-More pages will come online as the corresponding subsystems mature
-(builtins, runtime helpers, codegen, web IDE). The MVP scope is small
-enough that today's three pages cover the surface; resist the urge to
-add docs for features that don't exist yet.
+The web IDE (`src/App.tsx`, `src/pages/`, `src/components/`) is a
+React + Monaco UI that runs the translator in the browser and ships
+the emitted C to a remote wasm-compile service for in-Worker
+execution; project state lives in IndexedDB (`src/db/`) and projects
+can be shared via a pako-deflated URL hash (`src/utils/shareUrl.ts`).
+It mirrors the CLI's translator output exactly — no dedicated page
+yet; read the components if you need to touch it.
+
+Resist the urge to add docs for features that don't exist yet.
 
 ## Project conventions
 

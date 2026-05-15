@@ -296,6 +296,16 @@ cName}` and `lowerMultiAssign` routes through the same
   own, so the drop is a no-op there). MATLAB command syntax
   (`hold on`, `figure 1`) is not supported — use the call form
   (`hold('on')`, `figure(1)`).
+- **Short-circuit `&&` / `||`** — MATLAB-strict: scalar operands
+  only. Tensor operands are rejected with a span. This is a
+  deliberate divergence from numbl, which accepts tensors via
+  `toBool`; mtoc2 matches MATLAB semantics so emitted C can use
+  the native `&&`/`||` directly.
+- **`nargin` / `nargout`** — pseudo-variable reads inside a user-
+  function body fold to compile-time constants for the current
+  specialization. The specialization key salts on `nargout`, so
+  `[a]=f(x)`, `[a,b]=f(x)`, and `f(x);` against the same body
+  produce distinct C specs.
 
 Not yet supported: matrix division (`mrdivide` between two tensors),
 logical-mask indexing (`a(mask)`), linear-form vector-of-indices
@@ -324,6 +334,25 @@ Every change should keep `README.md` and `docs/` accurate. If you:
 
 Avoid hard-coding line numbers. Refer to subsystems and file _roles_ so
 docs survive routine refactors.
+
+**Keep the docs lean.** They're orientation material, not a reference
+manual — the source is the reference. When in doubt, leave it out.
+Add only what is:
+
+- user-visible (a supported feature, a CLI flag, an error message
+  users will hit), or
+- a divergence from numbl that someone reading the cross-runner
+  output would otherwise be confused by, or
+- a load-bearing architectural rule a contributor needs to know
+  before they edit the relevant subsystem, or
+- a correction to something that is actively wrong.
+
+Skip exhaustive enumerations (every builtin, every runtime helper
+header, every IR node, every `UnsupportedConstruct` message),
+internal helper names that aren't part of the contract, and "how
+it's implemented" details that would rot on the next refactor. If
+a fact lives one `grep` away in well-named code, it doesn't need
+a doc entry.
 
 ## Test discipline
 
@@ -359,8 +388,8 @@ Two layers, strict separation:
   scripts.
 
 - **Vitest** is reserved for unit-level assertions (emitted-C shapes,
-  error attribution, type-system invariants). Not used yet — add a
-  `tests/` directory when there's something worth covering at that level.
+  error attribution, type-system invariants). Cases live under `tests/`
+  and run with `npx vitest run`. Don't add per-script entries to vitest.
 
 If a divergence between mtoc2 and numbl is a real numbl bug, file it
 upstream; don't paper over it in mtoc2.
@@ -382,13 +411,13 @@ Tensors (and future owned types: strings, structs, classes) follow mtoc's
   assign helper can consume. A tensor `Var` read in a non-owning context
   (e.g. `disp` arg) passes the struct bare — no buffer copy.
 - Scope exit / before every `ReturnFromFunction` emits
-  `mtoc2_tensor_free(&v)` for each owned local — but **only when the
-  forward `nullAtScopeExit` dataflow can't prove the buffer is already
-  NULL** along every reaching path. Combined with the early-free
-  emission (see below), most variables get a single free at their
-  last use; scope-exit frees only fire when the analysis can't rule
-  out a live buffer (e.g., a tensor reassigned in a loop body whose
-  final iteration leaves an allocated buffer).
+  `mtoc2_tensor_free(&v)` for each owned local. The early-free pass
+  (see below) NULLs the buffer at its last use, and every owned
+  `_free` helper bottoms out at `free(NULL)` — so a scope-exit free
+  of an already-freed local is redundant but safe. Frees are emitted
+  unconditionally; an earlier `nullAtScopeExit` optimization tried
+  to skip provably-NULL frees but didn't model early-return paths
+  correctly and was removed.
 - **Early-free**: a backward "future-touch" dataflow
   (`src/codegen/liveness.ts`) computes per-stmt sets of owned C-names
   that may be touched (read or written) at any successor. After each
