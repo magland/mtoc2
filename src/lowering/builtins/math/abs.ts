@@ -56,10 +56,8 @@ export const abs: Builtin = {
   },
   codegenC(argsC, argTypes) {
     const a = argTypes[0] as NumericType;
-    if (a.isComplex) {
-      return `hypot(creal(${argsC[0]}), cimag(${argsC[0]}))`;
-    }
+    if (a.isComplex) return `mtoc2_cabs(${argsC[0]})`;
     return absReal.codegenC(argsC, argTypes);
   },
-  runtimeDeps: absReal.runtimeDeps,
+  runtimeDeps: [...(absReal.runtimeDeps ?? []), "mtoc2_cscalar"],
 };

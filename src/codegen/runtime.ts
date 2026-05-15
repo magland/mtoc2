@@ -89,6 +89,17 @@ const REGISTRY: ReadonlyMap<string, RuntimeSnippet> = new Map<
   ["mtoc2_disp_double", loadSnippet("disp_double.h", ["mtoc2_format_double"])],
 
   // ── Scalar complex helpers ────────────────────────────────────────
+  // Every `double _Complex` operation in mtoc2-emitted user code routes
+  // through one of these `static inline` wrappers (`mtoc2_cmake`,
+  // `mtoc2_cadd`, `mtoc2_cmul`, `mtoc2_creal`, `mtoc2_cnonzero`, …)
+  // instead of using C99's operator overloading or the `I` macro
+  // inline. Native cost is zero (the compiler inlines back to the
+  // same instructions C99 would have generated); the win is that
+  // the c2js JS backend can ship a matching set of helpers operating
+  // on a `{re, im}` representation without learning to type-track
+  // expressions. Any builtin whose codegen produces scalar-complex
+  // C lists `mtoc2_cscalar` in its `runtimeDeps`.
+  ["mtoc2_cscalar", loadSnippet("cscalar.h")],
   // Smith's algorithm-based complex divide that matches numbl's
   // signed-Inf-on-zero-divisor behavior. Activated by `rdivide`'s
   // complex scalar path.

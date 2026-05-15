@@ -331,7 +331,7 @@ export const power: Builtin = {
     const bMulti = isMultiElement(bN);
     if (!aMulti && !bMulti) {
       if (aN.isComplex || bN.isComplex) {
-        return `cpow(${argsC[0]}, ${argsC[1]})`;
+        return `mtoc2_cpow(${argsC[0]}, ${argsC[1]})`;
       }
       return `pow(${argsC[0]}, ${argsC[1]})`;
     }
@@ -360,5 +360,5 @@ export const power: Builtin = {
     // scalar .^ tensor — not commutative.
     return `mtoc2_tensor_power_st(${argsC[0]}, ${argsC[1]})`;
   },
-  runtimeDeps: ["mtoc2_tensor_elemwise_real_fn"],
+  runtimeDeps: ["mtoc2_tensor_elemwise_real_fn", "mtoc2_cscalar"],
 };

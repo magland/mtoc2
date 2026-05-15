@@ -62,21 +62,22 @@ export function defineCompare(
         // Materialize re/im for the operands; project a real-typed
         // operand to (re, 0) inline so the C expression doesn't have
         // to branch on which side is complex.
-        const aReC = aCx ? `creal(${argsC[0]})` : `(${argsC[0]})`;
-        const bReC = bCx ? `creal(${argsC[1]})` : `(${argsC[1]})`;
+        const aReC = aCx ? `mtoc2_creal(${argsC[0]})` : `(${argsC[0]})`;
+        const bReC = bCx ? `mtoc2_creal(${argsC[1]})` : `(${argsC[1]})`;
         if (kind === "eq") {
-          const aImC = aCx ? `cimag(${argsC[0]})` : "0.0";
-          const bImC = bCx ? `cimag(${argsC[1]})` : "0.0";
+          const aImC = aCx ? `mtoc2_cimag(${argsC[0]})` : "0.0";
+          const bImC = bCx ? `mtoc2_cimag(${argsC[1]})` : "0.0";
           return `((${aReC} == ${bReC} && ${aImC} == ${bImC}) ? 1.0 : 0.0)`;
         }
         if (kind === "ne") {
-          const aImC = aCx ? `cimag(${argsC[0]})` : "0.0";
-          const bImC = bCx ? `cimag(${argsC[1]})` : "0.0";
+          const aImC = aCx ? `mtoc2_cimag(${argsC[0]})` : "0.0";
+          const bImC = bCx ? `mtoc2_cimag(${argsC[1]})` : "0.0";
           return `((${aReC} != ${bReC} || ${aImC} != ${bImC}) ? 1.0 : 0.0)`;
         }
         return `((${aReC} ${cOp} ${bReC}) ? 1.0 : 0.0)`;
       }
       return `((${argsC[0]} ${cOp} ${argsC[1]}) ? 1.0 : 0.0)`;
     },
+    runtimeDeps: ["mtoc2_cscalar"],
   };
 }

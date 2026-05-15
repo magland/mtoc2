@@ -128,30 +128,36 @@ export function emitProgram(prog: IRProgram, opts: EmitOptions = {}): string {
   const mainOwnedTypes = new Map<string, Type>(
     mainOwned.map(o => [o.cName, o.ty])
   );
+  // Tail closure for main: scope-exit frees + `return 0;`. Called both
+  // at every `ReturnFromFunction` inside the top-level body (inline
+  // cleanup — no goto) and at the fall-through bottom. Activates the
+  // owned `_free` runtime deps eagerly so the snippet ships even when
+  // every path is an early return.
+  for (const o of mainOwned) activateOwnedRuntime(o.ty, state);
+  const mainReturnTail: EmitReturnTail = indent => {
+    const lines: string[] = [];
+    // Early-frees null the buffer, every `_free` helper is NULL-safe,
+    // so duplicate frees across overlapping early-return + fall-through
+    // paths are redundant but safe. A prior `nullAtScopeExit`
+    // optimization tried to skip provably-NULL frees but mis-modeled
+    // early returns; we don't ship it.
+    for (const o of mainOwned) {
+      const h = requireOwnedHelpers(o.ty);
+      lines.push(`${indent}${h.free}(&${o.cName});`);
+    }
+    lines.push(`${indent}return 0;`);
+    return lines.join("\n");
+  };
   const mainBody = emitBody(
     prog.topLevelStmts,
     "  ",
     state,
     mainFutureTouches,
-    mainOwnedTypes
+    mainOwnedTypes,
+    mainReturnTail
   );
   if (mainBody.length > 0) userParts.push(mainBody);
-  const mainHasRet = bodyHasReturn(prog.topLevelStmts);
-  if (mainHasRet) userParts.push(`mtoc2_return:`);
-  // Always emit scope-exit frees for every owned local. Early-frees
-  // null out the buffer, and every owned `_free` helper bottoms out at
-  // `free(NULL)` which is a no-op — so a scope-exit free of an already-
-  // freed local is redundant but safe. The previous `nullAtScopeExit`
-  // optimization tried to skip these frees, but it only modelled the
-  // fall-through path to the function end and treated `return;` as
-  // having no effect; that combination leaked owned locals along
-  // every early-return path.
-  for (const o of mainOwned) {
-    activateOwnedRuntime(o.ty, state);
-    const h = requireOwnedHelpers(o.ty);
-    userParts.push(`  ${h.free}(&${o.cName});`);
-  }
-  userParts.push("  return 0;");
+  userParts.push(mainReturnTail("  "));
   userParts.push("}");
   userParts.push("");
 
@@ -508,79 +514,83 @@ function emitFunction(fn: IRFunc, state: RuntimeState): string {
       fnOwnedTypes.set(fn.cParams[i], pTy);
     }
   }
-  const bodyText = emitBody(fn.body, "  ", state, futureTouches, fnOwnedTypes);
-  if (bodyText.length > 0) lines.push(bodyText);
-  const hasRet = bodyHasReturn(fn.body);
-  if (hasRet) lines.push(`mtoc2_return:`);
-  // Multi-output: write each output through its sret pointer. This
-  // happens BEFORE the scope-exit free walk so the writes can read
-  // the live locals before any tensor frees would zero them.
-  //
-  // Scalar slots: bare struct copy (`*_mtoc2_o<i> = <local>`).
-  // Owned slots: ownership transfer via the kind's `_assign` helper.
-  // The helper releases the destination's prior contents (always
-  // NULL on a freshly-empty slot from the caller, but `_assign` is
-  // still the right shape — it leaves the local moved-out). The
-  // local's scope-exit free is suppressed below; see the skip on
-  // `outputCNames` in the free walk.
+  // Tail closure: sret writes (multi-output) + scope-exit frees +
+  // `return [value];`. Called inline at every `ReturnFromFunction`
+  // site and at the fall-through bottom. Single source of truth so
+  // the two callers can't drift on cleanup order. Activate the
+  // owned `_free` (and multi-output `_assign`) snippets eagerly so
+  // they ship even when every path is an early return.
+  for (const o of [...owned, ...ownedParams]) activateOwnedRuntime(o.ty, state);
   if (isMulti) {
     for (let i = 0; i < nOutputs; i++) {
       const outTy = fn.outputTypes[i];
-      if (outTy && isOwned(outTy)) {
-        activateOwnedRuntime(outTy, state);
-        const h = requireOwnedHelpers(outTy);
-        lines.push(`  ${h.assign}(_mtoc2_o${i}, ${fn.cOutputs[i]});`);
-      } else {
-        lines.push(`  *_mtoc2_o${i} = ${fn.cOutputs[i]};`);
-      }
+      if (outTy && isOwned(outTy)) activateOwnedRuntime(outTy, state);
     }
   }
-  // Always emit scope-exit frees for every owned local and owned
-  // param. Early-frees null out the buffer, and every owned `_free`
-  // helper is NULL-safe, so scope-exit frees of already-freed locals
-  // are redundant but safe. See the comment in the main-body walk
-  // for why the previous `nullAtScopeExit` optimization was unsound
-  // along early-return paths.
-  for (const o of [...owned, ...ownedParams]) {
-    // Skip freeing the single-output return value — its buffer is
-    // about to transfer to the caller via return-by-value.
-    if (nOutputs === 1 && o.cName === fn.cOutputs[0]) continue;
-    // Multi-output owned slots are moved-out by the sret writes
-    // above; freeing them here would double-free the buffer the
-    // caller now owns.
-    if (isMulti && outputCNames.has(o.cName)) continue;
-    activateOwnedRuntime(o.ty, state);
-    const h = requireOwnedHelpers(o.ty);
-    lines.push(`  ${h.free}(&${o.cName});`);
-  }
-  if (isVoidFn) {
-    // `return;` is implicit at function end, but emit it when there's a
-    // `goto mtoc2_return;` label so the label can't sit at the close
-    // brace (which would be a syntax error in C).
-    if (hasRet) lines.push(`  return;`);
-  } else if (isMulti) {
-    // Multi-output sret writes already emitted above; just `return;`.
-    // Always emit it so the `mtoc2_return:` label (if present) has a
-    // statement to head.
-    lines.push(`  return;`);
-  } else {
-    lines.push(`  return ${fn.cOutputs[0]};`);
-  }
+  const fnReturnTail: EmitReturnTail = indent => {
+    const tail: string[] = [];
+    // Multi-output: write each output through its sret pointer
+    // BEFORE the scope-exit free walk so the writes can read the
+    // live locals before any tensor frees would zero them.
+    //   Scalar slots: bare struct copy (`*_mtoc2_o<i> = <local>`).
+    //   Owned slots:  ownership transfer via the kind's `_assign`
+    //                 helper. The local's scope-exit free is
+    //                 suppressed below (`outputCNames` skip).
+    if (isMulti) {
+      for (let i = 0; i < nOutputs; i++) {
+        const outTy = fn.outputTypes[i];
+        if (outTy && isOwned(outTy)) {
+          const h = requireOwnedHelpers(outTy);
+          tail.push(`${indent}${h.assign}(_mtoc2_o${i}, ${fn.cOutputs[i]});`);
+        } else {
+          tail.push(`${indent}*_mtoc2_o${i} = ${fn.cOutputs[i]};`);
+        }
+      }
+    }
+    for (const o of [...owned, ...ownedParams]) {
+      // Skip freeing the single-output return value — its buffer is
+      // about to transfer to the caller via return-by-value.
+      if (nOutputs === 1 && o.cName === fn.cOutputs[0]) continue;
+      // Multi-output owned slots are moved-out by the sret writes
+      // above; freeing them here would double-free the buffer the
+      // caller now owns.
+      if (isMulti && outputCNames.has(o.cName)) continue;
+      const h = requireOwnedHelpers(o.ty);
+      tail.push(`${indent}${h.free}(&${o.cName});`);
+    }
+    if (isVoidFn || isMulti) {
+      tail.push(`${indent}return;`);
+    } else {
+      tail.push(`${indent}return ${fn.cOutputs[0]};`);
+    }
+    return tail.join("\n");
+  };
+  const bodyText = emitBody(
+    fn.body,
+    "  ",
+    state,
+    futureTouches,
+    fnOwnedTypes,
+    fnReturnTail
+  );
+  if (bodyText.length > 0) lines.push(bodyText);
+  lines.push(fnReturnTail("  "));
   lines.push(`}`);
   return lines.join("\n");
 }
 
-function bodyHasReturn(body: IRStmt[]): boolean {
-  for (const s of body) {
-    if (s.kind === "ReturnFromFunction") return true;
-    if (s.kind === "If") {
-      if (bodyHasReturn(s.thenBody) || bodyHasReturn(s.elseBody)) return true;
-    } else if (s.kind === "While" || s.kind === "For") {
-      if (bodyHasReturn(s.body)) return true;
-    }
-  }
-  return false;
-}
+/** Emits the function/scope's exit cleanup + return statements at a
+ *  given indent. Called from two places: at every `ReturnFromFunction`
+ *  site (inline cleanup — no goto), and at the fall-through bottom of
+ *  the function. Single source of truth so the two callers can't
+ *  drift on which locals get freed in what order.
+ *
+ *  Why inline rather than goto-to-a-shared-tail: c2js can't translate
+ *  C `goto`, and we want a single C emit that works for both targets.
+ *  Inlining produces some duplication when a function has many early
+ *  returns and many owned locals, but typical mtoc2 functions are
+ *  small and the C compiler dedupes-by-tail-merge anyway. */
+type EmitReturnTail = (indent: string) => string;
 
 /** Emit a sequence of statements with their per-stmt early-frees.
  *  After each stmt, owned C-names that aren't in the stmt's
@@ -593,7 +603,8 @@ function emitBody(
   indent: string,
   state: RuntimeState,
   futureTouches: FutureTouchMap,
-  ownedTypes: ReadonlyMap<string, Type>
+  ownedTypes: ReadonlyMap<string, Type>,
+  emitReturnTail: EmitReturnTail
 ): string {
   const out: string[] = [];
   for (const s of stmts) {
@@ -601,7 +612,14 @@ function emitBody(
     if (header !== null) {
       out.push(`${indent}/* ${header} */`);
     }
-    const line = emitStmt(s, indent, state, futureTouches, ownedTypes);
+    const line = emitStmt(
+      s,
+      indent,
+      state,
+      futureTouches,
+      ownedTypes,
+      emitReturnTail
+    );
     if (line !== null) out.push(line);
     const freeNames = earlyFreeCandidates(s, futureTouches);
     for (const v of freeNames) {
@@ -624,7 +642,8 @@ function emitStmt(
   indent: string,
   state: RuntimeState,
   futureTouches: FutureTouchMap,
-  ownedTypes: ReadonlyMap<string, Type>
+  ownedTypes: ReadonlyMap<string, Type>,
+  emitReturnTail: EmitReturnTail
 ): string | null {
   switch (s.kind) {
     case "ExprStmt":
@@ -665,7 +684,8 @@ function emitStmt(
         indent + "  ",
         state,
         futureTouches,
-        ownedTypes
+        ownedTypes,
+        emitReturnTail
       );
       if (thenText.length > 0) lines.push(thenText);
       if (s.elseBody.length > 0) {
@@ -675,7 +695,8 @@ function emitStmt(
             indent,
             state,
             futureTouches,
-            ownedTypes
+            ownedTypes,
+            emitReturnTail
           );
           if (inner !== null)
             lines.push(`${indent}} else ${inner.trimStart()}`);
@@ -687,7 +708,8 @@ function emitStmt(
             indent + "  ",
             state,
             futureTouches,
-            ownedTypes
+            ownedTypes,
+            emitReturnTail
           );
           if (elseText.length > 0) lines.push(elseText);
           lines.push(`${indent}}`);
@@ -705,7 +727,8 @@ function emitStmt(
         indent + "  ",
         state,
         futureTouches,
-        ownedTypes
+        ownedTypes,
+        emitReturnTail
       );
       if (bodyText.length > 0) lines.push(bodyText);
       lines.push(`${indent}}`);
@@ -750,7 +773,8 @@ function emitStmt(
         indent + "    ",
         state,
         futureTouches,
-        ownedTypes
+        ownedTypes,
+        emitReturnTail
       );
       if (bodyText.length > 0) lines.push(bodyText);
       lines.push(`${indent}  }`);
@@ -758,7 +782,7 @@ function emitStmt(
       return lines.join("\n");
     }
     case "ReturnFromFunction":
-      return `${indent}goto mtoc2_return;`;
+      return emitReturnTail(indent);
     case "Break":
       return `${indent}break;`;
     case "Continue":
@@ -892,12 +916,13 @@ function emitMemberLoadBare(
 }
 
 /** Lower a scalar cond expression to a C bool expression. Complex
- *  scalars use the numbl/MATLAB `creal(z) != 0 || cimag(z) != 0` rule;
- *  real scalars compare against `0.0`. */
+ *  scalars use the numbl/MATLAB `creal(z) != 0 || cimag(z) != 0` rule
+ *  via the `mtoc2_cnonzero` helper; real scalars compare against `0.0`. */
 function emitCondToBoolExpr(e: IRExpr, state: RuntimeState): string {
   const c = emitExpr(e, state);
   if (isNumeric(e.ty) && e.ty.isComplex) {
-    return `(creal(${c}) != 0.0 || cimag(${c}) != 0.0)`;
+    useRuntimeByName(state, "mtoc2_cscalar");
+    return `mtoc2_cnonzero(${c})`;
   }
   return `${c} != 0.0`;
 }
@@ -907,7 +932,8 @@ function emitExpr(e: IRExpr, state: RuntimeState): string {
     case "NumLit":
       return formatDouble(e.value);
     case "ImagLit":
-      return `(${formatDouble(e.value)} * _Complex_I)`;
+      useRuntimeByName(state, "mtoc2_cscalar");
+      return `mtoc2_cmake(0.0, ${formatDouble(e.value)})`;
     case "StringLit": {
       // Text literal — kind comes from `e.ty`: `Char` (single-quoted,
       // 1×N char array) or `String` (double-quoted, scalar handle).

@@ -117,15 +117,16 @@ export function defineShortCircuit(
     codegenC(argsC, argTypes) {
       const lhs = (argTypes[0] as import("../../types.js").NumericType)
         .isComplex
-        ? `(creal(${argsC[0]}) != 0.0 || cimag(${argsC[0]}) != 0.0)`
+        ? `mtoc2_cnonzero(${argsC[0]})`
         : `(${argsC[0]})`;
       const rhs = (argTypes[1] as import("../../types.js").NumericType)
         .isComplex
-        ? `(creal(${argsC[1]}) != 0.0 || cimag(${argsC[1]}) != 0.0)`
+        ? `mtoc2_cnonzero(${argsC[1]})`
         : `(${argsC[1]})`;
       // C's `||` / `&&` short-circuit and yield 0/1; cast to double
       // so the scalar slot matches the logical-as-double convention.
       return `((double)(${lhs} ${cOp} ${rhs}))`;
     },
+    runtimeDeps: ["mtoc2_cscalar"],
   };
 }

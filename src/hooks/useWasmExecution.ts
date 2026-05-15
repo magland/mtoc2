@@ -7,8 +7,16 @@ import {
   type RunEvent,
   type WasmOptLevel,
 } from "../utils/wasmExecution";
+import { buildJs, runJs } from "../utils/jsExecution";
 import { evictExpiredWasm } from "../db/wasmCache";
 import type { SourceFile } from "../translate";
+
+/** Which backend the run goes through. `"js"` translates locally
+ *  (numbl → C → JS) and runs the JS in a Web Worker; needs no remote
+ *  service and gives instant turnaround. `"wasm"` POSTs the C to the
+ *  public emcc service, caches the wasm in IndexedDB, and runs that
+ *  in a worker; slower first run but full native numeric throughput. */
+export type ExecutionMode = "js" | "wasm";
 
 export type RunStatus =
   | "idle"
@@ -32,6 +40,9 @@ export interface ConsoleLine {
 }
 
 export interface RunOptions {
+  /** Backend to use. Defaults to "wasm" for back-compat with existing
+   *  call sites; new callers should pass `mode` explicitly. */
+  mode?: ExecutionMode;
   fastMath?: boolean;
   simd?: boolean;
   optLevel?: WasmOptLevel;
@@ -120,6 +131,41 @@ export function useWasmExecution(): UseWasmExecutionResult {
         abortRef.current = null;
         setStatus(next);
       };
+
+      // JS mode: translate + c2js locally, then run in a worker. No
+      // remote service, no compile pill — c2js is fast enough that
+      // the user sees the run immediately.
+      if (opts.mode === "js") {
+        const built = buildJs(files, activeName);
+        if (!built.ok) {
+          append({
+            channel: "translate_error",
+            text: formatTranslateError(built.error),
+          });
+          finish("error");
+          return;
+        }
+        const result = await runJs(
+          built.jsSource,
+          { onEvent: handleEvent },
+          abort.signal
+        );
+        if (result.aborted) {
+          append({ channel: "info", text: "\n[stopped]\n" });
+          finish("aborted");
+          return;
+        }
+        if (result.transportError) {
+          append({
+            channel: "info",
+            text: `\n[js worker error: ${result.transportError}]\n`,
+          });
+          finish("error");
+          return;
+        }
+        finish(result.success ? "success" : "error");
+        return;
+      }
 
       const wasmUrl = getWasmServiceUrl();
       const build = await buildWasm(

@@ -29,6 +29,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { createInterface } from "node:readline";
 
 import { translateProject, type SourceFile } from "./translate.js";
+import { translateCToJs } from "./cjs/index.js";
 import { applyPlotRecord, newPlotDispatchState } from "./utils/plotAdapter.js";
 import { PLOT_PREFIX } from "./utils/plotProtocol.js";
 import type { PlotRecord } from "./utils/wasmRunner.worker.js";
@@ -37,10 +38,10 @@ import type { PlotInstruction } from "../../numbl/src/graphics/types.js";
 
 function usage(): never {
   console.error(
-    "usage: mtoc2 run [--plot] [--check-leaks] [--path <dir>...] <script.m>"
+    "usage: mtoc2 run [--js] [--plot] [--check-leaks] [--path <dir>...] <script.m>"
   );
   console.error(
-    '       mtoc2 eval [--plot] [--check-leaks] [--path <dir>...] "<code>"'
+    '       mtoc2 eval [--js] [--plot] [--check-leaks] [--path <dir>...] "<code>"'
   );
   console.error("       mtoc2 translate <script.m> [-o out.c]");
   process.exit(2);
@@ -152,7 +153,9 @@ interface RunOptions {
    *  pulls in LeakSanitizer at exit on Linux, so any unfreed
    *  `mtoc2_tensor_t` (or other owned buffer) is reported on stderr
    *  and the process exits non-zero. ~2x slowdown; off by default,
-   *  but the cross-runner enables it for every script. */
+   *  but the cross-runner enables it for every script. Ignored on the
+   *  `--js` path (the JS runtime relies on GC; there are no manual
+   *  frees to leak). */
   checkLeaks?: boolean;
   /** Start numbl's plot server on the first plotting call. The server
    *  serves numbl's `dist-plot-viewer` SPA and opens a browser tab;
@@ -162,6 +165,12 @@ interface RunOptions {
    *  from stdout (so the user's console stays clean), they just aren't
    *  rendered anywhere. */
   plot?: boolean;
+  /** Skip the `cc` step entirely: translate the emitted C to
+   *  JavaScript via the vendored c2js (see `src/cjs/`) and run the
+   *  resulting JS in a child `node` process. Plot records and stdout
+   *  are intercepted the same way as the native path — the JS runtime
+   *  writes the same `\x1emtoc2:plot\t...` lines via `process.stdout`. */
+  js?: boolean;
 }
 
 /** Compile and execute a translated C source. Shared by `run` and
@@ -237,6 +246,52 @@ async function runCSource(cSrc: string, opts: RunOptions = {}): Promise<void> {
   process.exit(exitCode);
 }
 
+/** Translate the emitted C to JS via c2js, write it to a temp file,
+ *  and run it under a child `node`. Plot records and stdout are
+ *  intercepted with the same line-splitter as `runCSource` — the JS
+ *  runtime writes `printf` output to `process.stdout`, so the plot
+ *  prefix is byte-for-byte identical to the C path. */
+async function runJsSource(cSrc: string, opts: RunOptions = {}): Promise<void> {
+  const jsSrc = translateCToJs(cSrc);
+  const dir = mkdtempSync(join(tmpdir(), "mtoc2-"));
+  const jsFile = join(dir, "out.js");
+  writeFileSync(jsFile, jsSrc);
+
+  const { onDrawnow, flushAndWait } = createPlotHandler(!opts.plot);
+  const plotState = newPlotDispatchState();
+
+  const child = spawn(process.execPath, [jsFile], {
+    stdio: ["ignore", "pipe", "inherit"],
+  });
+
+  const rl = createInterface({ input: child.stdout });
+  rl.on("line", line => {
+    if (line.startsWith(PLOT_PREFIX)) {
+      if (!onDrawnow) return;
+      const body = line.slice(PLOT_PREFIX.length);
+      let record: PlotRecord;
+      try {
+        record = JSON.parse(body) as PlotRecord;
+      } catch {
+        process.stderr.write(`[mtoc2] malformed plot record: ${body}\n`);
+        return;
+      }
+      const batch: PlotInstruction[] = [];
+      applyPlotRecord(record, batch, plotState);
+      if (batch.length > 0) onDrawnow(batch);
+      return;
+    }
+    process.stdout.write(line + "\n");
+  });
+
+  const exitCode: number = await new Promise(res => {
+    child.on("exit", code => res(code ?? 0));
+  });
+  await new Promise<void>(res => rl.on("close", res));
+  await flushAndWait();
+  process.exit(exitCode);
+}
+
 /** Parse the shared flag set for `run` and `eval`: `--check-leaks`,
  *  `--plot`, `--path <dir>` (repeatable), plus a single positional
  *  (script path or code string). Two-token flags consume their next
@@ -248,12 +303,14 @@ function parseRunEvalArgs(argv: string[]): {
 } {
   let checkLeaks = false;
   let plot = false;
+  let js = false;
   const extraPaths: string[] = [];
   let positional: string | null = null;
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--check-leaks") checkLeaks = true;
     else if (a === "--plot") plot = true;
+    else if (a === "--js") js = true;
     else if (a === "--path") {
       if (i + 1 >= argv.length) {
         console.error("Error: --path requires a directory argument");
@@ -270,7 +327,7 @@ function parseRunEvalArgs(argv: string[]): {
     }
   }
   if (positional === null) usage();
-  return { positional, extraPaths, opts: { checkLeaks, plot } };
+  return { positional, extraPaths, opts: { checkLeaks, plot, js } };
 }
 
 async function main(): Promise<void> {
@@ -279,12 +336,14 @@ async function main(): Promise<void> {
   const cmd = argv[0];
   if (cmd === "run") {
     const { positional, extraPaths, opts } = parseRunEvalArgs(argv.slice(1));
-    await runCSource(translateFile(positional, extraPaths), opts);
+    const cSrc = translateFile(positional, extraPaths);
+    await (opts.js ? runJsSource(cSrc, opts) : runCSource(cSrc, opts));
     return;
   }
   if (cmd === "eval") {
     const { positional, extraPaths, opts } = parseRunEvalArgs(argv.slice(1));
-    await runCSource(translateInline(positional, extraPaths), opts);
+    const cSrc = translateInline(positional, extraPaths);
+    await (opts.js ? runJsSource(cSrc, opts) : runCSource(cSrc, opts));
     return;
   }
   if (cmd === "translate") {

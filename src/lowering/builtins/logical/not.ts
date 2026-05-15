@@ -105,12 +105,12 @@ export const notBuiltin: Builtin = {
     const a = argTypes[0] as NumericType;
     if (a.isComplex) {
       // Complex scalar is "false" iff both parts are exactly 0.
-      return `((creal(${argsC[0]}) == 0.0 && cimag(${argsC[0]}) == 0.0) ? 1.0 : 0.0)`;
+      return `(mtoc2_cnonzero(${argsC[0]}) ? 0.0 : 1.0)`;
     }
     // Scalar: emit `(x == 0.0 ? 1.0 : 0.0)`. Using `!` on a double is
     // technically valid C, but the explicit comparison is clearer and
     // is what numbl's logical layer reads as.
     return `((${argsC[0]}) == 0.0 ? 1.0 : 0.0)`;
   },
-  runtimeDeps: ["mtoc2_tensor_logical_real"],
+  runtimeDeps: ["mtoc2_tensor_logical_real", "mtoc2_cscalar"],
 };

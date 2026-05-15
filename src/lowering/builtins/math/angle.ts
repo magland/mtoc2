@@ -43,7 +43,8 @@ export const angle: Builtin = {
   },
   codegenC(argsC, argTypes) {
     const a = argTypes[0] as NumericType;
-    if (a.isComplex) return `carg(${argsC[0]})`;
+    if (a.isComplex) return `mtoc2_cangle(${argsC[0]})`;
     return `atan2(0.0, ${argsC[0]})`;
   },
+  runtimeDeps: ["mtoc2_cscalar"],
 };

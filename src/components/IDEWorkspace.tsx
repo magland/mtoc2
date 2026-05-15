@@ -1,5 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Box, Button, IconButton, Tooltip, Typography } from "@mui/material";
+import {
+  Box,
+  Button,
+  IconButton,
+  ToggleButton,
+  ToggleButtonGroup,
+  Tooltip,
+} from "@mui/material";
 import Editor, { type OnMount, useMonaco } from "@monaco-editor/react";
 import type { editor } from "monaco-editor";
 import PlayArrowIcon from "@mui/icons-material/PlayArrow";
@@ -11,7 +18,10 @@ import { CSourcePanel } from "./CSourcePanel";
 import { OutputPanel } from "./OutputPanel";
 import { ExecutionSettingsDialog } from "./ExecutionSettingsDialog";
 import { useTranslation } from "../hooks/useTranslation";
-import { useWasmExecution } from "../hooks/useWasmExecution";
+import {
+  useWasmExecution,
+  type ExecutionMode,
+} from "../hooks/useWasmExecution";
 import {
   fileText,
   type UseProjectFilesResult,
@@ -39,6 +49,7 @@ interface IDEWorkspaceProps {
 
 const WASM_OPT_LEVEL_KEY = "mtoc_wasm_opt_level";
 const WASM_SIMD_KEY = "mtoc_wasm_simd";
+const EXEC_MODE_KEY = "mtoc_exec_mode";
 
 function readWasmOptLevel(): WasmOptLevel {
   const v = localStorage.getItem(WASM_OPT_LEVEL_KEY);
@@ -51,6 +62,16 @@ function readWasmOptLevel(): WasmOptLevel {
 
 function readWasmSimd(): boolean {
   return localStorage.getItem(WASM_SIMD_KEY) === "true";
+}
+
+function readExecutionMode(): ExecutionMode {
+  // Default to "js" because the WASM path needs the public compile
+  // service. A first-time user with nothing configured should be able
+  // to hit Run and see output immediately. Power users who want the
+  // throughput of native wasm can toggle to "wasm" — the choice
+  // sticks across reloads via this key.
+  const v = localStorage.getItem(EXEC_MODE_KEY);
+  return v === "wasm" ? "wasm" : "js";
 }
 
 function activeName(
@@ -92,6 +113,9 @@ export function IDEWorkspace({ filesApi, header }: IDEWorkspaceProps) {
     readWasmOptLevel()
   );
   const [wasmSimd, setWasmSimd] = useState<boolean>(() => readWasmSimd());
+  const [execMode, setExecMode] = useState<ExecutionMode>(() =>
+    readExecutionMode()
+  );
   const handleWasmOptLevelChange = (next: WasmOptLevel) => {
     setWasmOptLevel(next);
     localStorage.setItem(WASM_OPT_LEVEL_KEY, next);
@@ -99,6 +123,10 @@ export function IDEWorkspace({ filesApi, header }: IDEWorkspaceProps) {
   const handleWasmSimdChange = (next: boolean) => {
     setWasmSimd(next);
     localStorage.setItem(WASM_SIMD_KEY, String(next));
+  };
+  const handleExecModeChange = (next: ExecutionMode) => {
+    setExecMode(next);
+    localStorage.setItem(EXEC_MODE_KEY, next);
   };
   /** Selecting a profile resets the fast-math toggle to the profile's
    *  default; the dropdown itself stays on the selected profile name
@@ -200,6 +228,7 @@ export function IDEWorkspace({ filesApi, header }: IDEWorkspaceProps) {
   const handleRun = () => {
     if (!active) return;
     exec.run(sourceFiles, active, {
+      mode: execMode,
       fastMath,
       simd: wasmSimd,
       optLevel: wasmOptLevel,
@@ -234,6 +263,8 @@ export function IDEWorkspace({ filesApi, header }: IDEWorkspaceProps) {
         onRun={handleRun}
         onStop={exec.stop}
         onOpenSettings={() => setSettingsOpen(true)}
+        mode={execMode}
+        onModeChange={handleExecModeChange}
       />
       <Box sx={{ flex: 1, minHeight: 0 }}>
         <Splitter direction="vertical" initialSize={220} minSize={140}>
@@ -316,6 +347,8 @@ interface ToolbarProps {
   onRun: () => void;
   onStop: () => void;
   onOpenSettings: () => void;
+  mode: ExecutionMode;
+  onModeChange: (next: ExecutionMode) => void;
 }
 
 function Toolbar({
@@ -325,6 +358,8 @@ function Toolbar({
   onRun,
   onStop,
   onOpenSettings,
+  mode,
+  onModeChange,
 }: ToolbarProps) {
   const runButton = (
     <span>
@@ -360,9 +395,30 @@ function Toolbar({
       ) : (
         runButton
       )}
-      <Typography variant="caption" sx={{ color: "text.secondary", ml: 0.5 }}>
-        WASM
-      </Typography>
+      <Tooltip
+        title={
+          mode === "js"
+            ? "JS mode: translate to JavaScript locally and run in a Web Worker. No remote service needed."
+            : "WASM mode: POST translated C to the compile service, cache the wasm, run in a Web Worker. Native numeric throughput."
+        }
+      >
+        <ToggleButtonGroup
+          size="small"
+          exclusive
+          value={mode}
+          onChange={(_, next) => {
+            if (next === "js" || next === "wasm") onModeChange(next);
+          }}
+          disabled={isRunning}
+          sx={{
+            ml: 0.5,
+            "& .MuiToggleButton-root": { px: 1.25, py: 0.25, fontSize: 11 },
+          }}
+        >
+          <ToggleButton value="js">JS</ToggleButton>
+          <ToggleButton value="wasm">WASM</ToggleButton>
+        </ToggleButtonGroup>
+      </Tooltip>
       <Tooltip title="Execution settings">
         <IconButton
           size="small"

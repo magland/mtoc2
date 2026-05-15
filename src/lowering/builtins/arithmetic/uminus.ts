@@ -7,6 +7,7 @@ import {
   signFromNumber,
   flipSign,
   isMultiElement,
+  isNumeric,
   isScalar,
 } from "../../types.js";
 import type { Builtin } from "../registry.js";
@@ -63,9 +64,14 @@ export const uminus: Builtin = {
     if (isMultiElement(argTypes[0])) {
       return `mtoc2_tensor_uminus(${argsC[0]})`;
     }
-    // Both real and complex scalar paths use the same C unary minus —
-    // C99 supports `-` on `_Complex` operands.
+    if (isNumeric(argTypes[0]) && argTypes[0].isComplex) {
+      return `mtoc2_cneg(${argsC[0]})`;
+    }
     return `(-${argsC[0]})`;
   },
-  runtimeDeps: ["mtoc2_tensor_elemwise_real"],
+  // Both `mtoc2_tensor_uminus` (tensor path) and `mtoc2_cneg` (scalar
+  // complex path) get pulled in unconditionally. The complex helper is
+  // a `static inline` with no native cost when unused; activating it
+  // here keeps the dispatch decision local to `codegenC` above.
+  runtimeDeps: ["mtoc2_tensor_elemwise_real", "mtoc2_cscalar"],
 };

@@ -38,7 +38,8 @@ export const imag: Builtin = {
   },
   codegenC(argsC, argTypes) {
     const a = argTypes[0] as NumericType;
-    if (a.isComplex) return `cimag(${argsC[0]})`;
+    if (a.isComplex) return `mtoc2_cimag(${argsC[0]})`;
     return `0.0`;
   },
+  runtimeDeps: ["mtoc2_cscalar"],
 };

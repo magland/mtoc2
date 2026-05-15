@@ -41,7 +41,8 @@ export const conj: Builtin = {
   },
   codegenC(argsC, argTypes) {
     const a = argTypes[0] as NumericType;
-    if (a.isComplex) return `conj(${argsC[0]})`;
+    if (a.isComplex) return `mtoc2_cconj(${argsC[0]})`;
     return `(${argsC[0]})`;
   },
+  runtimeDeps: ["mtoc2_cscalar"],
 };

@@ -194,6 +194,23 @@ export function defineElemwiseRealBinary(
           fold: args[4],
           signRule: args[5],
         };
+  // Default scalar-complex emit: route through the per-op helper from
+  // `cscalar.h` instead of relying on C99 operator overloading on
+  // `_Complex` operands. This keeps mtoc2's user-code emission
+  // operator-free for complex, which lets the c2js JS backend ship
+  // matching `{re, im}` helpers without learning to type-track
+  // expressions. The C native path inlines `mtoc2_c*` back to the
+  // same instructions C99 would have generated, so there's no cost.
+  const defaultComplexHelper: Record<string, string | undefined> = {
+    "+": "mtoc2_cadd",
+    "-": "mtoc2_csub",
+    "*": "mtoc2_cmul",
+  };
+  const helperName = defaultComplexHelper[opts.cOp];
+  const defaultComplexScalarExpr = helperName
+    ? (a: string, b: string) => `${helperName}(${a}, ${b})`
+    : (a: string, b: string) => `(${a} ${opts.cOp} ${b})`;
+  const defaultComplexDeps = helperName ? ["mtoc2_cscalar"] : [];
   return buildElemwiseRealBinary({
     name: opts.name,
     helperBase: opts.helperBase,
@@ -203,9 +220,8 @@ export function defineElemwiseRealBinary(
     scalarExpr: (a, b) => `(${a} ${opts.cOp} ${b})`,
     runtimeDep: "mtoc2_tensor_elemwise_real",
     complexFold: opts.complexFold,
-    complexScalarExpr:
-      opts.complexScalarExpr ?? ((a, b) => `(${a} ${opts.cOp} ${b})`),
-    complexRuntimeDeps: opts.complexRuntimeDeps,
+    complexScalarExpr: opts.complexScalarExpr ?? defaultComplexScalarExpr,
+    complexRuntimeDeps: opts.complexRuntimeDeps ?? defaultComplexDeps,
   });
 }
 
