@@ -309,6 +309,10 @@ const REGISTRY: ReadonlyMap<string, RuntimeSnippet> = new Map<
     "mtoc2_tensor_mtimes_real",
     loadSnippet("tensor_mtimes_real.h", ["mtoc2_tensor_t", "mtoc2_alloc"]),
   ],
+  [
+    "mtoc2_tensor_mtimes_complex",
+    loadSnippet("tensor_mtimes_complex.h", ["mtoc2_tensor_t", "mtoc2_alloc"]),
+  ],
   // `size(t)` row-vector form. The `size(t, k)` scalar form emits
   // inline C; this snippet covers only the variadic-shape return.
   [

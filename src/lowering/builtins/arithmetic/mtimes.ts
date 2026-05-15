@@ -4,13 +4,13 @@ import {
   isMultiElement,
   signFromExactArray,
   tensorDouble,
+  tensorComplexFromDims,
   type NumericType,
   type Sign,
 } from "../../types.js";
 import { type Builtin, getBuiltin } from "../registry.js";
 import {
   exactRealArray,
-  requireRealDouble,
   requireRealOrComplex,
 } from "../_shared.js";
 
@@ -73,11 +73,17 @@ export const mtimes: Builtin = {
       // and codegen. The `times` transfer handles complex contamination.
       return getBuiltin("times")!.transfer(argTypes, span);
     }
-    // Tensor mtimes: real-only in Phase 1 (Phase 3 adds complex).
-    requireRealDouble(argTypes[0], `'mtimes' arg 1`, span);
-    requireRealDouble(argTypes[1], `'mtimes' arg 2`, span);
-    // Both tensors. v1: real, 2-D, statically inner-dim-matching when
-    // shapes are known.
+    // Tensor mtimes: real and complex both supported. Complex result
+    // when either operand is complex.
+    if (a.elem !== "double" || b.elem !== "double") {
+      throw new TypeError(
+        `'mtimes' tensor operands must be double (got ${a.elem}, ${b.elem})`,
+        span
+      );
+    }
+    const resultIsComplex = a.isComplex || b.isComplex;
+    // Both tensors. v1: 2-D, statically inner-dim-matching when shapes
+    // are known.
     if (a.shape !== undefined && a.shape.length !== 2) {
       throw new UnsupportedConstruct(
         `'mtimes' on a ${a.shape.length}-D tensor is not supported ` +
@@ -115,28 +121,40 @@ export const mtimes: Builtin = {
     if (m !== undefined && n !== undefined) {
       const k = aCols ?? bRows!;
       const total = m * n;
-      // Exact-fold when both inputs are exact and the result fits the
-      // cap. Avoids re-running the helper at runtime for compile-time-
-      // known matrices.
-      const ad = exactRealArray(a);
-      const bd = exactRealArray(b);
-      if (
-        ad !== undefined &&
-        bd !== undefined &&
-        total <= EXACT_ARRAY_MAX_ELEMENTS
-      ) {
-        const out = mtimesExact(ad, m, k, bd, n);
-        const t = tensorDouble([m, n], out);
-        return { ...t, sign: signFromExactArray(out) };
+      // Exact-fold for the real path when both inputs are exact and
+      // the result fits the cap. Complex tensors don't have an exact
+      // carrier of the same shape (the {re, im} carrier is used only
+      // for fully-exact tensors); skip the fold there.
+      if (!resultIsComplex) {
+        const ad = exactRealArray(a);
+        const bd = exactRealArray(b);
+        if (
+          ad !== undefined &&
+          bd !== undefined &&
+          total <= EXACT_ARRAY_MAX_ELEMENTS
+        ) {
+          const out = mtimesExact(ad, m, k, bd, n);
+          const t = tensorDouble([m, n], out);
+          return { ...t, sign: signFromExactArray(out) };
+        }
+        const t = tensorDouble([m, n]);
+        return { ...t, sign };
       }
-      const t = tensorDouble([m, n]);
-      return { ...t, sign };
+      // Complex result — no fold, no sign refinement.
+      return tensorComplexFromDims([
+        { kind: "exact", value: m },
+        { kind: "exact", value: n },
+      ]);
     }
     // Partially-unknown shape (e.g. one axis is `unknown` due to a
     // runtime-only length): emit the helper call; shape stays as
-    // unknown on the relevant axis. We don't have a `tensorDoubleFromDims`-
-    // backed factory that pins the known axes here, so return an
-    // unknown-shape 2-D tensor and let the runtime helper validate.
+    // unknown on the relevant axis.
+    if (resultIsComplex) {
+      return tensorComplexFromDims([
+        m !== undefined ? { kind: "exact", value: m } : { kind: "unknown" },
+        n !== undefined ? { kind: "exact", value: n } : { kind: "unknown" },
+      ]);
+    }
     return {
       kind: "Numeric",
       elem: "double",
@@ -154,14 +172,19 @@ export const mtimes: Builtin = {
     }
     const a = argTypes[0] as NumericType;
     const b = argTypes[1] as NumericType;
+    const isComplex = a.isComplex || b.isComplex;
     // 1×k * k×1 → 1×1 scalar. Transfer returns a scalar type for this
-    // shape; consumers (`disp`, scalar arithmetic, …) expect a `double`
-    // C expression. The scalar helper does the inner product without
+    // shape; consumers expect a `double` (or `double _Complex`) C
+    // expression. The scalar helper does the inner product without
     // allocating a tensor.
     if (a.shape?.[0] === 1 && b.shape?.[1] === 1) {
-      return `mtoc2_tensor_mtimes_real_scalar(${argsC[0]}, ${argsC[1]})`;
+      return isComplex
+        ? `mtoc2_tensor_mtimes_complex_scalar(${argsC[0]}, ${argsC[1]})`
+        : `mtoc2_tensor_mtimes_real_scalar(${argsC[0]}, ${argsC[1]})`;
     }
-    return `mtoc2_tensor_mtimes_real(${argsC[0]}, ${argsC[1]})`;
+    return isComplex
+      ? `mtoc2_tensor_mtimes_complex(${argsC[0]}, ${argsC[1]})`
+      : `mtoc2_tensor_mtimes_real(${argsC[0]}, ${argsC[1]})`;
   },
   /** Elementwise per-slot template — only valid when at least one
    *  operand is scalar (tensor * tensor is matrix product). The
@@ -171,5 +194,10 @@ export const mtimes: Builtin = {
   perSlotC(argsC, argTypes) {
     return getBuiltin("times")!.perSlotC!(argsC, argTypes);
   },
-  runtimeDeps: ["mtoc2_tensor_elemwise_real", "mtoc2_tensor_mtimes_real"],
+  runtimeDeps: [
+    "mtoc2_tensor_elemwise_real",
+    "mtoc2_tensor_mtimes_real",
+    "mtoc2_tensor_mtimes_complex",
+    "mtoc2_cscalar",
+  ],
 };
