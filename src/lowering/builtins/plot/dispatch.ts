@@ -9,8 +9,14 @@
  *
  * Per-name C code is zero — every name reuses
  * `mtoc2_plot_dispatch` with the name string baked in as the
- * leading arg. Per-name TypeScript code is one entry in
- * `PLOT_BUILTIN_NAMES`.
+ * leading arg. The set of accepted names is imported directly from
+ * numbl (`PLOT_ALL_NAMES` in
+ * [plotBuiltinDispatch.ts](../../../../../numbl/src/numbl-core/runtime/plotBuiltinDispatch.ts)),
+ * which is the single source of truth. When numbl adds a new
+ * plotting builtin — renderable or no-op stub — mtoc2 accepts it at
+ * the next `tsc` run with no edit here; conversely, names not in
+ * `PLOT_ALL_NAMES` raise `UnsupportedConstruct` at lowering, an
+ * honest signal that numbl can't render or stub them.
  *
  * Type rules:
  *   - Variadic arity (0..64), matching numbl's `varargin` stubs.
@@ -36,96 +42,12 @@ import {
   emitFormatSlotArray,
   validateFormatArgs,
 } from "../io/_format_args.js";
+import { PLOT_ALL_NAMES } from "../../../../../numbl/src/numbl-core/runtime/plotBuiltinDispatch.js";
 
-/** Source-level names that route through `mtoc2_plot_dispatch`. Two
- *  buckets, both treated identically — split only for documentation.
- *
- *  Drawing primitives (numbl pushes a typed instruction): `plot`,
- *  `surf`, `imagesc`, `bar`, `errorbar`, `semilogx`, `semilogy`,
- *  `loglog`, `contour`, `quiver`, `stem`, `stairs`, `fill`,
- *  `scatter`, `mesh`, `histogram`, `polar`, `polarplot`, `area`,
- *  `pie`, `line`, `patch`, `plot3`, `scatter3`, `bar3`, `barh`,
- *  `stem3`, `quiver3`, `contour3`, `contourf`, `fill3`.
- *
- *  Decoration / state (numbl mostly stubs to no-op): `figure`,
- *  `hold`, `grid`, `close`, `title`, `xlabel`, `ylabel`, `zlabel`,
- *  `sgtitle`, `legend`, `colorbar`, `colormap`, `shading`,
- *  `subplot`, `tiledlayout`, `nexttile`, `axis`, `xlim`, `ylim`,
- *  `zlim`, `clf`, `cla`, `drawnow`, `pause`, `axes`, `view`,
- *  `set`, `gcf`, `gca`, `groot`, `newplot`, `shg`, `light`,
- *  `camlight`, `daspect`, `pbaspect`. */
-const PLOT_BUILTIN_NAMES: ReadonlyArray<string> = [
-  // Drawing primitives.
-  "plot",
-  "plot3",
-  "scatter",
-  "scatter3",
-  "surf",
-  "mesh",
-  "imagesc",
-  "image",
-  "contour",
-  "contourf",
-  "contour3",
-  "bar",
-  "bar3",
-  "barh",
-  "errorbar",
-  "quiver",
-  "quiver3",
-  "semilogx",
-  "semilogy",
-  "loglog",
-  "stem",
-  "stem3",
-  "stairs",
-  "fill",
-  "fill3",
-  "area",
-  "histogram",
-  "polar",
-  "polarplot",
-  "pie",
-  "line",
-  "patch",
-  // Decoration / state.
-  "figure",
-  "hold",
-  "grid",
-  "close",
-  "title",
-  "xlabel",
-  "ylabel",
-  "zlabel",
-  "sgtitle",
-  "legend",
-  "colorbar",
-  "colormap",
-  "shading",
-  "subplot",
-  "tiledlayout",
-  "nexttile",
-  "axis",
-  "xlim",
-  "ylim",
-  "zlim",
-  "clf",
-  "cla",
-  "drawnow",
-  "pause",
-  "axes",
-  "view",
-  "set",
-  "gcf",
-  "gca",
-  "groot",
-  "newplot",
-  "shg",
-  "light",
-  "camlight",
-  "daspect",
-  "pbaspect",
-];
+/** Source-level names that route through `mtoc2_plot_dispatch`.
+ *  Authoritative list lives in numbl (see file header); we re-bind
+ *  locally only so the rest of this module is self-contained. */
+const PLOT_BUILTIN_NAMES: ReadonlyArray<string> = PLOT_ALL_NAMES;
 
 /** JSON-escape a builtin name for inclusion as the first arg to
  *  `mtoc2_plot_dispatch`. Plot names are ASCII identifiers, but the

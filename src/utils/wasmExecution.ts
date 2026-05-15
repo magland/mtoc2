@@ -21,7 +21,9 @@ import {
 } from "../translate";
 import { computeCacheKey, getCachedWasm, putCachedWasm } from "../db/wasmCache";
 import WasmRunnerWorker from "./wasmRunner.worker.ts?worker";
-import type { WasmRunMessage } from "./wasmRunner.worker";
+import type { WasmRunMessage, PlotRecord } from "./wasmRunner.worker";
+
+export type { PlotRecord };
 
 const WASM_SERVICE_URL_KEY = "mtoc_wasm_service_url";
 
@@ -63,6 +65,7 @@ export async function checkWasmServiceHealth(
 export type RunEvent =
   | { type: "stdout"; text: string }
   | { type: "stderr"; text: string }
+  | { type: "plot_record"; record: PlotRecord }
   | { type: "compile_error"; text: string }
   | {
       type: "translate_error";
@@ -322,6 +325,10 @@ export async function runWasm(
       const msg = event.data;
       if (msg.type === "stdout" || msg.type === "stderr") {
         callbacks.onEvent({ type: msg.type, text: msg.text });
+        return;
+      }
+      if (msg.type === "plot_record") {
+        callbacks.onEvent({ type: "plot_record", record: msg.record });
         return;
       }
       if (msg.type === "error") {

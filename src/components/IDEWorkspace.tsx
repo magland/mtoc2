@@ -8,7 +8,7 @@ import SettingsIcon from "@mui/icons-material/Settings";
 import { Splitter } from "./Splitter";
 import { FileBrowser } from "./FileBrowser";
 import { CSourcePanel } from "./CSourcePanel";
-import { ConsolePanel } from "./ConsolePanel";
+import { OutputPanel } from "./OutputPanel";
 import { ExecutionSettingsDialog } from "./ExecutionSettingsDialog";
 import { useTranslation } from "../hooks/useTranslation";
 import { useWasmExecution } from "../hooks/useWasmExecution";
@@ -291,7 +291,11 @@ export function IDEWorkspace({ filesApi, header }: IDEWorkspaceProps) {
                   </Box>
                 )}
               </Box>
-              <ConsolePanel lines={exec.lines} status={exec.status} />
+              <OutputPanel
+                lines={exec.lines}
+                status={exec.status}
+                plotRecords={exec.plotRecords}
+              />
             </Splitter>
             <CSourcePanel
               c={c}

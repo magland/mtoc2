@@ -261,10 +261,10 @@ cName}` and `lowerMultiAssign` routes through the same
   is the single source of truth for the slot tag values.
 - **Plotting** — every plotting builtin (`plot`, `surf`, `imagesc`,
   `bar`, `errorbar`, `semilogx`, `semilogy`, `loglog`, `contour`,
-  `quiver`, `stem`, `stairs`, `fill`, `scatter`, `histogram`,
-  `figure`, `hold`, `title`, `xlabel`, `ylabel`, `zlabel`,
-  `subplot`, `legend`, `colorbar`, `axis`, `xlim`, `ylim`,
-  `drawnow`, `clf`, `cla`, `pause`, … — see
+  `quiver`, `stairs`, `scatter`, `histogram`, `figure`, `hold`,
+  `title`, `xlabel`, `ylabel`, `zlabel`, `subplot`, `legend`,
+  `colorbar`, `axis`, `xlim`, `ylim`, `drawnow`, `clf`, `pause`,
+  … — see
   [src/lowering/builtins/plot/dispatch.ts](src/lowering/builtins/plot/dispatch.ts))
   routes through one shared lowering that emits a call to
   `mtoc2_plot_dispatch(name, n, args)`. The single C runtime
@@ -278,6 +278,13 @@ cName}` and `lowerMultiAssign` routes through the same
   rejected at translate. Plot calls are statement-only — they
   return `Void`, so the value-returning variants
   (`h = gcf`, `lim = xlim`, etc.) surface a clean type error.
+  **The accepted name set is imported directly from numbl** —
+  `PLOT_ALL_NAMES` in `numbl/src/numbl-core/runtime/plotBuiltinDispatch.ts`
+  is the single source of truth (union of `PLOT_DISPATCH_NAMES`,
+  the renderable subset, and `PLOT_STUB_NAMES`, the graphics-
+  tooling no-ops like `gcf`/`xlim`/`drawnow`). Adding a builtin
+  in numbl makes it accept in mtoc2 on the next `tsc` run; names
+  absent from numbl raise `UnsupportedConstruct`.
   The cross-runner globally drops the plot-prefixed lines before
   the byte-for-byte stdout compare (numbl produces none of its
   own, so the drop is a no-op there). MATLAB command syntax

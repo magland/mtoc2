@@ -3,6 +3,7 @@ import {
   buildWasm,
   getWasmServiceUrl,
   runWasm,
+  type PlotRecord,
   type RunEvent,
   type WasmOptLevel,
 } from "../utils/wasmExecution";
@@ -41,6 +42,11 @@ interface UseWasmExecutionResult {
   status: RunStatus;
   /** Console output as a list of typed lines. Cleared at run start. */
   lines: ConsoleLine[];
+  /** Plot-dispatch records emitted by the wasm during the current run,
+   *  in execution order. Cleared at run start. The FiguresPanel feeds
+   *  this list into numbl's `dispatchPlotBuiltin` (see
+   *  `utils/plotAdapter.ts`) to render figures. */
+  plotRecords: PlotRecord[];
   /** Translate + compile + run the project via the WASM pipeline. */
   run: (
     files: SourceFile[],
@@ -54,10 +60,15 @@ interface UseWasmExecutionResult {
 export function useWasmExecution(): UseWasmExecutionResult {
   const [status, setStatus] = useState<RunStatus>("idle");
   const [lines, setLines] = useState<ConsoleLine[]>([]);
+  const [plotRecords, setPlotRecords] = useState<PlotRecord[]>([]);
   const abortRef = useRef<AbortController | null>(null);
 
   const append = useCallback((line: ConsoleLine) => {
     setLines(prev => [...prev, line]);
+  }, []);
+
+  const appendPlot = useCallback((record: PlotRecord) => {
+    setPlotRecords(prev => [...prev, record]);
   }, []);
 
   const stop = useCallback(() => {
@@ -68,6 +79,8 @@ export function useWasmExecution(): UseWasmExecutionResult {
     (event: RunEvent) => {
       if (event.type === "stdout" || event.type === "stderr") {
         append({ channel: event.type, text: event.text });
+      } else if (event.type === "plot_record") {
+        appendPlot(event.record);
       } else if (event.type === "compile_error") {
         append({ channel: "compile_error", text: event.text });
       } else if (event.type === "translate_error") {
@@ -79,7 +92,7 @@ export function useWasmExecution(): UseWasmExecutionResult {
       }
       // "done" is consumed by the caller via the resolved RunResult.
     },
-    [append]
+    [append, appendPlot]
   );
 
   const run = useCallback(
@@ -87,6 +100,7 @@ export function useWasmExecution(): UseWasmExecutionResult {
       if (status === "running" || status === "compiling") return;
 
       setLines([]);
+      setPlotRecords([]);
       setStatus("running");
 
       const abort = new AbortController();
@@ -185,5 +199,5 @@ export function useWasmExecution(): UseWasmExecutionResult {
     void evictExpiredWasm();
   }, []);
 
-  return { status, lines, run, stop };
+  return { status, lines, plotRecords, run, stop };
 }

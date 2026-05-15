@@ -20,11 +20,41 @@ export interface WasmRunRequest {
   glue: string;
 }
 
+/** One plot-dispatch record extracted from wasm stdout. mtoc2's
+ *  `mtoc2_plot_dispatch` C runtime helper writes one
+ *  `\x1emtoc2:plot\t{json}\n` line per plotting call; the worker
+ *  strips the sentinel, parses the JSON, and posts these messages.
+ *  The main thread feeds the records into numbl's plot pipeline (see
+ *  `utils/plotAdapter.ts`). */
+export interface PlotRecord {
+  call: string;
+  args: PlotArg[];
+}
+
+/** JSON encoding for one plot-call argument. The C runtime encodes
+ *  scalars as bare numerics (NaN / ±Infinity as `null`, matching JSON
+ *  semantics), text as a `text` slot (char and string sources both
+ *  flatten here), and tensors as column-major dim + data arrays. */
+export type PlotArg =
+  | number
+  | null
+  | { kind: "text"; data: string }
+  | { kind: "tensor"; dims: number[]; data: (number | null)[] };
+
 export type WasmRunMessage =
   | { type: "stdout"; text: string }
   | { type: "stderr"; text: string }
+  | { type: "plot_record"; record: PlotRecord }
   | { type: "done"; exitCode: number }
   | { type: "error"; message: string };
+
+/** Sentinel for the wire format — same byte sequence the C runtime
+ *  writes ahead of every plot record. ASCII RS (0x1e) is essentially
+ *  never produced by normal MATLAB output, so we can split on it
+ *  without escaping user-level `disp`/`fprintf` bytes. The
+ *  cross-runner (`scripts/run_test_scripts.ts`) shares this prefix —
+ *  keep them in sync if you ever change it. */
+const PLOT_PREFIX = "\x1emtoc2:plot\t";
 
 interface EmModuleOverrides {
   wasmBinary: Uint8Array;
@@ -83,7 +113,32 @@ async function runOnce(req: WasmRunRequest): Promise<void> {
     await factory({
       wasmBinary: req.wasm,
       locateFile: path => path,
-      print: text => post({ type: "stdout", text: `${text}\n` }),
+      print: text => {
+        // Plot-dispatch records arrive one-per-line. Strip the
+        // sentinel, parse the JSON, post a structured event so the
+        // figure panel can render without scraping the console.
+        // Malformed records become stderr breadcrumbs instead of
+        // silently disappearing — drift in the C protocol stays
+        // visible.
+        if (text.startsWith(PLOT_PREFIX)) {
+          const body = text.slice(PLOT_PREFIX.length);
+          try {
+            const parsed = JSON.parse(body) as PlotRecord;
+            if (
+              parsed &&
+              typeof parsed.call === "string" &&
+              Array.isArray(parsed.args)
+            ) {
+              post({ type: "plot_record", record: parsed });
+              return;
+            }
+          } catch {
+            post({ type: "stderr", text: `[bad plot record]: ${body}\n` });
+            return;
+          }
+        }
+        post({ type: "stdout", text: `${text}\n` });
+      },
       printErr: text => post({ type: "stderr", text: `${text}\n` }),
       noExitRuntime: false,
       onExit: code => {
