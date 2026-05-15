@@ -64,6 +64,7 @@ import { ceil } from "./math/ceil.js";
 import { round } from "./math/round.js";
 import { fix } from "./math/fix.js";
 import { sqrt } from "./math/sqrt.js";
+import { norm } from "./math/norm.js";
 import { log } from "./math/log.js";
 import { log2 } from "./math/log2.js";
 import { log10 } from "./math/log10.js";
@@ -135,6 +136,7 @@ for (const b of [
   round,
   fix,
   sqrt,
+  norm,
   log,
   log2,
   log10,

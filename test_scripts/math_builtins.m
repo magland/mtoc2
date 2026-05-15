@@ -20,6 +20,8 @@ test_complex_abs_angle();
 test_complex_unary_scalar();
 test_complex_unary_tensor();
 test_complex_unary_runtime();
+test_norm_real();
+test_norm_complex();
 
 function test_scalar_exact_unary()
   % Trig
@@ -402,4 +404,29 @@ function test_complex_unary_runtime()
   disp(round(z));
   disp(fix(z));
   disp(sign(z));
+end
+
+function test_norm_real()
+  % Scalar: norm == abs
+  disp(norm(3));
+  disp(norm(-4));
+  disp(norm(0));
+  % Row + column vectors. 2-norm.
+  disp(norm([3 4]));
+  disp(norm([3; 4]));
+  disp(norm([1 2 3 4]));
+  % Runtime input: build a vector from a non-exact source.
+  v = zeros(1, 5);
+  v(1) = 3.0; v(2) = 4.0;
+  disp(norm(v));
+end
+
+function test_norm_complex()
+  % Scalar complex: norm == abs == hypot.
+  disp(norm(3 + 4i));
+  disp(norm(0 + 5i));
+  disp(norm(-2 - 2i));
+  % Complex vector: sqrt(sum(|x|^2)).
+  disp(norm([3+4i, 0]));
+  disp(norm([1i; 1i; 1i; 1i]));
 end

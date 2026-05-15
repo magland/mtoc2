@@ -321,6 +321,9 @@ const REGISTRY: ReadonlyMap<string, RuntimeSnippet> = new Map<
   // path returns immediately; failure writes the message to stderr
   // and aborts.
   ["mtoc2_assert_scalar", loadSnippet("assert_fail.h")],
+  // `norm(v)` vector 2-norm. One snippet defines both `_real` and
+  // `_complex` variants; the type-system decides which one to call.
+  ["mtoc2_tensor_norm", loadSnippet("tensor_norm.h", ["mtoc2_tensor_t"])],
   // Elementwise logical ops on real tensors. `~` (unary not) is the
   // only resident today; `|` / `&` will share the same snippet when
   // they land. Result tensors are logical-typed; the storage is still
