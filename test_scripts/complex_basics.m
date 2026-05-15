@@ -201,9 +201,7 @@ function test_tensor_arith_bcast()
   disp(col + row);
 end
 
-% Mixed real_tensor + complex_tensor (and vice versa). Skips
-% `disp(-complex_tensor)` here because numbl drops the imag lane on
-% unary minus of a complex tensor (numbl bug; mtoc2 keeps both).
+% Mixed real_tensor + complex_tensor (and vice versa).
 function test_tensor_arith_mixed_real()
   c = [1+1i, 2+2i, 3+3i];
   r = [10, 20, 30];
@@ -213,4 +211,5 @@ function test_tensor_arith_mixed_real()
   disp(r - c);
   disp(c .* r);
   disp(c ./ r);
+  disp(-c);
 end
