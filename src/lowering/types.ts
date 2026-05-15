@@ -464,6 +464,30 @@ export function isMultiElement(t: Type): boolean {
   return isNumeric(t) && t.dims.some(d => !isDimOne(d));
 }
 
+/** Row-vector shape: 2-D with a singleton first axis and an exact
+ *  non-singleton second axis. Matches MATLAB's "row" classification:
+ *  1×0 (empty row) qualifies, 1×1 (scalar) does not. */
+export function isRowVecTy(t: NumericType): boolean {
+  return (
+    t.dims.length === 2 &&
+    isDimOne(t.dims[0]) &&
+    t.dims[1].kind === "exact" &&
+    t.dims[1].value !== 1
+  );
+}
+
+/** Column-vector shape: 2-D with an exact non-singleton first axis and
+ *  a singleton second axis. Matches MATLAB's "column" classification:
+ *  0×1 (empty column) qualifies, 1×1 (scalar) does not. */
+export function isColVecTy(t: NumericType): boolean {
+  return (
+    t.dims.length === 2 &&
+    t.dims[0].kind === "exact" &&
+    t.dims[0].value !== 1 &&
+    isDimOne(t.dims[1])
+  );
+}
+
 /** Statically provable to contain at least one element. True iff every
  *  dim is `exact` with a positive value (equivalently, when `shape` is
  *  set, every entry is > 0). Used by reductions to decide whether the

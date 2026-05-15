@@ -22,7 +22,8 @@ import type { Expr, Span } from "../parser/index.js";
 import { TypeError, UnsupportedConstruct } from "./errors.js";
 import type { IRExpr, IndexSliceArg } from "./ir.js";
 import {
-  isDimOne,
+  isColVecTy,
+  isRowVecTy,
   isScalarRealNumeric,
   isNumeric,
   tensorDouble,
@@ -294,20 +295,3 @@ export function lowerSliceArg(
   return { kind: "Range", start, step, end, span: arg.span };
 }
 
-function isRowVecTy(t: NumericType): boolean {
-  return (
-    t.dims.length === 2 &&
-    isDimOne(t.dims[0]) &&
-    t.dims[1].kind === "exact" &&
-    t.dims[1].value !== 1
-  );
-}
-
-function isColVecTy(t: NumericType): boolean {
-  return (
-    t.dims.length === 2 &&
-    t.dims[0].kind === "exact" &&
-    t.dims[0].value !== 1 &&
-    isDimOne(t.dims[1])
-  );
-}

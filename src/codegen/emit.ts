@@ -27,6 +27,7 @@ import { getBuiltin } from "../lowering/builtins/index.js";
 import {
   classTypedefName,
   handleTypedefName,
+  isColVecTy,
   isDimOne,
   isHandle,
   isMultiElement,
@@ -1662,12 +1663,7 @@ function emitIndexSliceProducer(
       srcIndexFor = k =>
         `(long)(_mtoc2_start + ${stepStr} * (double)${k}) - 1L`;
       // Single-slot range: row-vec → row, col-vec → col, matrix/N-D → row.
-      const isColVec =
-        e.base.ty.kind === "Numeric" &&
-        e.base.ty.dims.length === 2 &&
-        e.base.ty.dims[0].kind === "exact" &&
-        e.base.ty.dims[0].value > 1 &&
-        isDimOne(e.base.ty.dims[1]);
+      const isColVec = e.base.ty.kind === "Numeric" && isColVecTy(e.base.ty);
       if (isColVec) {
         resultRows = "_mtoc2_n";
         resultCols = "1";
