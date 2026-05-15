@@ -28,6 +28,7 @@ import {
   type OptProfile,
 } from "../optProfile";
 import type { WasmOptLevel } from "../utils/wasmExecution";
+import { textEncoder } from "../utils/textCodec";
 
 interface IDEWorkspaceProps {
   /** Returned by useProjectFiles or useShareProjectFiles. */
@@ -35,8 +36,6 @@ interface IDEWorkspaceProps {
   /** Header content (back button, project name, share button). */
   header?: React.ReactNode;
 }
-
-const textEncoder = new TextEncoder();
 
 const WASM_OPT_LEVEL_KEY = "mtoc_wasm_opt_level";
 const WASM_SIMD_KEY = "mtoc_wasm_simd";

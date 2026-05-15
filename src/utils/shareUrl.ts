@@ -1,12 +1,11 @@
 import pako from "pako";
 import { fileText, type WorkspaceFile } from "../hooks/useProjectFiles";
+import { textEncoder, textDecoder } from "./textCodec";
 
 export interface ShareData {
   files: { name: string; content: string }[];
   activeFileName: string | null;
 }
-
-const textEncoder = new TextEncoder();
 
 /** Convert bytes to base64url, chunked to avoid call-stack overflow on
  *  large buffers (spread args into String.fromCharCode is the
@@ -61,7 +60,7 @@ export function decodeShareData(encoded: string): ShareData {
   const binary = atob(base64);
   const bytes = new Uint8Array(binary.length);
   for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-  const json = new TextDecoder().decode(pako.inflate(bytes));
+  const json = textDecoder.decode(pako.inflate(bytes));
   return JSON.parse(json);
 }
 

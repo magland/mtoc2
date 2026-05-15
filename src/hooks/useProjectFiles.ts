@@ -19,11 +19,10 @@ import {
   generateUniqueName,
   type WorkspaceFile,
 } from "./fileListReducer";
+import { textEncoder, textDecoder } from "../utils/textCodec";
 
 export type { WorkspaceFile };
 
-const textEncoder = new TextEncoder();
-const textDecoder = new TextDecoder("utf-8");
 const SAVE_DEBOUNCE_MS = 500;
 
 export function fileText(data: Uint8Array): string {

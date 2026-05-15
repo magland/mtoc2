@@ -17,8 +17,7 @@ import {
   decodeShareData,
   shareDataToWorkspaceFiles,
 } from "../utils/shareUrl";
-
-const textEncoder = new TextEncoder();
+import { textEncoder } from "../utils/textCodec";
 
 export function useShareProjectFiles(): UseProjectFilesResult & {
   urlSizeTooLarge: boolean;

@@ -1,6 +1,5 @@
 import { db, type Project, type ProjectFile } from "./schema";
-
-const textEncoder = new TextEncoder();
+import { textEncoder } from "../utils/textCodec";
 
 const DEFAULT_CODE = `% Write your numbl script here.
 x = 3;
