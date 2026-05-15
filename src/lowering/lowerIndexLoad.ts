@@ -74,7 +74,8 @@ export function lowerIndexLoad(
     kind: "IndexLoad",
     base,
     indices,
-    ty: folded ?? (baseTy.isComplex ? scalarComplex() : scalarDouble("unknown")),
+    ty:
+      folded ?? (baseTy.isComplex ? scalarComplex() : scalarDouble("unknown")),
     span,
   };
 }

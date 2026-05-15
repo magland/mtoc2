@@ -42,8 +42,11 @@ import {
   DIM_ONE,
   EXACT_ARRAY_MAX_ELEMENTS,
   MTOC2_MAX_NDIM,
+  tensorComplex,
+  tensorComplexFromDims,
   tensorDouble,
   tensorDoubleFromDims,
+  scalarComplex,
   scalarDouble,
   signFromNumber,
   isNumeric,
@@ -248,12 +251,9 @@ export const reshape: Builtin = {
         span
       );
     }
-    if (a.isComplex) {
-      throw new TypeError(`'reshape' on complex inputs is not supported`, span);
-    }
     if (a.elem !== "double" && a.elem !== "logical") {
       throw new TypeError(
-        `'reshape' first arg must be a real double or logical tensor (got ${a.elem})`,
+        `'reshape' first arg must be a double or logical tensor (got ${a.elem})`,
         span
       );
     }
@@ -320,6 +320,30 @@ export const reshape: Builtin = {
       // Scalar output (every dim is exact 1). Propagate exact when
       // input is an exact scalar.
       if (newShape.every(d => d === 1)) {
+        if (a.isComplex) {
+          const cx =
+            a.exact !== undefined &&
+            typeof a.exact === "object" &&
+            !(a.exact instanceof Float64Array) &&
+            !((a.exact as { re?: unknown }).re instanceof Float64Array)
+              ? (a.exact as { re: number; im: number })
+              : undefined;
+          if (cx !== undefined) return scalarComplex(cx);
+          // Complex tensor with `{re, im}` split-buffer carrier folds
+          // to a 1×1 complex scalar.
+          if (
+            a.exact !== undefined &&
+            typeof a.exact === "object" &&
+            !(a.exact instanceof Float64Array) &&
+            (a.exact as { re?: unknown }).re instanceof Float64Array
+          ) {
+            const cxArr = a.exact as { re: Float64Array; im: Float64Array };
+            if (cxArr.re.length === 1) {
+              return scalarComplex({ re: cxArr.re[0], im: cxArr.im[0] });
+            }
+          }
+          return scalarComplex();
+        }
         if (typeof a.exact === "number") {
           return scalarDouble(signFromNumber(a.exact), a.exact);
         }
@@ -327,6 +351,21 @@ export const reshape: Builtin = {
       }
 
       // Multi-element output with all-exact shape.
+      if (a.isComplex) {
+        if (
+          a.exact !== undefined &&
+          typeof a.exact === "object" &&
+          !(a.exact instanceof Float64Array) &&
+          (a.exact as { re?: unknown }).re instanceof Float64Array &&
+          newTotal <= EXACT_ARRAY_MAX_ELEMENTS
+        ) {
+          const cxArr = a.exact as { re: Float64Array; im: Float64Array };
+          if (cxArr.re.length === newTotal) {
+            return tensorComplex(newShape, cxArr);
+          }
+        }
+        return tensorComplex(newShape);
+      }
       if (
         a.exact instanceof Float64Array &&
         newTotal <= EXACT_ARRAY_MAX_ELEMENTS &&
@@ -349,7 +388,9 @@ export const reshape: Builtin = {
           : { kind: "exact", value: axis.value }
         : { kind: "unknown" }
     );
-    return tensorDoubleFromDims(dims);
+    return a.isComplex
+      ? tensorComplexFromDims(dims)
+      : tensorDoubleFromDims(dims);
   },
   codegenC(argsC, argTypes) {
     // Re-resolve from arg types (transfer succeeded, so the same
@@ -373,9 +414,12 @@ export const reshape: Builtin = {
       return argsC[0];
     }
 
+    const a = argTypes[0];
+    const isComplex = isNumeric(a) && a.isComplex;
+    const fn = isComplex ? "mtoc2_reshape_nd_complex" : "mtoc2_reshape_nd";
     const dimArgsC = argsC.slice(1);
     const dimList = resolved.axes.map(axis => dimC(axis, dimArgsC)).join(", ");
-    return `mtoc2_reshape_nd(${argsC[0]}, ${resolved.axes.length}, (long[]){${dimList}})`;
+    return `${fn}(${argsC[0]}, ${resolved.axes.length}, (long[]){${dimList}})`;
   },
-  runtimeDeps: ["mtoc2_reshape_nd"],
+  runtimeDeps: ["mtoc2_reshape_nd", "mtoc2_reshape_nd_complex"],
 };

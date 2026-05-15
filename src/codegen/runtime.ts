@@ -259,12 +259,31 @@ const REGISTRY: ReadonlyMap<string, RuntimeSnippet> = new Map<
       "mtoc2_tensor_alloc_nd",
     ]),
   ],
+  [
+    "mtoc2_reshape_nd_complex",
+    loadSnippet("tensor_reshape_nd_complex.h", [
+      "mtoc2_tensor_t",
+      "mtoc2_tensor_alloc_nd_complex",
+    ]),
+  ],
   // 2-D non-conjugate transpose. The `.'` and `'` unary operators
   // both map here (the conjugate variant matters only for complex
   // tensors, which mtoc2 doesn't yet have).
   [
     "mtoc2_tensor_transpose",
     loadSnippet("tensor_transpose.h", ["mtoc2_tensor_t", "mtoc2_alloc"]),
+  ],
+  // Complex sibling of `mtoc2_tensor_transpose` — the non-conjugating
+  // `.'` operator on a complex tensor. The conjugate `'` operator
+  // lowers to `transpose(conj(z))` at the lowering layer (see
+  // `index.ts::unaryOpBuiltin`), so this helper only sees the plain
+  // transpose.
+  [
+    "mtoc2_tensor_transpose_complex",
+    loadSnippet("tensor_transpose_complex.h", [
+      "mtoc2_tensor_t",
+      "mtoc2_tensor_alloc_nd_complex",
+    ]),
   ],
   // Real 2-D matrix multiplication `A * B`. `mtimes` builtin
   // activates this snippet when both operands are tensors; the scalar
@@ -385,6 +404,21 @@ const REGISTRY: ReadonlyMap<string, RuntimeSnippet> = new Map<
       "mtoc2_tensor_alloc_nd",
       "mtoc2_tensor_alloc_nd_complex",
       "mtoc2_cscalar",
+    ]),
+  ],
+  // Sum / prod / mean / min / max / any / all reductions on complex
+  // tensors. Each builtin's transfer + codegen now dispatches on
+  // `isComplex`; the complex path activates this snippet and emits
+  // `mtoc2_<name>_complex_all` / `_complex_dim` calls.
+  [
+    "mtoc2_tensor_reduce_complex",
+    loadSnippet("tensor_reduce_complex.h", [
+      "mtoc2_tensor_t",
+      "mtoc2_alloc",
+      "mtoc2_tensor_alloc_nd",
+      "mtoc2_tensor_alloc_nd_complex",
+      "mtoc2_cscalar",
+      "mtoc2_cdiv",
     ]),
   ],
 

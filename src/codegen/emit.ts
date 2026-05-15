@@ -699,8 +699,7 @@ function emitStmt(
     case "IndexStore": {
       const offset = emitNdScalarOffset(state, s.indices, s.base.cName);
       const rhs = emitExpr(s.rhs, state);
-      const baseIsComplex =
-        isNumeric(s.base.ty) && s.base.ty.isComplex;
+      const baseIsComplex = isNumeric(s.base.ty) && s.base.ty.isComplex;
       const rhsIsComplex = isNumeric(s.rhs.ty) && s.rhs.ty.isComplex;
       if (baseIsComplex) {
         // Both lanes must be written. The offset expression may have

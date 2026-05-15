@@ -25,6 +25,7 @@ test_sum_negative_values();
 test_prod_negative_values();
 test_mean_runtime();
 test_empty_logical_via_zeros();
+test_complex_reductions();
 
 function test_scalar_identity()
   % Scalar identity for every reducer.
@@ -270,4 +271,31 @@ function test_empty_logical_via_zeros()
   e = zeros(0, 3);
   disp(any(e, 'all'));
   disp(all(e, 'all'));
+end
+
+% Reductions on complex tensors: sum/prod/mean (lane-pair accumulator),
+% min/max (magnitude-compare with atan2 tiebreak), any/all (toBool per
+% element). Covers default axis, explicit dim, and the 'all' literal.
+function test_complex_reductions()
+  v = [1+1i, 2+2i, 3+3i];
+  %!numbl:opaque v
+  disp(sum(v));
+  disp(prod(v));
+  disp(mean(v));
+  disp(min(v));
+  disp(max(v));
+  disp(any(v));
+  disp(all(v));
+  m = [1+1i, 2-2i; 3+3i, 4-4i];
+  %!numbl:opaque m
+  disp(sum(m));
+  disp(sum(m, 2));
+  disp(sum(m, 'all'));
+  disp(min(m, [], 2));
+  disp(max(m));
+  % any with a complex zero in the mix.
+  z = [0+0i, 0+1i, 0+0i];
+  %!numbl:opaque z
+  disp(any(z));
+  disp(all(z));
 end

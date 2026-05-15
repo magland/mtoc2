@@ -39,7 +39,7 @@ import type {
   Stmt,
   Span,
 } from "../parser/index.js";
-import { BinaryOperation } from "../parser/index.js";
+import { BinaryOperation, UnaryOperation } from "../parser/index.js";
 import { offsetToLineCol } from "../parser/sourceLoc.js";
 import { UnsupportedConstruct, TypeError } from "./errors.js";
 import {
@@ -2556,6 +2556,42 @@ export class Lowerer {
   private lowerUnary(e: Extract<Expr, { type: "Unary" }>): IRExpr {
     const operand = this.lowerExpr(e.operand);
     this.requireValueType(operand, "unary operator operand");
+    // `'` (conjugate transpose) on a complex operand lowers to
+    // `transpose(conj(z))` per the plan — no native ctranspose
+    // helper. For real operands `'` and `.'` are identical (both
+    // route to `transpose`).
+    if (
+      e.op === UnaryOperation.Transpose &&
+      isNumeric(operand.ty) &&
+      operand.ty.isComplex
+    ) {
+      const conjB = getBuiltin("conj");
+      const transB = getBuiltin("transpose");
+      if (!conjB || !transB) {
+        throw new UnsupportedConstruct(
+          `internal: 'conj'/'transpose' must be registered for complex ctranspose`,
+          e.span
+        );
+      }
+      const conjTy = conjB.transfer([operand.ty], e.span);
+      const conjCall: IRExpr = {
+        kind: "Call",
+        cName: "conj",
+        name: "conj",
+        args: [operand],
+        ty: conjTy,
+        span: e.span,
+      };
+      const transTy = transB.transfer([conjTy], e.span);
+      return {
+        kind: "Call",
+        cName: "transpose",
+        name: "transpose",
+        args: [conjCall],
+        ty: transTy,
+        span: e.span,
+      };
+    }
     const name = unaryOpBuiltin(e.op, e.span);
     const b = getBuiltin(name);
     if (!b) {

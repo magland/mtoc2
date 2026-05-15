@@ -9,6 +9,7 @@ test_sum_of_reshape_folds();
 test_reshape_zeros_chain();
 test_reshape_auto_infer_exact();
 test_reshape_auto_infer_runtime();
+test_reshape_complex();
 
 function test_form_a_2d()
   disp(reshape([1 2 3 4 5 6], 2, 3));
@@ -86,4 +87,17 @@ function test_reshape_auto_infer_runtime()
   %!numbl:opaque a
   disp(reshape(a, [], 1));
   disp(reshape(a, 3, []));
+end
+
+% Reshape on a complex tensor: both lanes get the same layout
+% reinterpretation (column-major buffer preserved). Form A and Form B
+% cover the two surface syntaxes; opaque path exercises the runtime
+% helper.
+function test_reshape_complex()
+  a = [1+1i, 2+2i, 3+3i, 4+4i, 5+5i, 6+6i];
+  disp(reshape(a, 2, 3));
+  disp(reshape(a, [3, 2]));
+  disp(reshape(a, [], 2));
+  %!numbl:opaque a
+  disp(reshape(a, 2, 3));
 end

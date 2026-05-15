@@ -36,9 +36,12 @@ import {
   isNumeric,
   isScalar,
   provablyNonEmpty,
+  scalarComplex,
   scalarDouble,
   scalarLogical,
   signFromNumber,
+  tensorComplex,
+  tensorComplexFromDims,
   tensorDouble,
   tensorDoubleFromDims,
   unifySign,
@@ -48,7 +51,7 @@ import {
   type Type,
 } from "../../types.js";
 import type { Builtin } from "../registry.js";
-import { exactDouble, exactRealArray } from "../_shared.js";
+import { exactDouble, exactComplex, exactRealArray } from "../_shared.js";
 
 /** What kind of reducer we're computing. Drives the kernel pieces
  *  (init / accumulator / finalizer / empty fallback / sign rule /
@@ -444,9 +447,9 @@ export function reductionTransfer(
   spec: KernelSpec
 ): Type {
   const inputType = argTypes[0];
-  if (!isNumeric(inputType) || inputType.isComplex) {
+  if (!isNumeric(inputType)) {
     throw new TypeError(
-      `'${spec.name}' arg must be a real numeric (got ${inputType.kind})`,
+      `'${spec.name}' arg must be numeric (got ${inputType.kind})`,
       span
     );
   }
@@ -455,6 +458,12 @@ export function reductionTransfer(
       `'${spec.name}' arg must be double or logical (got ${inputType.elem})`,
       span
     );
+  }
+  // Complex input: route through the complex reduction transfer so
+  // the per-op fold and result-type rules pick the right helper at
+  // codegen time.
+  if (inputType.isComplex) {
+    return complexReductionTransfer(argTypes, span, spec);
   }
   // min/max: 2-arg form is the elementwise slope (`max(a, b)`,
   // `min(a, b)`), not a reduction. Route to a separate transfer.
@@ -674,6 +683,104 @@ function elementwiseMinMaxTransfer(
   return scalarDouble(elementwiseMinMaxSign(name, a.sign, b.sign));
 }
 
+/** Reduction transfer for complex input. Pairs each `KernelSpec` with
+ *  the right result-shape rule and the right output element type:
+ *  sum/prod/mean/min/max → complex; any/all → real logical.
+ *
+ *  Folding is intentionally skipped on the complex path; the runtime
+ *  helper does the work. The plan's `EXACT_ARRAY_MAX_ELEMENTS` cap
+ *  on the `{re, im}` carrier still applies to other surfaces (literal
+ *  build, elementwise arith), but reducing a small complex array to
+ *  a scalar at translate time isn't load-bearing for the cross-runner. */
+function complexReductionTransfer(
+  argTypes: Type[],
+  span: Span,
+  spec: KernelSpec
+): Type {
+  const inputType = argTypes[0] as NumericType;
+  // 3-arg min/max placeholder check (the `[]` slot). Reuses the
+  // real-side check by inspecting the literal directly.
+  if (spec.dimArgIndex === 2 && argTypes.length === 3) {
+    const placeholder = argTypes[1];
+    if (
+      !(
+        isNumeric(placeholder) &&
+        placeholder.elem === "double" &&
+        !placeholder.isComplex &&
+        placeholder.shape !== undefined &&
+        placeholder.shape.length === 2 &&
+        placeholder.shape[0] === 0 &&
+        placeholder.shape[1] === 0
+      )
+    ) {
+      throw new UnsupportedConstruct(
+        `'${spec.name}(A, [], dim)' requires the second arg to be the ` +
+          `empty literal '[]' (got something else)`,
+        span
+      );
+    }
+  }
+  const dimType = argTypes[spec.dimArgIndex];
+  const axis = classifyDimArg(spec.name, dimType, span);
+
+  const isLogical = spec.outputElem === "logical";
+
+  // Scalar input: identity (or logical cast via complex toBool).
+  if (isScalar(inputType)) {
+    if (isLogical) {
+      const cx = exactComplex(inputType);
+      if (cx !== undefined) return scalarLogical(cx.re !== 0 || cx.im !== 0);
+      return scalarLogical();
+    }
+    const cx = exactComplex(inputType);
+    if (cx !== undefined) return scalarComplex(cx);
+    return scalarComplex();
+  }
+
+  // Pick the reduction axis.
+  let resolved: AxisAll | AxisFixed;
+  if (axis.kind === "default") {
+    resolved = chooseDefaultAxis(spec.name, inputType, span);
+  } else {
+    resolved = axis;
+  }
+
+  // Compute the output shape; mirror the real path's shape rules but
+  // produce a complex tensor (or scalar) for the numeric reducers and
+  // a real tensor (or scalar) for the logical reducers.
+  if (resolved.kind === "all") {
+    if (isLogical) return scalarLogical();
+    return scalarComplex();
+  }
+  if (inputType.shape !== undefined) {
+    const r = reduceConcreteShape(inputType.shape, resolved.dim);
+    if (r.scalar) {
+      if (isLogical) return scalarLogical();
+      return scalarComplex();
+    }
+    if (isLogical) {
+      const out = tensorDouble(r.shape);
+      out.elem = "logical";
+      out.sign = "nonneg";
+      return out;
+    }
+    return tensorComplex(r.shape);
+  }
+  // Lattice-only.
+  const r = reduceLatticeDims(inputType.dims, resolved.dim);
+  if (r.scalar) {
+    if (isLogical) return scalarLogical();
+    return scalarComplex();
+  }
+  if (isLogical) {
+    const out = tensorDoubleFromDims(r.dims);
+    out.elem = "logical";
+    out.sign = "nonneg";
+    return out;
+  }
+  return tensorComplexFromDims(r.dims);
+}
+
 /** Sign rule for `max(a, b)` / `min(a, b)` on two scalars. */
 function elementwiseMinMaxSign(name: "min" | "max", sa: Sign, sb: Sign): Sign {
   if (name === "max") {
@@ -727,9 +834,15 @@ export function reductionCodegen(spec: {
     if (!isNumeric(inputT)) {
       throw new Error(`internal: ${spec.name} codegen got non-numeric arg`);
     }
+    const isComplex = inputT.isComplex;
+    const suffixAll = isComplex ? "_complex_all" : "_all";
+    const suffixDim = isComplex ? "_complex_dim" : "_dim";
     // Scalar fast path: identity (or `(x != 0)` for logical).
     if (isScalar(inputT)) {
       if (spec.outputElem === "logical") {
+        if (isComplex) {
+          return `(mtoc2_cnonzero(${argsC[0]}) ? 1.0 : 0.0)`;
+        }
         return `((${argsC[0]}) != 0.0 ? 1.0 : 0.0)`;
       }
       return argsC[0];
@@ -761,7 +874,7 @@ export function reductionCodegen(spec: {
       throw new Error(`internal: ${spec.name} codegen unexpected dim type`);
     }
     if (axis.kind === "all") {
-      return `mtoc2_${spec.name}_all(${argsC[0]})`;
+      return `mtoc2_${spec.name}${suffixAll}(${argsC[0]})`;
     }
     // AxisFixed. If the lattice shows the result is scalar (every
     // surviving dim collapses to one), prefer `_all` — it's the same
@@ -769,15 +882,15 @@ export function reductionCodegen(spec: {
     if (inputT.shape !== undefined) {
       const r = reduceConcreteShape(inputT.shape, axis.dim);
       if (r.scalar) {
-        return `mtoc2_${spec.name}_all(${argsC[0]})`;
+        return `mtoc2_${spec.name}${suffixAll}(${argsC[0]})`;
       }
     } else {
       const r = reduceLatticeDims(inputT.dims, axis.dim);
       if (r.scalar) {
-        return `mtoc2_${spec.name}_all(${argsC[0]})`;
+        return `mtoc2_${spec.name}${suffixAll}(${argsC[0]})`;
       }
     }
-    return `mtoc2_${spec.name}_dim(${argsC[0]}, ${axis.dim})`;
+    return `mtoc2_${spec.name}${suffixDim}(${argsC[0]}, ${axis.dim})`;
   };
 }
 
@@ -797,7 +910,11 @@ export function defineReducer(spec: KernelSpec): Builtin {
       dimArgIndex: spec.dimArgIndex,
       outputElem: spec.outputElem,
     }),
-    runtimeDeps: ["mtoc2_tensor_reduce_real"],
+    runtimeDeps: [
+      "mtoc2_tensor_reduce_real",
+      "mtoc2_tensor_reduce_complex",
+      "mtoc2_cscalar",
+    ],
   };
 }
 

@@ -82,7 +82,8 @@ export function lowerIndexSliceStore(
   const hoists: IRStmt[] = [];
   let rhs: typeof rawRhs;
   const rhsIsScalar =
-    isNumeric(rawRhs.ty) && rawRhs.ty.dims.every(d => d.kind === "exact" && d.value === 1);
+    isNumeric(rawRhs.ty) &&
+    rawRhs.ty.dims.every(d => d.kind === "exact" && d.value === 1);
   if (rhsIsScalar) {
     rhs = rawRhs;
   } else if (isMultiElement(rawRhs.ty)) {

@@ -45,6 +45,7 @@ MTOC2_DEFINE_UNARY_CMATH(mtoc2_tensor_ceil_complex, mtoc2_cceil)
 MTOC2_DEFINE_UNARY_CMATH(mtoc2_tensor_round_complex, mtoc2_cround)
 MTOC2_DEFINE_UNARY_CMATH(mtoc2_tensor_fix_complex, mtoc2_cfix)
 MTOC2_DEFINE_UNARY_CMATH(mtoc2_tensor_sign_complex, mtoc2_csign)
+MTOC2_DEFINE_UNARY_CMATH(mtoc2_tensor_conj_complex, mtoc2_cconj)
 
 /* `abs` on a complex tensor returns a REAL tensor (the magnitude).
  * Different shape from the rest of the family — `r.imag` stays NULL

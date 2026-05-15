@@ -11,6 +11,8 @@ test_transpose_then_arith();
 test_transpose_in_func();
 test_apostrophe_alias();
 test_transpose_pass_to_func();
+test_complex_transpose();
+test_complex_ctranspose();
 
 function test_scalar_transpose()
   disp(5.');
@@ -102,4 +104,29 @@ end
 
 function s = row_sum(v)
   s = sum(v);
+end
+
+% Non-conjugating transpose `.'` on a complex tensor: dims swap,
+% both lanes shuffle in lockstep, imag sign unchanged.
+function test_complex_transpose()
+  m = [1+1i, 2+2i; 3+3i, 4+4i];
+  disp(m.');
+  v = [1+1i, 2+2i, 3+3i];
+  disp(v.');
+  % opaque
+  %!numbl:opaque m
+  disp(m.');
+end
+
+% Conjugate transpose `'` on a complex tensor lowers to
+% `transpose(conj(z))` at the IR level — imag sign flips while dims
+% swap.
+function test_complex_ctranspose()
+  m = [1+1i, 2+2i; 3+3i, 4+4i];
+  disp(m');
+  v = [1+1i, 2+2i, 3+3i];
+  disp(v');
+  % opaque path
+  %!numbl:opaque m
+  disp(m');
 end

@@ -1,16 +1,16 @@
 /**
- * `transpose` builtin — backs the `.'` and `'` unary operators.
- *
- * For real-typed inputs (the only kind mtoc2 has today) the two
- * operators are identical; both route here. When complex support
- * lands, `'` (conjugate transpose) gets its own builtin and `.'`
- * keeps this one.
+ * `transpose` builtin — backs the `.'` operator. The conjugate
+ * variant `'` lowers separately (see `index.ts::unaryOpBuiltin`):
+ * on a real-typed input it routes here too; on a complex input it
+ * lowers to `transpose(conj(z))` so this builtin stays the single
+ * non-conjugating transpose.
  *
  * Shape rules (mtoc2 v1, MATLAB-style):
  *   - Scalar  → scalar (identity).
- *   - 1×N row → N×1 col.   `exact: Float64Array` carries unchanged.
- *   - N×1 col → 1×N row.   `exact: Float64Array` carries unchanged.
- *   - M×N matrix → N×M.    `exact` carries with elements shuffled.
+ *   - 1×N row → N×1 col.   `exact` carriers (real Float64Array or
+ *               complex `{re, im}` split-buffer) carry unchanged.
+ *   - N×1 col → 1×N row.   Same carriers.
+ *   - M×N matrix → N×M.    Both lanes shuffled when complex.
  *   - Empty   → swap dims (0×N → N×0, M×0 → 0×M).
  *   - Rank ≥ 3 rejected with an UnsupportedConstruct.
  *
@@ -31,14 +31,16 @@ import {
   isNumeric,
   isScalar,
   isMultiElement,
-  tensorDouble,
+  scalarComplex,
   scalarDouble,
   signFromNumber,
+  tensorComplex,
+  tensorDouble,
   typeToString,
 } from "../../types.js";
 import type { NumericType } from "../../types.js";
 import type { Builtin } from "../registry.js";
-import { exactDouble } from "../_shared.js";
+import { exactComplex, exactDouble } from "../_shared.js";
 
 /** Shuffle an exact buffer for a 2-D transpose. Column-major source
  *  (m × n) → column-major destination (n × m): source element at
@@ -68,21 +70,20 @@ export const transpose: Builtin = {
         span
       );
     }
-    if (a.isComplex) {
-      throw new TypeError(
-        `transpose on complex tensors is not yet supported (no complex type in mtoc2)`,
-        span
-      );
-    }
     if (a.elem !== "double" && a.elem !== "logical") {
       throw new TypeError(
-        `transpose argument must be a real double or logical (got ${a.elem})`,
+        `transpose argument must be a double or logical (got ${a.elem})`,
         span
       );
     }
 
     // Scalar identity. Folds through with sign / exact intact.
     if (isScalar(a)) {
+      if (a.isComplex) {
+        const cx = exactComplex(a);
+        if (cx !== undefined) return scalarComplex(cx);
+        return scalarComplex();
+      }
       const v = exactDouble(a);
       if (v !== undefined) {
         return scalarDouble(signFromNumber(v), v);
@@ -102,12 +103,6 @@ export const transpose: Builtin = {
       );
     }
 
-    // Need both dims to be exact to know the result shape statically.
-    // Slice reads of an unknown-length range produce `unknown` dims;
-    // a slice taken of a known-shape base typically still has a
-    // statically-known shape, but we defer the unknown-shape case to
-    // a followup slope (the ND helper would need a runtime
-    // shape-aware transpose; not needed by chunkie_simple).
     if (a.shape === undefined) {
       throw new UnsupportedConstruct(
         `transpose of a tensor with unknown shape is not yet supported`,
@@ -119,8 +114,24 @@ export const transpose: Builtin = {
     const n = a.shape[1];
     const newShape = [n, m];
 
-    // Exact-fold path: shuffle the data buffer and attach to the
-    // result type. tensorDouble will reconcile sign from the array.
+    if (a.isComplex) {
+      // Exact-fold via the `{re, im}` split-buffer carrier when present.
+      if (
+        a.exact !== undefined &&
+        typeof a.exact === "object" &&
+        !(a.exact instanceof Float64Array) &&
+        (a.exact as { re?: unknown }).re instanceof Float64Array
+      ) {
+        const cx = a.exact as { re: Float64Array; im: Float64Array };
+        return tensorComplex(newShape, {
+          re: transposeExact(cx.re, m, n),
+          im: transposeExact(cx.im, m, n),
+        });
+      }
+      return tensorComplex(newShape);
+    }
+
+    // Real fold path.
     if (a.exact instanceof Float64Array) {
       const out = transposeExact(a.exact, m, n);
       return tensorDouble(newShape, out);
@@ -129,13 +140,13 @@ export const transpose: Builtin = {
   },
   codegenC(argsC, argTypes) {
     const a = argTypes[0] as NumericType;
-    // Scalar identity at the C level too. The lowerer's scalar branch
-    // already folds away the call when the input is exact, but a
-    // dynamic-scalar transpose can still reach codegen — passthrough.
     if (!isMultiElement(a)) {
       return argsC[0];
     }
+    if (a.isComplex) {
+      return `mtoc2_tensor_transpose_complex(${argsC[0]})`;
+    }
     return `mtoc2_tensor_transpose(${argsC[0]})`;
   },
-  runtimeDeps: ["mtoc2_tensor_transpose"],
+  runtimeDeps: ["mtoc2_tensor_transpose", "mtoc2_tensor_transpose_complex"],
 };
