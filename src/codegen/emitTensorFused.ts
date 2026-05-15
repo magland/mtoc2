@@ -53,6 +53,19 @@ export function isPureElementwiseExpr(e: IRExpr): boolean {
       // per-slot template. Check the builtin's `perSlotC` hook.
       const b = getBuiltin(e.builtin);
       if (!b || !b.perSlotC) return false;
+      // `mtimes`/`mrdivide` define `perSlotC` only for the
+      // at-least-one-scalar case (where they degenerate to elementwise
+      // `times`/`rdivide`). Reject the both-tensor case here.
+      if (e.builtin === "mtimes" || e.builtin === "mrdivide") {
+        if (
+          isNumeric(e.left.ty) &&
+          isMultiElement(e.left.ty) &&
+          isNumeric(e.right.ty) &&
+          isMultiElement(e.right.ty)
+        ) {
+          return false;
+        }
+      }
       return isPureElementwiseExpr(e.left) && isPureElementwiseExpr(e.right);
     }
     case "Unary": {

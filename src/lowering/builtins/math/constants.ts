@@ -38,6 +38,12 @@ function constBuiltin(
     codegenC() {
       return cLiteral;
     },
+    /** Per-slot is the same literal — no loop-dependent context. Wiring
+     *  this lets the fused emitter accept Assigns whose RHS contains
+     *  `pi`, `eps`, `Inf`, `NaN`. */
+    perSlotC() {
+      return cLiteral;
+    },
   };
 }
 

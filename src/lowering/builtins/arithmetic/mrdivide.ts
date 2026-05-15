@@ -24,5 +24,12 @@ export const mrdivide: Builtin = {
   codegenC(argsC, argTypes) {
     return getBuiltin("rdivide")!.codegenC(argsC, argTypes);
   },
+  /** `mrdivide` between two tensors is rejected in `transfer`, so the
+   *  only case reaching codegen is at-least-one-scalar — identical to
+   *  elementwise `rdivide`. Forward to keep the fused emitter able to
+   *  render `t / scalar` as one inline loop. */
+  perSlotC(argsC, argTypes) {
+    return getBuiltin("rdivide")!.perSlotC!(argsC, argTypes);
+  },
   runtimeDeps: ["mtoc2_tensor_elemwise_real", "mtoc2_cdiv"],
 };

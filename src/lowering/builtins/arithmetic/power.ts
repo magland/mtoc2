@@ -360,5 +360,17 @@ export const power: Builtin = {
     // scalar .^ tensor — not commutative.
     return `mtoc2_tensor_power_st(${argsC[0]}, ${argsC[1]})`;
   },
+  /** Per-slot template for the elementwise-fused emitter. Mirrors the
+   *  scalar codegen path's `pow(a, b)` / `mtoc2_cpow(a, b)` choice.
+   *  The fused emitter only calls this with same-shape numeric
+   *  operands (broadcast paths fall back to the helper). */
+  perSlotC(argsC, argTypes) {
+    const aN = argTypes[0] as NumericType;
+    const bN = argTypes[1] as NumericType;
+    if (aN.isComplex || bN.isComplex) {
+      return `mtoc2_cpow(${argsC[0]}, ${argsC[1]})`;
+    }
+    return `pow(${argsC[0]}, ${argsC[1]})`;
+  },
   runtimeDeps: ["mtoc2_tensor_elemwise_real_fn", "mtoc2_cscalar"],
 };

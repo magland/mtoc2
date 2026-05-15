@@ -163,5 +163,13 @@ export const mtimes: Builtin = {
     }
     return `mtoc2_tensor_mtimes_real(${argsC[0]}, ${argsC[1]})`;
   },
+  /** Elementwise per-slot template — only valid when at least one
+   *  operand is scalar (tensor * tensor is matrix product). The
+   *  `isPureElementwiseExpr` predicate in
+   *  `src/codegen/emitTensorFused.ts` rejects the both-tensor case
+   *  so this hook is only consulted on the elementwise call. */
+  perSlotC(argsC, argTypes) {
+    return getBuiltin("times")!.perSlotC!(argsC, argTypes);
+  },
   runtimeDeps: ["mtoc2_tensor_elemwise_real", "mtoc2_tensor_mtimes_real"],
 };
