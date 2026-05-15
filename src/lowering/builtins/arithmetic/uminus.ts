@@ -1,6 +1,7 @@
 import {
   type NumericType,
   scalarDouble,
+  scalarComplex,
   tensorDouble,
   tensorDoubleFromDims,
   signFromNumber,
@@ -9,14 +10,33 @@ import {
   isScalar,
 } from "../../types.js";
 import type { Builtin } from "../registry.js";
-import { requireRealDouble, exactDouble, exactRealArray } from "../_shared.js";
+import { UnsupportedConstruct } from "../../errors.js";
+import {
+  requireRealOrComplex,
+  exactDouble,
+  exactRealArray,
+  exactComplex,
+} from "../_shared.js";
 
 export const uminus: Builtin = {
   name: "uminus",
   arity: 1,
   transfer(argTypes, span) {
-    requireRealDouble(argTypes[0], `'uminus' arg`, span);
+    requireRealOrComplex(argTypes[0], `'uminus' arg`, span);
     const a = argTypes[0] as NumericType;
+    if (a.isComplex) {
+      if (isMultiElement(a)) {
+        throw new UnsupportedConstruct(
+          `'uminus' on a complex tensor is not yet supported`,
+          span
+        );
+      }
+      const cx = exactComplex(a);
+      if (cx !== undefined) {
+        return scalarComplex({ re: -cx.re, im: -cx.im });
+      }
+      return scalarComplex();
+    }
     if (isScalar(a)) {
       const ax = exactDouble(a);
       if (ax !== undefined) {
@@ -43,6 +63,8 @@ export const uminus: Builtin = {
     if (isMultiElement(argTypes[0])) {
       return `mtoc2_tensor_uminus(${argsC[0]})`;
     }
+    // Both real and complex scalar paths use the same C unary minus —
+    // C99 supports `-` on `_Complex` operands.
     return `(-${argsC[0]})`;
   },
   runtimeDeps: ["mtoc2_tensor_elemwise_real"],

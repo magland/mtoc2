@@ -2,6 +2,7 @@ import { TypeError } from "../../errors.js";
 import {
   isScalarRealNumeric,
   isNumeric,
+  isScalar,
   isText,
   structTypedefName,
 } from "../../types.js";
@@ -16,6 +17,10 @@ export const disp: Builtin = {
       // Scalar real (double or logical) — runtime call path.
       return { kind: "Unknown" };
     }
+    if (isNumeric(t) && isScalar(t) && t.isComplex && t.elem === "double") {
+      // Scalar complex — routes through mtoc2_disp_complex.
+      return { kind: "Unknown" };
+    }
     if (
       isNumeric(t) &&
       !t.isComplex &&
@@ -23,6 +28,10 @@ export const disp: Builtin = {
     ) {
       // Either an exact tensor (compile-time format) or a runtime
       // tensor with statically-known shape (mtoc2_disp_tensor call).
+      return { kind: "Unknown" };
+    }
+    if (isNumeric(t) && t.isComplex && !isScalar(t) && t.elem === "double") {
+      // Complex multi-element tensor — phase 2 disp helper.
       return { kind: "Unknown" };
     }
     if (isText(t)) {
@@ -36,7 +45,7 @@ export const disp: Builtin = {
       return { kind: "Unknown" };
     }
     throw new TypeError(
-      `'disp' arg must be a scalar real, a real tensor, text, or a struct ` +
+      `'disp' arg must be a scalar numeric, a real or complex tensor, text, or a struct ` +
         `(got ${t.kind})`,
       span
     );
@@ -53,6 +62,12 @@ export const disp: Builtin = {
     if (t.kind === "Char") {
       return `mtoc2_disp_text(mtoc2_text_from_char_tensor(${argsC[0]}))`;
     }
+    if (isNumeric(t) && t.isComplex && isScalar(t)) {
+      return `mtoc2_disp_complex(${argsC[0]})`;
+    }
+    if (isNumeric(t) && t.isComplex && !isScalar(t)) {
+      return `mtoc2_disp_tensor_complex(${argsC[0]})`;
+    }
     if (isNumeric(t) && !isScalarRealNumeric(t)) {
       // Runtime tensor — call the runtime disp helper. The arg is
       // passed by value (struct copy of the pointers); disp_tensor
@@ -63,5 +78,11 @@ export const disp: Builtin = {
     // Scalar runtime path.
     return `mtoc2_disp_double(${argsC[0]})`;
   },
-  runtimeDeps: ["mtoc2_disp_double", "mtoc2_disp_tensor", "mtoc2_disp_text"],
+  runtimeDeps: [
+    "mtoc2_disp_double",
+    "mtoc2_disp_tensor",
+    "mtoc2_disp_text",
+    "mtoc2_disp_complex",
+    "mtoc2_disp_tensor_complex",
+  ],
 };

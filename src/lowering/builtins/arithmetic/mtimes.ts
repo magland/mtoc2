@@ -8,7 +8,11 @@ import {
   type Sign,
 } from "../../types.js";
 import { type Builtin, getBuiltin } from "../registry.js";
-import { exactRealArray, requireRealDouble } from "../_shared.js";
+import {
+  exactRealArray,
+  requireRealDouble,
+  requireRealOrComplex,
+} from "../_shared.js";
 
 /** Result-sign rule for matrix multiplication. Each output element is
  *  a sum of products; we only assert sign when both operands are
@@ -60,18 +64,18 @@ export const mtimes: Builtin = {
   name: "mtimes",
   arity: 2,
   transfer(argTypes, span) {
-    requireRealDouble(argTypes[0], `'mtimes' arg 1`, span);
-    requireRealDouble(argTypes[1], `'mtimes' arg 2`, span);
-    // `requireRealDouble` returns void but it has already validated
-    // `isNumeric` on both — narrow to `NumericType` for the rest of
-    // the transfer.
+    requireRealOrComplex(argTypes[0], `'mtimes' arg 1`, span);
+    requireRealOrComplex(argTypes[1], `'mtimes' arg 2`, span);
     const a = argTypes[0] as NumericType;
     const b = argTypes[1] as NumericType;
     if (!isMultiElement(a) || !isMultiElement(b)) {
       // Scalar mtimes delegates to elementwise times — identical fold
-      // and codegen.
+      // and codegen. The `times` transfer handles complex contamination.
       return getBuiltin("times")!.transfer(argTypes, span);
     }
+    // Tensor mtimes: real-only in Phase 1 (Phase 3 adds complex).
+    requireRealDouble(argTypes[0], `'mtimes' arg 1`, span);
+    requireRealDouble(argTypes[1], `'mtimes' arg 2`, span);
     // Both tensors. v1: real, 2-D, statically inner-dim-matching when
     // shapes are known.
     if (a.shape !== undefined && a.shape.length !== 2) {

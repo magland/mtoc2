@@ -25,6 +25,7 @@ export function cTypeFor(t: Type): string {
   if (t.kind === "Class") return classTypedefName(t);
   if (t.kind === "String") return "mtoc2_string_t";
   if (t.kind === "Char") return "mtoc2_char_tensor_t";
+  if (t.kind === "Numeric" && t.isComplex) return "double _Complex";
   return "double";
 }
 

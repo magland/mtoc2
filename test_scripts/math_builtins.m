@@ -15,6 +15,8 @@ test_in_loop();
 test_pass_to_func();
 test_minmax_two_arg();
 test_sign_propagation_chain();
+test_complex_part_builtins();
+test_complex_abs_angle();
 
 function test_scalar_exact_unary()
   % Trig
@@ -304,4 +306,41 @@ function test_sign_propagation_chain()
   disp(v);
   e = sqrt(sum(abs(d).^2 / 4, 1));
   disp(e);
+end
+
+% real / imag / conj on both real and complex scalar inputs.
+function test_complex_part_builtins()
+  % Real input: real(x) == x, imag(x) == 0, conj(x) == x.
+  disp(real(3.5));
+  disp(imag(3.5));
+  disp(conj(3.5));
+  % Complex literal.
+  z = 1 + 2i;
+  disp(real(z));
+  disp(imag(z));
+  disp(conj(z));
+  % Pure imaginary.
+  w = -3i;
+  disp(real(w));
+  disp(imag(w));
+  disp(conj(w));
+  % Pass through a runtime value (no fold).
+  %!numbl:opaque z
+  disp(real(z));
+  disp(imag(z));
+  disp(conj(z));
+end
+
+% abs / angle on complex scalars.
+function test_complex_abs_angle()
+  disp(abs(3 + 4i));
+  disp(abs(-5i));
+  disp(angle(1));
+  disp(angle(-1));
+  disp(angle(1i));
+  disp(angle(1 + 1i));
+  % Opaque path.
+  z = 3 + 4i;
+  %!numbl:opaque z
+  disp(abs(z));
 end

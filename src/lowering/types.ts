@@ -122,11 +122,16 @@ export const MTOC2_MAX_NDIM = 8;
 
 /** Exact-value variants.
  *  - `number`: scalar real.
- *  - `{re,im}`: scalar complex (reserved, not yet wired through).
+ *  - `{re,im}`: scalar complex.
  *  - `Float64Array`: dense real array, column-major (matches numbl's
  *    `RuntimeTensor.data`). Shape is carried by `dims` on `NumericType`.
- *  Complex-array variant comes later. */
-export type NumericExact = number | { re: number; im: number } | Float64Array;
+ *  - `{re: Float64Array; im: Float64Array}`: dense complex array,
+ *    column-major split-buffer (mirrors the runtime layout). */
+export type NumericExact =
+  | number
+  | { re: number; im: number }
+  | Float64Array
+  | { re: Float64Array; im: Float64Array };
 
 // ── Numeric scalar/tensor type ──────────────────────────────────────────
 
@@ -278,6 +283,23 @@ export function scalarDouble(
   return t;
 }
 
+/** Scalar complex double. Sign is always `unknown` for complex values
+ *  — the sign lattice describes ordering on the real line, which has
+ *  no analogue for complex numbers. When `exact` is provided, both
+ *  `re` and `im` must be finite. */
+export function scalarComplex(exact?: { re: number; im: number }): NumericType {
+  const t: NumericType = {
+    kind: "Numeric",
+    elem: "double",
+    isComplex: true,
+    dims: [DIM_ONE, DIM_ONE],
+    shape: [1, 1],
+    sign: "unknown",
+  };
+  if (exact !== undefined) t.exact = { re: exact.re, im: exact.im };
+  return t;
+}
+
 export function scalarLogical(exact?: boolean): NumericType {
   const t: NumericType = {
     kind: "Numeric",
@@ -352,6 +374,60 @@ export function tensorDouble(
     }
     t.exact = exact;
     t.sign = signFromExactArray(exact);
+  }
+  return t;
+}
+
+/** Complex-double tensor with statically-known shape. Mirrors
+ *  `tensorDouble` but the result type carries `isComplex: true` and
+ *  the optional `exact` is the split-buffer carrier whose `re` /
+ *  `im` Float64Arrays each match the shape product. Sign is always
+ *  `"unknown"` for complex (the lattice describes ordering on the
+ *  real line; complex numbers have no analogue). */
+export function tensorComplex(
+  shape: number[],
+  exact?: { re: Float64Array; im: Float64Array }
+): NumericType {
+  const dims: DimInfo[] = shape.map(s =>
+    s === 1 ? DIM_ONE : { kind: "exact", value: s }
+  );
+  const t: NumericType = {
+    kind: "Numeric",
+    elem: "double",
+    isComplex: true,
+    dims,
+    shape: shape.slice(),
+    sign: "unknown",
+  };
+  if (exact !== undefined) {
+    const total = shape.reduce((a, b) => a * b, 1);
+    if (exact.re.length !== total || exact.im.length !== total) {
+      throw new Error(
+        `tensorComplex: shape [${shape.join(",")}] requires ${total} elements, got re=${exact.re.length} im=${exact.im.length}`
+      );
+    }
+    t.exact = { re: exact.re, im: exact.im };
+  }
+  return t;
+}
+
+/** Complex-double tensor built from a per-axis `dims` lattice. Sibling
+ *  of `tensorDoubleFromDims` for slice-read result typing when at
+ *  least one axis is runtime-only. */
+export function tensorComplexFromDims(dims: DimInfo[]): NumericType {
+  const trimmed = dims.slice();
+  while (trimmed.length > 2 && isDimOne(trimmed[trimmed.length - 1])) {
+    trimmed.pop();
+  }
+  const t: NumericType = {
+    kind: "Numeric",
+    elem: "double",
+    isComplex: true,
+    dims: trimmed,
+    sign: "unknown",
+  };
+  if (trimmed.every(d => d.kind === "exact")) {
+    t.shape = trimmed.map(d => (d as { kind: "exact"; value: number }).value);
   }
   return t;
 }
@@ -564,9 +640,24 @@ export function numericExactsEqual(
     return true;
   }
   if (aIsArr || bIsArr) return false;
-  // Both must be {re, im}.
+  // Object case: scalar {re, im} or complex-tensor {re, im} (Float64Arrays).
   if (typeof a === "object" && typeof b === "object") {
-    return Object.is(a.re, b.re) && Object.is(a.im, b.im);
+    const aReArr = (a as { re: unknown }).re instanceof Float64Array;
+    const bReArr = (b as { re: unknown }).re instanceof Float64Array;
+    if (aReArr !== bReArr) return false;
+    if (aReArr) {
+      const ax = a as { re: Float64Array; im: Float64Array };
+      const bx = b as { re: Float64Array; im: Float64Array };
+      if (ax.re.length !== bx.re.length) return false;
+      for (let i = 0; i < ax.re.length; i++) {
+        if (!Object.is(ax.re[i], bx.re[i])) return false;
+        if (!Object.is(ax.im[i], bx.im[i])) return false;
+      }
+      return true;
+    }
+    const ax = a as { re: number; im: number };
+    const bx = b as { re: number; im: number };
+    return Object.is(ax.re, bx.re) && Object.is(ax.im, bx.im);
   }
   return false;
 }
@@ -817,7 +908,17 @@ function formatExactForType(e: NumericExact): string {
     if (e.length > cap) preview.push("…");
     return `[${preview.join(", ")}]`;
   }
-  return `(${e.re}+${e.im}i)`;
+  if (e.re instanceof Float64Array) {
+    const cap = 4;
+    const cx = e as { re: Float64Array; im: Float64Array };
+    const preview: string[] = [];
+    const n = Math.min(cap, cx.re.length);
+    for (let i = 0; i < n; i++) preview.push(`${cx.re[i]}+${cx.im[i]}i`);
+    if (cx.re.length > cap) preview.push("…");
+    return `[${preview.join(", ")}]`;
+  }
+  const sx = e as { re: number; im: number };
+  return `(${sx.re}+${sx.im}i)`;
 }
 
 // ── Canonicalize + hash (for function specialization keys) ──────────────
@@ -900,11 +1001,19 @@ function canon(t: Type): unknown {
           out.x = Array.from(t.exact, encodeExactNumber);
         } else if (typeof t.exact === "number") {
           out.x = encodeExactNumber(t.exact);
-        } else {
-          // Complex { re, im } — sanitize each component.
+        } else if (t.exact.re instanceof Float64Array) {
+          // Complex-tensor split-buffer exact.
+          const cx = t.exact as { re: Float64Array; im: Float64Array };
           out.x = {
-            re: encodeExactNumber(t.exact.re),
-            im: encodeExactNumber(t.exact.im),
+            re: Array.from(cx.re, encodeExactNumber),
+            im: Array.from(cx.im, encodeExactNumber),
+          };
+        } else {
+          // Scalar complex { re, im } — sanitize each component.
+          const sx = t.exact as { re: number; im: number };
+          out.x = {
+            re: encodeExactNumber(sx.re),
+            im: encodeExactNumber(sx.im),
           };
         }
       }
@@ -986,6 +1095,7 @@ export function handleTypedefName(t: HandleType): string {
 export function cFieldTypeStr(t: Type): string {
   if (t.kind === "Numeric") {
     if (isMultiElement(t)) return "mtoc2_tensor_t";
+    if (t.isComplex) return "double _Complex";
     return "double";
   }
   if (t.kind === "String") return "mtoc2_string_t";

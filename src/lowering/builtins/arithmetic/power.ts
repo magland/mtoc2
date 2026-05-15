@@ -37,6 +37,7 @@ import {
   isDimOne,
   isMultiElement,
   scalarDouble,
+  scalarComplex,
   signFromNumber,
   signIsNonneg,
   tensorDouble,
@@ -44,7 +45,13 @@ import {
 } from "../../types.js";
 import type { Span } from "../../../parser/index.js";
 import type { Builtin } from "../registry.js";
-import { exactDouble, exactRealArray, requireRealDouble } from "../_shared.js";
+import {
+  exactDouble,
+  exactRealArray,
+  exactScalarAsComplex,
+  requireRealOrComplex,
+  requireRealDouble,
+} from "../_shared.js";
 
 function isExactInteger(t: NumericType): boolean {
   const v = exactDouble(t);
@@ -175,10 +182,60 @@ function powerShape(
   return { outDims, bcast };
 }
 
+/** Complex scalar power fold. Uses the standard
+ *  `z^w = exp(w * log(z))` formula. Returns `undefined` when the
+ *  result would be non-finite. */
+function cpowFold(
+  a: { re: number; im: number },
+  b: { re: number; im: number }
+): { re: number; im: number } | undefined {
+  // log(z) = log|z| + i*arg(z)
+  const r = Math.hypot(a.re, a.im);
+  if (r === 0) {
+    // 0^w: matches C99 — 0 when re(w) > 0, 1 when w == 0, else NaN.
+    if (b.re === 0 && b.im === 0) return { re: 1, im: 0 };
+    if (b.re > 0) return { re: 0, im: 0 };
+    return undefined;
+  }
+  const logR = Math.log(r);
+  const phi = Math.atan2(a.im, a.re);
+  // w * log(z)
+  const tRe = b.re * logR - b.im * phi;
+  const tIm = b.re * phi + b.im * logR;
+  // exp(t)
+  const expRe = Math.exp(tRe);
+  const re = expRe * Math.cos(tIm);
+  const im = expRe * Math.sin(tIm);
+  if (!Number.isFinite(re) || !Number.isFinite(im)) return undefined;
+  return { re, im };
+}
+
 export const power: Builtin = {
   name: "power",
   arity: 2,
   transfer(argTypes, span) {
+    requireRealOrComplex(argTypes[0], `'.^' arg 1`, span);
+    requireRealOrComplex(argTypes[1], `'.^' arg 2`, span);
+    const a0 = argTypes[0] as NumericType;
+    const b0 = argTypes[1] as NumericType;
+    // Complex contamination — scalar path only (Phase 1).
+    if (a0.isComplex || b0.isComplex) {
+      if (isMultiElement(a0) || isMultiElement(b0)) {
+        throw new UnsupportedConstruct(
+          `'.^' on a complex tensor is not yet supported`,
+          span
+        );
+      }
+      const ax = exactScalarAsComplex(a0);
+      const bx = exactScalarAsComplex(b0);
+      if (ax !== undefined && bx !== undefined) {
+        const v = cpowFold(ax, bx);
+        if (v !== undefined) return scalarComplex(v);
+      }
+      return scalarComplex();
+    }
+    // Real path — both args must be real-double after the
+    // contamination check above.
     requireRealDouble(argTypes[0], `'.^' arg 1`, span);
     requireRealDouble(argTypes[1], `'.^' arg 2`, span);
     const a = argTypes[0] as NumericType;
@@ -273,6 +330,9 @@ export const power: Builtin = {
     const aMulti = isMultiElement(aN);
     const bMulti = isMultiElement(bN);
     if (!aMulti && !bMulti) {
+      if (aN.isComplex || bN.isComplex) {
+        return `cpow(${argsC[0]}, ${argsC[1]})`;
+      }
       return `pow(${argsC[0]}, ${argsC[1]})`;
     }
     if (aMulti && bMulti) {

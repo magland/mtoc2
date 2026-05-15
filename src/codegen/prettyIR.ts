@@ -86,6 +86,8 @@ function irExprToString(e: IRExpr): string {
   switch (e.kind) {
     case "NumLit":
       return numLitText(e.value);
+    case "ImagLit":
+      return `${numLitText(e.value)}i`;
     case "StringLit":
       return `'${e.value}'`;
     case "Var":

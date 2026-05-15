@@ -20,6 +20,18 @@ export interface NumLit {
   span: Span;
 }
 
+/** Imaginary-unit literal — produced for `1i`, `2.5i`, etc. `value` is
+ *  the imaginary coefficient (`2.5` for `2.5i`); the corresponding
+ *  real part is implicitly `0`. The lowerer collapses the parser's
+ *  `Number * ImagUnit` shape and bare-`ImagUnit` reads into this node;
+ *  codegen emits `(<value> * I)` (using `<complex.h>`'s `I` macro). */
+export interface ImagLit {
+  kind: "ImagLit";
+  value: number;
+  ty: Type;
+  span: Span;
+}
+
 /** Source-level string or char literal. Today only consumed by
  *  reducer builtins (`sum(A, 'all')`, `min(A, [], 'all')`, etc.) at
  *  transfer time — they read `ty.exact` to dispatch on the literal.
@@ -275,6 +287,7 @@ export interface MakeRange {
 
 export type IRExpr =
   | NumLit
+  | ImagLit
   | StringLit
   | TensorBuild
   | TensorConcat

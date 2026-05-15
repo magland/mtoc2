@@ -71,6 +71,10 @@ import { mod } from "./math/mod.js";
 import { rem } from "./math/rem.js";
 import { atan2 } from "./math/atan2.js";
 import { hypot } from "./math/hypot.js";
+import { real } from "./math/real.js";
+import { imag } from "./math/imag.js";
+import { conj } from "./math/conj.js";
+import { angle } from "./math/angle.js";
 import { pi, eps, Inf, inf, NaNBuiltin, nan } from "./math/constants.js";
 import { notBuiltin } from "./logical/not.js";
 import { oror } from "./logical/oror.js";
@@ -138,6 +142,10 @@ for (const b of [
   rem,
   atan2,
   hypot,
+  real,
+  imag,
+  conj,
+  angle,
   pi,
   eps,
   Inf,

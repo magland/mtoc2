@@ -34,7 +34,7 @@ import {
   typeToString,
 } from "../../types.js";
 import type { Builtin } from "../registry.js";
-import { exactDouble } from "../_shared.js";
+import { exactDouble, exactScalarAsComplex } from "../_shared.js";
 
 export type ShortCircuitKind = "or" | "and";
 
@@ -46,14 +46,8 @@ function asScalarRealOrLogical(
 ): void {
   if (!isNumeric(t)) {
     throw new TypeError(
-      `${what} must be a real scalar (got ${typeToString(t)}); ` +
+      `${what} must be a real or complex scalar (got ${typeToString(t)}); ` +
         `'${surface}' requires scalar operands (numbl accepts tensors via toBool, but mtoc2 follows MATLAB)`,
-      span
-    );
-  }
-  if (t.isComplex) {
-    throw new TypeError(
-      `${what} must be a real scalar (got complex); '${surface}' on complex is not supported`,
       span
     );
   }
@@ -70,6 +64,20 @@ function asScalarRealOrLogical(
       span
     );
   }
+}
+
+/** Truthy as numbl/MATLAB define it. Complex is truthy iff either
+ *  part is non-zero. Returns `undefined` when the value isn't exact. */
+function scalarTruthy(t: import("../../types.js").Type): boolean | undefined {
+  if (!isNumeric(t)) return undefined;
+  if (t.isComplex) {
+    const cx = exactScalarAsComplex(t);
+    if (cx === undefined) return undefined;
+    return cx.re !== 0 || cx.im !== 0;
+  }
+  const v = exactDouble(t);
+  if (v === undefined) return undefined;
+  return v !== 0;
 }
 
 export function defineShortCircuit(
@@ -94,24 +102,30 @@ export function defineShortCircuit(
         surface,
         span
       );
-      const ax = exactDouble(argTypes[0]);
-      const bx = exactDouble(argTypes[1]);
+      const at = scalarTruthy(argTypes[0]);
+      const bt = scalarTruthy(argTypes[1]);
       if (kind === "or") {
-        // LHS exact + truthy short-circuits to true.
-        if (ax !== undefined && ax !== 0) return scalarLogical(true);
-        if (ax !== undefined && bx !== undefined)
-          return scalarLogical(bx !== 0);
+        if (at === true) return scalarLogical(true);
+        if (at !== undefined && bt !== undefined) return scalarLogical(bt);
         return scalarLogical();
       }
       // and: LHS exact + falsy short-circuits to false.
-      if (ax !== undefined && ax === 0) return scalarLogical(false);
-      if (ax !== undefined && bx !== undefined) return scalarLogical(bx !== 0);
+      if (at === false) return scalarLogical(false);
+      if (at !== undefined && bt !== undefined) return scalarLogical(bt);
       return scalarLogical();
     },
-    codegenC(argsC) {
+    codegenC(argsC, argTypes) {
+      const lhs = (argTypes[0] as import("../../types.js").NumericType)
+        .isComplex
+        ? `(creal(${argsC[0]}) != 0.0 || cimag(${argsC[0]}) != 0.0)`
+        : `(${argsC[0]})`;
+      const rhs = (argTypes[1] as import("../../types.js").NumericType)
+        .isComplex
+        ? `(creal(${argsC[1]}) != 0.0 || cimag(${argsC[1]}) != 0.0)`
+        : `(${argsC[1]})`;
       // C's `||` / `&&` short-circuit and yield 0/1; cast to double
       // so the scalar slot matches the logical-as-double convention.
-      return `((double)((${argsC[0]}) ${cOp} (${argsC[1]})))`;
+      return `((double)(${lhs} ${cOp} ${rhs}))`;
     },
   };
 }

@@ -39,6 +39,7 @@ import type {
   Stmt,
   Span,
 } from "../parser/index.js";
+import { BinaryOperation } from "../parser/index.js";
 import { offsetToLineCol } from "../parser/sourceLoc.js";
 import { UnsupportedConstruct, TypeError } from "./errors.js";
 import {
@@ -52,6 +53,7 @@ import {
   DIM_ONE,
   EXACT_ARRAY_MAX_ELEMENTS,
   scalarDouble,
+  scalarComplex,
   tensorDouble,
   tensorDoubleFromDims,
   classType,
@@ -454,7 +456,7 @@ export class Lowerer {
     }
     const expr = this.lowerExpr(s.expr);
     // If the expression is a folded literal with no side effect, drop it.
-    if (expr.kind === "NumLit") return null;
+    if (expr.kind === "NumLit" || expr.kind === "ImagLit") return null;
     // Void-typed call (zero-output user function, fprintf-style
     // side-effecting builtin): the top-level expression itself can't
     // be hoisted (Void has no value), but its OWN-producing
@@ -505,6 +507,7 @@ export class Lowerer {
   private anfChildren(e: IRExpr, hoists: IRStmt[]): IRExpr {
     switch (e.kind) {
       case "NumLit":
+      case "ImagLit":
       case "StringLit":
       case "Var":
       case "HandleLit":
@@ -1244,7 +1247,7 @@ export class Lowerer {
 
   private lowerIf(s: Extract<Stmt, { type: "If" }>): IRStmt | IRStmt[] {
     const cond = this.lowerExpr(s.cond);
-    this.requireScalarReal(cond.ty, "if condition", s.span);
+    this.requireScalarCondType(cond.ty, "if condition", s.span);
 
     // If-fold: when the top cond is exact, take/drop the then-arm and
     // recurse on the remaining elseif chain. The cond's COMPUTATION is
@@ -1329,7 +1332,7 @@ export class Lowerer {
     const [first, ...rest] = elseifs;
     this.env = new Map(envBefore);
     const ec = this.lowerExpr(first.cond);
-    this.requireScalarReal(ec.ty, "elseif condition", first.cond.span);
+    this.requireScalarCondType(ec.ty, "elseif condition", first.cond.span);
     const beforeBody = new Map(this.env);
 
     this.env = beforeBody;
@@ -1362,7 +1365,7 @@ export class Lowerer {
     // post-loop values.
     stripExactFromEnv(this.env, collectAssignedNames(s.body));
     const cond = this.lowerExpr(s.cond);
-    this.requireScalarReal(cond.ty, "while condition", s.span);
+    this.requireScalarCondType(cond.ty, "while condition", s.span);
     const body = this.lowerStmts(s.body);
     this.env = this.mergeBranchEnvs([envBefore, this.env]);
     return { kind: "While", cond, body, span: s.span };
@@ -1458,6 +1461,17 @@ export class Lowerer {
           span: e.span,
         };
       }
+      case "ImagUnit":
+        // Bare `i` / `j` postfixed onto a Number turns into
+        // `Mul(Number, ImagUnit)` by the parser; that's caught by
+        // the collapse in `lowerBinary`. A standalone `ImagUnit`
+        // (rare — e.g. `1i / 2` after parser binding) lowers here.
+        return {
+          kind: "ImagLit",
+          value: 1,
+          ty: scalarComplex({ re: 0, im: 1 }),
+          span: e.span,
+        };
       case "Ident":
         return this.lowerIdent(e);
       case "Binary":
@@ -2405,6 +2419,26 @@ export class Lowerer {
   }
 
   private lowerBinary(e: Extract<Expr, { type: "Binary" }>): IRExpr {
+    // Parser produces `1i` as `Mul(Number(1), ImagUnit)` (and `2.5i`
+    // as `Mul(Number(2.5), ImagUnit)`). Collapse that to a single
+    // `ImagLit` so the rest of the pipeline doesn't see an artificial
+    // multiplication and so the resulting type carries an exact
+    // `{re: 0, im: v}` for downstream folding.
+    if (
+      e.op === BinaryOperation.Mul &&
+      e.left.type === "Number" &&
+      e.right.type === "ImagUnit"
+    ) {
+      const v = Number(e.left.value);
+      if (Number.isFinite(v)) {
+        return {
+          kind: "ImagLit",
+          value: v,
+          ty: scalarComplex({ re: 0, im: v }),
+          span: e.span,
+        };
+      }
+    }
     const left = this.lowerExpr(e.left);
     this.requireValueType(left, "binary operator operand");
     const right = this.lowerExpr(e.right);
@@ -3335,6 +3369,24 @@ export class Lowerer {
     }
   }
 
+  /** Like `requireScalarReal` but also accepts scalar complex —
+   *  used by `if` / `while` / `elseif` conds, where MATLAB's `toBool`
+   *  rule (`creal(z) != 0 || cimag(z) != 0`) gives the boolean. */
+  private requireScalarCondType(t: Type, what: string, span: Span): void {
+    if (
+      isNumeric(t) &&
+      (t.elem === "double" || t.elem === "logical") &&
+      t.dims.length === 2 &&
+      t.dims[0].kind === "exact" &&
+      t.dims[0].value === 1 &&
+      t.dims[1].kind === "exact" &&
+      t.dims[1].value === 1
+    ) {
+      return;
+    }
+    throw new UnsupportedConstruct(`${what} must be a scalar numeric`, span);
+  }
+
   private mergeBranchEnvs(
     envs: Map<string, EnvEntry>[]
   ): Map<string, EnvEntry> {
@@ -3517,9 +3569,22 @@ function synthesizeZeroValue(
 function condToBool(cond: IRExpr): boolean | null {
   if (!isNumeric(cond.ty)) return null;
   const x = cond.ty.exact;
-  if (typeof x !== "number") return null;
-  if (!Number.isFinite(x)) return null;
-  return x !== 0;
+  if (typeof x === "number") {
+    if (!Number.isFinite(x)) return null;
+    return x !== 0;
+  }
+  // Scalar complex exact `{re, im}` — truthy iff either part is nonzero.
+  if (
+    x !== undefined &&
+    typeof x === "object" &&
+    !(x instanceof Float64Array) &&
+    !(x.re instanceof Float64Array)
+  ) {
+    const sx = x as { re: number; im: number };
+    if (!Number.isFinite(sx.re) || !Number.isFinite(sx.im)) return null;
+    return sx.re !== 0 || sx.im !== 0;
+  }
+  return null;
 }
 
 /** True when `e` is guaranteed side-effect-free: NumLit, Var, EndRef,
@@ -3532,6 +3597,7 @@ function condToBool(cond: IRExpr): boolean | null {
 function condIsPure(e: IRExpr): boolean {
   switch (e.kind) {
     case "NumLit":
+    case "ImagLit":
     case "Var":
     case "EndRef":
     case "HandleCaptureLoad":

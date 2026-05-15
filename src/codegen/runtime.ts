@@ -88,6 +88,22 @@ const REGISTRY: ReadonlyMap<string, RuntimeSnippet> = new Map<
   ["mtoc2_format_double", loadSnippet("format_double.h")],
   ["mtoc2_disp_double", loadSnippet("disp_double.h", ["mtoc2_format_double"])],
 
+  // ── Scalar complex helpers ────────────────────────────────────────
+  // Smith's algorithm-based complex divide that matches numbl's
+  // signed-Inf-on-zero-divisor behavior. Activated by `rdivide`'s
+  // complex scalar path.
+  ["mtoc2_cdiv", loadSnippet("cdiv.h")],
+  // Numbl-compatible complex formatter. Mirrors `formatComplex` byte-
+  // for-byte so cross-runner stdout aligns.
+  [
+    "mtoc2_format_complex",
+    loadSnippet("format_complex.h", ["mtoc2_format_double"]),
+  ],
+  [
+    "mtoc2_disp_complex",
+    loadSnippet("disp_complex.h", ["mtoc2_format_complex"]),
+  ],
+
   // ── Text (string + char tensor) ───────────────────────────────────
   // Two distinct owned kinds: `mtoc2_string_t` (scalar handle,
   // double-quoted) and `mtoc2_char_tensor_t` (1×N row-vector of bytes,
@@ -288,6 +304,44 @@ const REGISTRY: ReadonlyMap<string, RuntimeSnippet> = new Map<
     loadSnippet("disp_tensor.h", ["mtoc2_tensor_t", "mtoc2_format_double"]),
   ],
 
+  // ── Complex tensor lifecycle ──────────────────────────────────────
+  // Sibling helpers of the real tensor family for the complex-typed
+  // path. `mtoc2_tensor_assign` / `_free` / `_empty` are shape-agnostic
+  // — both lanes are freed unconditionally, so they handle real and
+  // complex alike — but `_alloc` / `_copy` / `_from_row` / `_from_matrix`
+  // need explicit complex variants that allocate both lanes.
+  [
+    "mtoc2_tensor_alloc_complex",
+    loadSnippet("tensor_alloc_complex.h", ["mtoc2_tensor_t", "mtoc2_alloc"]),
+  ],
+  [
+    "mtoc2_tensor_alloc_nd_complex",
+    loadSnippet("tensor_alloc_nd_complex.h", ["mtoc2_tensor_t", "mtoc2_alloc"]),
+  ],
+  [
+    "mtoc2_tensor_copy_complex",
+    loadSnippet("tensor_copy_complex.h", [
+      "mtoc2_tensor_t",
+      "mtoc2_alloc",
+      "mtoc2_tensor_empty",
+    ]),
+  ],
+  [
+    "mtoc2_tensor_from_row_complex",
+    loadSnippet("tensor_from_row_complex.h", ["mtoc2_tensor_alloc_complex"]),
+  ],
+  [
+    "mtoc2_tensor_from_matrix_complex",
+    loadSnippet("tensor_from_matrix_complex.h", ["mtoc2_tensor_alloc_complex"]),
+  ],
+  [
+    "mtoc2_disp_tensor_complex",
+    loadSnippet("disp_tensor_complex.h", [
+      "mtoc2_tensor_t",
+      "mtoc2_format_complex",
+    ]),
+  ],
+
   // ── Elementwise binary/unary on real tensors ──────────────────────
   // One snippet covers all 11 funcs (4×_tt, 4×_ts, 2×_st, 1×uminus).
   // Builtins activate by op-specific synthetic name; all map to the
@@ -435,4 +489,5 @@ export const BASE_HEADERS: ReadonlyArray<string> = [
   "<stdio.h>",
   "<stdlib.h>",
   "<math.h>",
+  "<complex.h>",
 ];

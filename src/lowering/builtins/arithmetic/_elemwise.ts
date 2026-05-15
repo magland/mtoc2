@@ -11,6 +11,7 @@ import {
   type NumericType,
   type Sign,
   scalarDouble,
+  scalarComplex,
   tensorDouble,
   tensorDoubleFromDims,
   signFromNumber,
@@ -20,7 +21,12 @@ import {
   EXACT_ARRAY_MAX_ELEMENTS,
 } from "../../types.js";
 import type { Builtin } from "../registry.js";
-import { requireRealDouble, exactDouble, exactRealArray } from "../_shared.js";
+import {
+  requireRealOrComplex,
+  exactDouble,
+  exactRealArray,
+  exactScalarAsComplex,
+} from "../_shared.js";
 
 /** Result of broadcast shape resolution for the elementwise binary path.
  *  `outDims` is the output's per-axis dim info (MATLAB-style implicit
@@ -113,7 +119,35 @@ function dimsToStr(dims: ReadonlyArray<DimInfo>): string {
  *  | tensor  | scalar  | `mtoc2_tensor_<helperBase>_ts(a, b)`       |
  *  | scalar  | tensor  | commutative → `_ts(b, a)`; else `_st(a,b)` |
  *  | tensor  | tensor  | `mtoc2_tensor_<helperBase>_tt(a, b)`       |
+ *
+ *  `complexFold` / `complexScalarExpr` / `complexRuntimeDeps` are
+ *  optional; when set, a scalar+scalar op with at least one complex
+ *  operand routes through them (and `transfer` returns a complex
+ *  result). Phase 1 wires complex scalars; tensor+complex paths are
+ *  rejected until Phase 3 lands the runtime helpers.
  */
+export function defineElemwiseRealBinary(opts: {
+  name: string;
+  cOp: string;
+  helperBase: string;
+  commutative: boolean;
+  fold: (a: number, b: number) => number;
+  signRule: (a: NumericType, b: NumericType) => Sign;
+  /** Scalar-complex fold. Receives two `{re, im}` operands. */
+  complexFold?: (
+    a: { re: number; im: number },
+    b: { re: number; im: number }
+  ) => { re: number; im: number };
+  /** Scalar-complex C expression. Defaults to the same `(a cOp b)`
+   *  infix as the real path — works for `+ - *` because C99 promotes
+   *  real↔complex automatically. Divide overrides to route through
+   *  `mtoc2_cdiv(a, b)`. */
+  complexScalarExpr?: (aC: string, bC: string) => string;
+  /** Extra runtime snippet activations needed by the complex scalar
+   *  path (e.g. `mtoc2_cdiv` for division). The real-only `_real`
+   *  helper still activates unconditionally for the tensor path. */
+  complexRuntimeDeps?: string[];
+}): Builtin;
 export function defineElemwiseRealBinary(
   name: string,
   cOp: string,
@@ -121,15 +155,57 @@ export function defineElemwiseRealBinary(
   commutative: boolean,
   fold: (a: number, b: number) => number,
   signRule: (a: NumericType, b: NumericType) => Sign
+): Builtin;
+export function defineElemwiseRealBinary(
+  ...args:
+    | [
+        {
+          name: string;
+          cOp: string;
+          helperBase: string;
+          commutative: boolean;
+          fold: (a: number, b: number) => number;
+          signRule: (a: NumericType, b: NumericType) => Sign;
+          complexFold?: (
+            a: { re: number; im: number },
+            b: { re: number; im: number }
+          ) => { re: number; im: number };
+          complexScalarExpr?: (aC: string, bC: string) => string;
+          complexRuntimeDeps?: string[];
+        },
+      ]
+    | [
+        string,
+        string,
+        string,
+        boolean,
+        (a: number, b: number) => number,
+        (a: NumericType, b: NumericType) => Sign,
+      ]
 ): Builtin {
+  const opts =
+    args.length === 1
+      ? args[0]
+      : {
+          name: args[0],
+          cOp: args[1],
+          helperBase: args[2],
+          commutative: args[3],
+          fold: args[4],
+          signRule: args[5],
+        };
   return buildElemwiseRealBinary({
-    name,
-    helperBase,
-    commutative,
-    fold,
-    signRule,
-    scalarExpr: (a, b) => `(${a} ${cOp} ${b})`,
+    name: opts.name,
+    helperBase: opts.helperBase,
+    commutative: opts.commutative,
+    fold: opts.fold,
+    signRule: opts.signRule,
+    scalarExpr: (a, b) => `(${a} ${opts.cOp} ${b})`,
     runtimeDep: "mtoc2_tensor_elemwise_real",
+    complexFold: opts.complexFold,
+    complexScalarExpr:
+      opts.complexScalarExpr ?? ((a, b) => `(${a} ${opts.cOp} ${b})`),
+    complexRuntimeDeps: opts.complexRuntimeDeps,
   });
 }
 
@@ -167,6 +243,12 @@ function buildElemwiseRealBinary(opts: {
   signRule: (a: NumericType, b: NumericType) => Sign;
   scalarExpr: (aC: string, bC: string) => string;
   runtimeDep: string;
+  complexFold?: (
+    a: { re: number; im: number },
+    b: { re: number; im: number }
+  ) => { re: number; im: number };
+  complexScalarExpr?: (aC: string, bC: string) => string;
+  complexRuntimeDeps?: string[];
 }): Builtin {
   const {
     name,
@@ -176,17 +258,49 @@ function buildElemwiseRealBinary(opts: {
     signRule,
     scalarExpr,
     runtimeDep,
+    complexFold,
+    complexScalarExpr,
+    complexRuntimeDeps,
   } = opts;
+  const allDeps = [runtimeDep, ...(complexRuntimeDeps ?? [])];
   return {
     name,
     arity: 2,
     transfer(argTypes, span) {
       const a = argTypes[0];
       const b = argTypes[1];
-      requireRealDouble(a, `'${name}' arg 1`, span);
-      requireRealDouble(b, `'${name}' arg 2`, span);
+      requireRealOrComplex(a, `'${name}' arg 1`, span);
+      requireRealOrComplex(b, `'${name}' arg 2`, span);
       const aN = a as NumericType;
       const bN = b as NumericType;
+      // Complex contamination: any complex operand makes the result
+      // complex. Phase 1 supports scalar+scalar only — reject anything
+      // with a multi-element complex operand.
+      const aCx = aN.isComplex;
+      const bCx = bN.isComplex;
+      if (aCx || bCx) {
+        if (isMultiElement(aN) || isMultiElement(bN)) {
+          throw new UnsupportedConstruct(
+            `'${name}' on a complex tensor is not yet supported`,
+            span
+          );
+        }
+        if (complexFold === undefined) {
+          throw new UnsupportedConstruct(
+            `'${name}' is not defined for complex scalars`,
+            span
+          );
+        }
+        const ax = exactScalarAsComplex(aN);
+        const bx = exactScalarAsComplex(bN);
+        if (ax !== undefined && bx !== undefined) {
+          const v = complexFold(ax, bx);
+          if (Number.isFinite(v.re) && Number.isFinite(v.im)) {
+            return scalarComplex(v);
+          }
+        }
+        return scalarComplex();
+      }
       const resolved = elemwiseResultShape(aN, bN, name, span);
 
       if (resolved === null) {
@@ -277,6 +391,14 @@ function buildElemwiseRealBinary(opts: {
       const aMulti = isMultiElement(aN);
       const bMulti = isMultiElement(bN);
       if (!aMulti && !bMulti) {
+        if (aN.isComplex || bN.isComplex) {
+          if (complexScalarExpr === undefined) {
+            throw new Error(
+              `internal: '${name}' missing complexScalarExpr but reached complex codegen`
+            );
+          }
+          return complexScalarExpr(argsC[0], argsC[1]);
+        }
         return scalarExpr(argsC[0], argsC[1]);
       }
       if (aMulti && bMulti) {
@@ -311,7 +433,7 @@ function buildElemwiseRealBinary(opts: {
       }
       return `mtoc2_tensor_${helperBase}_st(${argsC[0]}, ${argsC[1]})`;
     },
-    runtimeDeps: [runtimeDep],
+    runtimeDeps: allDeps,
   };
 }
 

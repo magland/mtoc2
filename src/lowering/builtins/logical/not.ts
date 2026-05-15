@@ -12,7 +12,7 @@
  * Sign is `nonneg` since outputs are in {0, 1}.
  */
 
-import { TypeError } from "../../errors.js";
+import { TypeError, UnsupportedConstruct } from "../../errors.js";
 import {
   type NumericType,
   type DimInfo,
@@ -24,7 +24,7 @@ import {
   typeToString,
 } from "../../types.js";
 import type { Builtin } from "../registry.js";
-import { exactDouble, exactRealArray } from "../_shared.js";
+import { exactDouble, exactRealArray, exactComplex } from "../_shared.js";
 
 function logicalTensor(
   dims: DimInfo[],
@@ -54,21 +54,28 @@ export const notBuiltin: Builtin = {
         span
       );
     }
-    if (a.isComplex) {
-      throw new TypeError(
-        `'~' on complex tensors is not yet supported (no complex type in mtoc2)`,
-        span
-      );
-    }
     if (a.elem !== "double" && a.elem !== "logical") {
       throw new TypeError(
         `'~' / 'not' arg must be a real double or logical (got ${a.elem})`,
         span
       );
     }
+    if (a.isComplex && isMultiElement(a)) {
+      throw new UnsupportedConstruct(
+        `'~' on a complex tensor is not yet supported`,
+        span
+      );
+    }
 
     // Scalar input → scalar logical, sign nonneg.
     if (isScalar(a)) {
+      if (a.isComplex) {
+        const cx = exactComplex(a);
+        if (cx !== undefined) {
+          return scalarLogical(cx.re === 0 && cx.im === 0);
+        }
+        return scalarLogical();
+      }
       const v = exactDouble(a);
       if (v !== undefined) {
         return scalarLogical(v === 0);
@@ -94,6 +101,11 @@ export const notBuiltin: Builtin = {
   codegenC(argsC, argTypes) {
     if (isMultiElement(argTypes[0])) {
       return `mtoc2_tensor_not(${argsC[0]})`;
+    }
+    const a = argTypes[0] as NumericType;
+    if (a.isComplex) {
+      // Complex scalar is "false" iff both parts are exactly 0.
+      return `((creal(${argsC[0]}) == 0.0 && cimag(${argsC[0]}) == 0.0) ? 1.0 : 0.0)`;
     }
     // Scalar: emit `(x == 0.0 ? 1.0 : 0.0)`. Using `!` on a double is
     // technically valid C, but the explicit comparison is clearer and

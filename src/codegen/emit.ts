@@ -169,6 +169,24 @@ export function emitProgram(prog: IRProgram, opts: EmitOptions = {}): string {
     );
   }
 
+  // Release `<complex.h>`'s lower-case macros so user code can shadow
+  // ordinary identifiers like `I`, `complex`, `imaginary`. The runtime
+  // snippets are emitted above this point, so they've already
+  // expanded any macros they used; the user code below sees plain
+  // identifiers. mtoc2's own complex-literal emit uses `_Complex_I`
+  // (always defined by `<complex.h>` per C99 §7.3.1) so it doesn't
+  // need the `I` macro either.
+  out.push("#ifdef I");
+  out.push("#undef I");
+  out.push("#endif");
+  out.push("#ifdef complex");
+  out.push("#undef complex");
+  out.push("#endif");
+  out.push("#ifdef imaginary");
+  out.push("#undef imaginary");
+  out.push("#endif");
+  out.push("");
+
   out.push(...userParts);
   return out.join("\n");
 }
@@ -641,7 +659,7 @@ function emitStmt(
       return emitIndexSliceStore(s, indent, state);
     case "If": {
       const lines: string[] = [];
-      lines.push(`${indent}if (${emitExpr(s.cond, state)} != 0.0) {`);
+      lines.push(`${indent}if (${emitCondToBoolExpr(s.cond, state)}) {`);
       const thenText = emitBody(
         s.thenBody,
         indent + "  ",
@@ -681,7 +699,7 @@ function emitStmt(
     }
     case "While": {
       const lines: string[] = [];
-      lines.push(`${indent}while (${emitExpr(s.cond, state)} != 0.0) {`);
+      lines.push(`${indent}while (${emitCondToBoolExpr(s.cond, state)}) {`);
       const bodyText = emitBody(
         s.body,
         indent + "  ",
@@ -873,10 +891,23 @@ function emitMemberLoadBare(
   return `${baseStr}.${e.field}`;
 }
 
+/** Lower a scalar cond expression to a C bool expression. Complex
+ *  scalars use the numbl/MATLAB `creal(z) != 0 || cimag(z) != 0` rule;
+ *  real scalars compare against `0.0`. */
+function emitCondToBoolExpr(e: IRExpr, state: RuntimeState): string {
+  const c = emitExpr(e, state);
+  if (isNumeric(e.ty) && e.ty.isComplex) {
+    return `(creal(${c}) != 0.0 || cimag(${c}) != 0.0)`;
+  }
+  return `${c} != 0.0`;
+}
+
 function emitExpr(e: IRExpr, state: RuntimeState): string {
   switch (e.kind) {
     case "NumLit":
       return formatDouble(e.value);
+    case "ImagLit":
+      return `(${formatDouble(e.value)} * _Complex_I)`;
     case "StringLit": {
       // Text literal — kind comes from `e.ty`: `Char` (single-quoted,
       // 1×N char array) or `String` (double-quoted, scalar handle).
