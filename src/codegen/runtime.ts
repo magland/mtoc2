@@ -227,7 +227,10 @@ const REGISTRY: ReadonlyMap<string, RuntimeSnippet> = new Map<
   ],
   [
     "mtoc2_reshape_nd",
-    loadSnippet("tensor_reshape_nd.h", ["mtoc2_tensor_alloc_nd"]),
+    loadSnippet("tensor_reshape_nd.h", [
+      "mtoc2_tensor_t",
+      "mtoc2_tensor_alloc_nd",
+    ]),
   ],
   // 2-D non-conjugate transpose. The `.'` and `'` unary operators
   // both map here (the conjugate variant matters only for complex
@@ -255,6 +258,18 @@ const REGISTRY: ReadonlyMap<string, RuntimeSnippet> = new Map<
   [
     "mtoc2_tensor_flip",
     loadSnippet("tensor_flip.h", ["mtoc2_tensor_t", "mtoc2_alloc"]),
+  ],
+  // `sort(a)` (single-output) and `[v, i] = sort(a)` (two-output).
+  // Stable ascending sort over the column-major flat buffer; the
+  // type system restricts the input to a 1-D vector for v1, but the
+  // helper itself walks any shape.
+  [
+    "mtoc2_sort_real",
+    loadSnippet("tensor_sort_real.h", [
+      "mtoc2_tensor_t",
+      "mtoc2_alloc",
+      "mtoc2_tensor_assign",
+    ]),
   ],
   // `assert(cond, msg)` runtime check (scalar cond). The truthy fast
   // path returns immediately; failure writes the message to stderr
@@ -403,6 +418,17 @@ const REGISTRY: ReadonlyMap<string, RuntimeSnippet> = new Map<
   // builtins and (for the print form) by the lowerer when a bare
   // `toc;` ExprStmt synthesizes a direct Call to `mtoc2_toc_print`.
   ["mtoc2_tic_toc", loadSnippet("tictoc.h")],
+
+  // ── plot dispatch ────────────────────────────────────────────────
+  // Every plotting builtin (`plot`, `surf`, `imagesc`, `bar`,
+  // `figure`, `hold`, `xlabel`, …) routes through this single helper
+  // — see `plot_dispatch.h` for the wire format. Reuses the tagged
+  // `mtoc2_fprintf_arg_t` ABI from format_engine.h so there is no
+  // per-builtin C surface.
+  [
+    "mtoc2_plot_dispatch",
+    loadSnippet("plot_dispatch.h", ["mtoc2_format_engine"]),
+  ],
 ]);
 
 export function getRuntimeSnippet(name: string): RuntimeSnippet {

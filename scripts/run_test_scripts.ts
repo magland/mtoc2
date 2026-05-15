@@ -65,6 +65,22 @@ const TIMEOUT_MS = (() => {
 
 const MAX_DIFF_LINES = 30;
 
+/** Drops applied to every script's stdout before the per-script
+ *  mask/drop directives. These cover sidecar protocols that mtoc2
+ *  emits but numbl does not (the cross-runner's byte-for-byte
+ *  invariant is preserved by stripping them on both sides — they
+ *  never appear in numbl's output, so the regex is a no-op there).
+ *
+ *  Currently:
+ *  - Plot dispatch records: `\x1emtoc2:plot\t{json}\n` per
+ *    plotting builtin call. See `src/codegen/runtime/plot_dispatch.h`.
+ */
+const GLOBAL_DROPS: ReadonlyArray<RegExp> = [
+  // The \x1e (RS) sentinel is deliberate — see plot_dispatch.h.
+  // eslint-disable-next-line no-control-regex
+  /^\x1emtoc2:plot\t.*\n?/gm,
+];
+
 async function captureStdout(cmd: string, args: string[]): Promise<string> {
   const { stdout } = await execFileAsync(cmd, args, {
     maxBuffer: 16 * 1024 * 1024,
@@ -189,11 +205,16 @@ function applyMasks(
   masks: ReadonlyArray<RegExp>,
   drops: ReadonlyArray<RegExp>
 ): { text: string; notes: string[] } {
-  if (masks.length === 0 && drops.length === 0) {
-    return { text: stdout, notes: [] };
-  }
   let text = stdout;
   const notes: string[] = [];
+  // Global drops fire first so per-script directives see a stream
+  // already normalized against sidecar protocols (plot dispatch).
+  for (const re of GLOBAL_DROPS) {
+    text = text.replace(re, "");
+  }
+  if (masks.length === 0 && drops.length === 0) {
+    return { text, notes };
+  }
   for (const re of masks) {
     let count = 0;
     text = text.replace(re, () => {

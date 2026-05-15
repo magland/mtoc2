@@ -9,6 +9,7 @@ test_class_used_in_loop();
 test_class_property_no_default_scalar();
 test_class_property_no_default_tensor();
 test_class_property_no_default_mixed();
+test_member_rooted_index();
 
 function test_class_construct_basic()
   p = Point(3, 4);
@@ -82,6 +83,20 @@ function test_class_property_no_default_mixed()
   m = MixedDef(100);
   disp(m.fixed);   % default = 1
   disp(m.dynamic); % inferred to scalar double from `obj.dynamic = x;`
+end
+
+function test_member_rooted_index()
+  % `obj.field(args)` lowers via a synthesized hoist: the property
+  % load lands in a fresh temp and the index args run through the
+  % normal IndexLoad / IndexSlice path against that temp. Covers
+  % scalar reads, slice reads, and the `end` keyword against a
+  % field-rooted base.
+  b = Bag([10 20 30 40 50]);
+  %!numbl:opaque b
+  disp(b.data(1));         % scalar read
+  disp(b.data(end));       % end against the loaded tensor
+  disp(b.data(2:4));       % range slice
+  disp(b.data(:));         % colon → column vector
 end
 
 classdef Point

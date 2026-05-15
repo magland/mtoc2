@@ -99,7 +99,11 @@ import {
   binaryOpBuiltin,
   unaryOpBuiltin,
 } from "./builtins/index.js";
-import { arityAccepts, arityDescribe } from "./builtins/registry.js";
+import {
+  arityAccepts,
+  arityDescribe,
+  type Builtin,
+} from "./builtins/registry.js";
 import { isSliceArg } from "./indexResolve.js";
 import { lowerIndexLoad } from "./lowerIndexLoad.js";
 import { lowerIndexStore } from "./lowerIndexStore.js";
@@ -131,6 +135,14 @@ export class Lowerer {
   /** Monotonic counter for synthesizing `_mtoc2_t1`, `_mtoc2_t2`, ...
    *  hoist-temp names. Reset per function specialization. */
   private tempCounter: number = 0;
+  /** Expression-level hoist statements queued by sub-lowerings that
+   *  can't pass a `hoists` array up the IR-expression return chain.
+   *  Used today by member-rooted indexing (`obj.field(args)`) to push a
+   *  fresh `Assign(temp = MemberLoad)` so the downstream `IndexLoad` /
+   *  `IndexSlice` has a real `Var` to anchor `end`-keyword resolution
+   *  on. `lowerStmt` drains this list around every statement boundary
+   *  and prepends the hoists to whatever the inner lowering emitted. */
+  private pendingExprHoists: IRStmt[] = [];
   /** Monotonic counter for synthesizing anonymous-function names
    *  (`anon_0`, `anon_1`, ...). Shared across the whole program so two
    *  textually distinct `@(...)` expressions get distinct identities. */
@@ -213,6 +225,16 @@ export class Lowerer {
   }
 
   private lowerStmt(s: Stmt): IRStmt | IRStmt[] | null {
+    const hoistMark = this.pendingExprHoists.length;
+    const inner = this.lowerStmtInner(s);
+    if (this.pendingExprHoists.length === hoistMark) return inner;
+    const drained = this.pendingExprHoists.splice(hoistMark);
+    if (inner === null) return drained;
+    if (Array.isArray(inner)) return [...drained, ...inner];
+    return [...drained, inner];
+  }
+
+  private lowerStmtInner(s: Stmt): IRStmt | IRStmt[] | null {
     switch (s.type) {
       case "Function":
         return null; // pre-scanned, specialized on demand at call sites
@@ -541,19 +563,25 @@ export class Lowerer {
           base: this.anfRequireScalarOrVar(e.base, hoists),
         };
       case "IndexLoad":
-        // The base is already a `Var` by construction (resolveIndexBase
-        // returns one). Each scalar index slot ANFs as a scalar/Var.
+        // The base is usually a `Var` (resolveIndexBase returns one for
+        // bare-name indexing) but can be a `MemberLoad` when the source
+        // form is `obj.field(i)`. ANF the base too so the post-ANF IR
+        // always has a Var here. Each scalar index slot also ANFs.
         return {
           ...e,
+          base: this.anfRequireScalarOrVar(e.base, hoists),
           indices: e.indices.map(i => this.anfRequireScalarOrVar(i, hoists)),
         };
       case "IndexSlice":
         // Slice slots' sub-expressions are scalar (start/step/end of a
         // Range, or the Scalar slot's expr). Run them through scalar-
         // or-Var ANF to keep them simple — they evaluate per loop
-        // iteration in codegen.
+        // iteration in codegen. The base mirrors IndexLoad: usually a
+        // `Var`, but may be a `MemberLoad` in the property-rooted
+        // `obj.field(args)` form, which ANF then hoists.
         return {
           ...e,
+          base: this.anfRequireScalarOrVar(e.base, hoists),
           index: e.index.map(slot => {
             if (slot.kind === "Range") {
               return {
@@ -564,6 +592,12 @@ export class Lowerer {
               };
             }
             if (slot.kind === "Scalar") {
+              return {
+                ...slot,
+                expr: this.anfRequireScalarOrVar(slot.expr, hoists),
+              };
+            }
+            if (slot.kind === "IndexVec") {
               return {
                 ...slot,
                 expr: this.anfRequireScalarOrVar(slot.expr, hoists),
@@ -916,6 +950,31 @@ export class Lowerer {
       this.callSite(),
       fc.span
     );
+
+    // Builtin multi-output path. A builtin opts into `[...] = f(x)` by
+    // populating the `multiOutput` field on its registry entry. Numbl's
+    // resolver returns `kind: "builtin"` for the call; we re-fetch from
+    // mtoc2's own registry (the source of truth for `multiOutput`) and
+    // route through the same `MultiAssignCall` IR shape user functions
+    // use. Single-output `b = f(x)` still flows through `lowerFuncCall`
+    // → `transfer`/`codegenC` — this hook only fires for true multi-
+    // output uses.
+    if (target?.kind === "builtin") {
+      const builtin = getBuiltin(callName);
+      if (builtin?.multiOutput !== undefined) {
+        return this.buildBuiltinMultiAssign(
+          callName,
+          builtin,
+          builtin.multiOutput,
+          args,
+          anfArgs,
+          argTypes,
+          argHoists,
+          s
+        );
+      }
+    }
+
     if (target?.kind !== "userFunction") {
       throw new UnsupportedConstruct(
         `multi-assign of '${callName}': only user-defined functions can ` +
@@ -1050,6 +1109,93 @@ export class Lowerer {
     const mac: IRStmt = {
       kind: "MultiAssignCall",
       cName: spec.cName,
+      name: callName,
+      args: anfArgs,
+      outputs,
+      span: s.span,
+    };
+    return argHoists.length === 0 ? mac : [...argHoists, mac];
+  }
+
+  /** Routes a `[v, i, ...] = builtin(args)` call through `MultiAssignCall`,
+   *  using the builtin's `multiOutput` hook for the output-type tuple and
+   *  the C helper name. Reuses the same output-slot bookkeeping as the
+   *  user-function path (named slots go through `recordAssignment` for
+   *  env / cName setup; `~` / trailing-omitted slots become discard temps
+   *  in the emitter). */
+  private buildBuiltinMultiAssign(
+    callName: string,
+    builtin: Builtin,
+    multiOutput: NonNullable<Builtin["multiOutput"]>,
+    args: IRExpr[],
+    anfArgs: IRExpr[],
+    argTypes: Type[],
+    argHoists: IRStmt[],
+    s: Extract<Stmt, { type: "MultiAssign" }>
+  ): IRStmt | IRStmt[] {
+    void args;
+    if (!arityAccepts(builtin.arity, anfArgs.length)) {
+      throw new TypeError(
+        `'${callName}' expects ${arityDescribe(builtin.arity)} arg(s), ` +
+          `got ${anfArgs.length}`,
+        s.span
+      );
+    }
+    const nargout = s.lvalues.length;
+    if (nargout < multiOutput.minNargout || nargout > multiOutput.maxNargout) {
+      throw new UnsupportedConstruct(
+        `'${callName}' supports ${multiOutput.minNargout}..` +
+          `${multiOutput.maxNargout} output(s) in '[...] = ${callName}(...)' ` +
+          `form; got ${nargout}`,
+        s.span
+      );
+    }
+    const outTys = multiOutput.transfer(argTypes, nargout, s.span);
+    if (outTys.length !== nargout) {
+      throw new Error(
+        `internal: builtin '${callName}' multiOutput.transfer returned ` +
+          `${outTys.length} types for nargout=${nargout}`
+      );
+    }
+    const outputs: {
+      ty: Type;
+      binding: { name: string; cName: string } | null;
+    }[] = [];
+    for (let i = 0; i < outTys.length; i++) {
+      const slotTy = outTys[i];
+      if (!isMultiOutputSlotType(slotTy)) {
+        throw new UnsupportedConstruct(
+          `multi-output builtin '${callName}': output slot ${i + 1} has ` +
+            `type ${typeToString(slotTy)}; this type isn't supported in a ` +
+            `multi-output slot`,
+          s.span
+        );
+      }
+      const lv: LValue | undefined = s.lvalues[i];
+      if (lv === undefined || lv.type !== "Var") {
+        outputs.push({ ty: slotTy, binding: null });
+        continue;
+      }
+      const synthRhs: IRExpr = {
+        kind: "Var",
+        name: lv.name,
+        cName: "<placeholder>",
+        ty: slotTy,
+        span: s.span,
+      };
+      const rec = this.recordAssignment(lv.name, synthRhs, s.span);
+      if (rec.kind !== "Assign") {
+        throw new Error("internal: recordAssignment returned non-Assign");
+      }
+      outputs.push({
+        ty: slotTy,
+        binding: { name: lv.name, cName: rec.cName },
+      });
+    }
+    const cName = multiOutput.cName(argTypes, nargout);
+    const mac: IRStmt = {
+      kind: "MultiAssignCall",
+      cName,
       name: callName,
       args: anfArgs,
       outputs,
@@ -1643,6 +1789,24 @@ export class Lowerer {
         e.span
       );
     }
+
+    // Property-rooted indexing: `obj.field(args)` where `field` is a
+    // class property (not a method). MATLAB semantics are "load the
+    // field, then index it" — distinct from method dispatch. We
+    // pre-hoist the field load to a fresh temp so the downstream
+    // `IndexLoad` / `IndexSlice` has a real `Var` to anchor on (the
+    // temp also gives `end`-keyword resolution a concrete `dims[k]`
+    // to query).
+    const classProperties = base.ty.properties;
+    const isProperty = classProperties.some(p => p.name === e.name);
+    const isMethod = (() => {
+      const cls = this.classReg(base.ty.className);
+      if (cls === undefined) return false;
+      return cls.methods.has(e.name) || cls.staticMethods.has(e.name);
+    })();
+    if (isProperty && !isMethod) {
+      return this.lowerMemberRootedIndex(base, e.name, e.args, e.span);
+    }
     const args = e.args.map(a => this.lowerExpr(a));
     for (const a of args) {
       this.requireValueType(a, `argument to method '${e.name}'`);
@@ -1710,6 +1874,52 @@ export class Lowerer {
       ty,
       span: e.span,
     };
+  }
+
+  /** Lowers `obj.field(args)` where `field` is a class property (not a
+   *  method): load the field into a fresh temp, then run the args
+   *  through the standard `lowerIndexLoad` / `lowerIndexSlice` path
+   *  using the temp's name. The synthetic `Assign(temp = MemberLoad)`
+   *  is queued on `pendingExprHoists` so `lowerStmt` prepends it to
+   *  the emitted statement. */
+  private lowerMemberRootedIndex(
+    base: IRExpr,
+    field: string,
+    argExprs: ReadonlyArray<Expr>,
+    span: Span
+  ): IRExpr {
+    const ft = fieldType(base.ty, field);
+    if (ft === undefined) {
+      throw new TypeError(
+        `no field '${field}' on type ${typeToString(base.ty)}`,
+        span
+      );
+    }
+    // Only owned (multi-element / non-numeric owned) properties make
+    // sense to index. Scalar real properties hit the
+    // `requireMultiElement` check inside `resolveIndexBase`, so the
+    // diagnostic still points at the original source span.
+    const memberLoad: IRExpr = {
+      kind: "MemberLoad",
+      base,
+      field,
+      ty: ft,
+      span,
+    };
+    const tempName = this.freshTempName();
+    this.env.set(tempName, { cName: tempName, ty: ft });
+    this.pendingExprHoists.push({
+      kind: "Assign",
+      name: tempName,
+      cName: tempName,
+      ty: ft,
+      expr: memberLoad,
+      span,
+    });
+    if (argExprs.some(isSliceArg)) {
+      return lowerIndexSlice.call(this, tempName, argExprs, span);
+    }
+    return lowerIndexLoad.call(this, tempName, argExprs, span);
   }
 
   /** `ClassName.staticMethod(args)` — static method called via class
@@ -1830,11 +2040,12 @@ export class Lowerer {
     }
     // Identifier read of a builtin name with no parens. MATLAB treats
     // this as a 0-arg call when the name isn't shadowed by a local.
-    // v1 supports this for the no-arg system builtins `tic` and `toc`
-    // only — user-function ident-as-call and class references are
-    // left to dedicated paths.
+    // Supports the fixed-0-arity system builtins (`tic`, `toc`) and
+    // the variadic plot-dispatch names whose arity range admits 0
+    // (`figure;`, `hold;`, `drawnow;`, …). User-function
+    // ident-as-call and class references are left to dedicated paths.
     const b = getBuiltin(e.name);
-    if (b !== undefined && b.arity === 0) {
+    if (b !== undefined && arityAccepts(b.arity, 0)) {
       const ty = b.transfer([], e.span);
       return {
         kind: "Call",
@@ -2303,6 +2514,24 @@ export class Lowerer {
       e.span
     );
     if (!target) {
+      // Fall back to mtoc2's builtin registry when numbl exposes the
+      // name via a non-index surface (e.g. plot drawing primitives
+      // like `plot`/`surf`/`imagesc`/`bar`, which numbl wires
+      // through its runtime dispatch rather than `index.builtins`).
+      // The validate-then-route shape is identical to the standard
+      // builtin branch below; we just don't have numbl's blessing.
+      const fallback = getBuiltin(e.name);
+      if (fallback !== undefined && arityAccepts(fallback.arity, args.length)) {
+        const ty = fallback.transfer(argTypes, e.span);
+        return {
+          kind: "Call",
+          cName: e.name,
+          name: e.name,
+          args,
+          ty,
+          span: e.span,
+        };
+      }
       throw new UnsupportedConstruct(`unknown function '${e.name}'`, e.span);
     }
     switch (target.kind) {

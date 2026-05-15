@@ -871,16 +871,33 @@ function emitStmt(
       return lines.join("\n");
     }
     case "MultiAssignCall": {
-      // N≥2-output user-function call. Each named slot's `binding.cName`
-      // is pre-declared at function top — owned slots by
-      // `collectOwnedLocals`, scalar slots by `collectHoistedScalarLocals`.
-      // Ignored slots become `_mtoc2_discard_<callIdx>_<i>` locals
-      // scoped to the call's `{}` block.
+      // N≥2-output user-function call OR builtin with a `multiOutput`
+      // hook (e.g. `[v, i] = sort(a)`). Named slots' `binding.cName` is
+      // pre-declared at function top — owned slots by `collectOwnedLocals`,
+      // scalar slots by `collectHoistedScalarLocals`. Ignored slots
+      // become `_mtoc2_discard_<callIdx>_<i>` locals scoped to the
+      // call's `{}` block.
       //
       // Owned arg-copy uses the same `emitOwnedRhs` wrapping as a
-      // regular `Call` so the callee owns its arg.
+      // regular `Call` so the user-function callee owns its arg.
+      // Builtin multi-output helpers follow the single-output builtin
+      // convention instead: they read the arg without taking ownership
+      // (no `_copy` at the call site), matching every other
+      // `mtoc2_tensor_*` helper that takes a tensor by value.
+      //
+      // Builtin path: activate the registry-declared runtime deps so the
+      // `mtoc2_<name>_<nargout>` helper snippet lands in the emitted C.
+      // User-function path: the spec is already emitted elsewhere, no
+      // runtime dep activation needed.
+      const builtinMA = getBuiltin(s.name);
+      const isBuiltinMA = builtinMA?.multiOutput !== undefined;
+      if (isBuiltinMA) {
+        activateRuntimeDeps(builtinMA!.runtimeDeps, state);
+      }
       const argStrs = s.args.map(a =>
-        isOwned(a.ty) ? emitOwnedRhs(a, state) : emitExpr(a, state)
+        !isBuiltinMA && isOwned(a.ty)
+          ? emitOwnedRhs(a, state)
+          : emitExpr(a, state)
       );
       const callIdx = state.multiAssignCallCounter++;
       const out: string[] = [];
@@ -1117,6 +1134,11 @@ function emitExpr(e: IRExpr, state: RuntimeState): string {
       // and don't take ownership.)
       return emitMemberLoadBare(e, state);
     case "IndexLoad": {
+      if (e.base.kind !== "Var") {
+        throw new Error(
+          `emit internal: IndexLoad base must be a Var after ANF (got ${e.base.kind})`
+        );
+      }
       const offset = emitNdScalarOffset(state, e.indices, e.base.cName);
       return `${e.base.cName}.real[${offset}]`;
     }
@@ -1306,6 +1328,33 @@ function emitSliceSlotSetup(
         `${indent}long _mtoc2_src_${i} = mtoc2_idx_axis(&${baseCName}, ${i}, (long)(${scalarStr}), ${loc});`
       );
       slotSrc.push(`_mtoc2_src_${i}`);
+    } else if (slot.kind === "IndexVec") {
+      // Fancy gather. The slot's tensor expression is ANF'd to a Var
+      // (see `anfChildren`'s IndexSlice case), so we read its values
+      // per iteration without re-evaluating. Each entry is a 1-based
+      // index into the base's i-th axis; `mtoc2_idx_axis` does the
+      // bounds check and 1→0-based conversion per access.
+      if (slot.expr.kind !== "Var") {
+        throw new Error(
+          "emit internal: IndexVec slot expr must be a Var after ANF"
+        );
+      }
+      useRuntimeByName(state, "mtoc2_oob_abort");
+      const idxCName = slot.expr.cName;
+      const idxTy = slot.expr.ty;
+      const dimsProd: string[] = [];
+      if (idxTy.kind === "Numeric") {
+        for (let j = 0; j < idxTy.dims.length; j++) {
+          dimsProd.push(`${idxCName}.dims[${j}]`);
+        }
+      }
+      const numelExpr = dimsProd.length === 0 ? "0L" : dimsProd.join(" * ");
+      lines.push(`${indent}long _mtoc2_n_${i} = ${numelExpr};`);
+      const loc = locStringOf(slot.span);
+      // Per-iteration: read the 1-based index, bounds-check, convert to 0-based.
+      slotSrc.push(
+        `mtoc2_idx_axis(&${baseCName}, ${i}, (long)${idxCName}.real[${kVar}], ${loc})`
+      );
     } else {
       if (slot.step.kind !== "NumLit") {
         throw new Error(
@@ -1429,6 +1478,11 @@ function emitIndexSliceProducer(
   // Generate via a GCC/Clang statement-expression. This keeps the
   // IndexSlice producer self-contained at the expression site without
   // requiring out-of-line statements.
+  if (e.base.kind !== "Var") {
+    throw new Error(
+      `emit internal: IndexSlice base must be a Var after ANF (got ${e.base.kind})`
+    );
+  }
   useRuntimeByName(state, "mtoc2_tensor_t");
   useRuntimeByName(state, "mtoc2_tensor_alloc_nd");
   const baseCName = e.base.cName;

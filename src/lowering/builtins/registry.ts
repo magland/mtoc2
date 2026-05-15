@@ -35,6 +35,31 @@ export interface Builtin {
    *  The emitter activates each on every codegenC site so deps are
    *  pulled into the final output in topological order. */
   runtimeDeps?: ReadonlyArray<string>;
+  /** Multi-output ABI hook. Optional — only builtins like `sort` that
+   *  legitimately return more than one value via `[a, b] = f(x)` set
+   *  this. The lowerer (`lowerMultiAssign`) routes the call through
+   *  here and emits a `MultiAssignCall` whose `cName` is the helper
+   *  returned below; codegen passes args by value followed by one
+   *  out-pointer per requested output (same C ABI as user-function
+   *  N≥2-output specializations). The single-output form `b = f(x)`
+   *  still runs through `transfer` / `codegenC` exactly as before. */
+  multiOutput?: MultiOutputBuiltin;
+}
+
+/** Optional multi-output ABI for a builtin. See `Builtin.multiOutput`. */
+export interface MultiOutputBuiltin {
+  /** Inclusive lower bound on the number of outputs the multi-output
+   *  form accepts. */
+  minNargout: number;
+  /** Inclusive upper bound on the number of outputs. */
+  maxNargout: number;
+  /** Returns the output-slot types for an `nargout`-output call.
+   *  Length must equal `nargout`. Slot types must satisfy
+   *  `isMultiOutputSlotType` (scalar real numeric or any owned type). */
+  transfer(argTypes: Type[], nargout: number, span: Span): Type[];
+  /** C helper name for the `nargout` form. The emitted call is
+   *  `<cName>(<args>, &<out_1>, ..., &<out_nargout>)`. */
+  cName(argTypes: Type[], nargout: number): string;
 }
 
 export function arityAccepts(arity: BuiltinArity, n: number): boolean {

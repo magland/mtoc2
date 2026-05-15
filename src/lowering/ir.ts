@@ -162,10 +162,15 @@ export interface MemberLoad {
  *  length 1 (linear addressing into the column-major buffer) or
  *  `base.ty.dims.length` (full per-axis addressing). Each index lowers
  *  to a scalar real IR expression; the result `ty` is the base's
- *  element scalar type. Codegen emits `<base.cName>.real[<offset>]`. */
+ *  element scalar type. Codegen emits `<base.cName>.real[<offset>]`.
+ *
+ *  The base is typed `IRExpr` rather than `Var` so the lowerer can
+ *  install a `MemberLoad` (e.g. `obj.field(i)`) before ANF runs; the
+ *  ANF pass hoists any non-`Var` owned producer to a fresh temp so
+ *  emit-time code always sees a `Var` here. */
 export interface IndexLoad {
   kind: "IndexLoad";
-  base: Var;
+  base: IRExpr;
   indices: IRExpr[];
   ty: Type;
   span: Span;
@@ -175,19 +180,28 @@ export interface IndexLoad {
  *  `step` is always populated (defaults to scalar `1` when omitted in
  *  the source); v1 requires `step` to be a `NumLit` so codegen can
  *  derive the loop count and source-index arithmetic at compile time
- *  for index-position ranges. */
+ *  for index-position ranges. `IndexVec` carries a tensor expression
+ *  whose values are 1-based indices into the corresponding axis —
+ *  gather-style fancy indexing (read-only on v1's IndexSlice; not yet
+ *  plumbed through IndexSliceStore). The carried expression is ANF'd
+ *  to a `Var` so codegen can iterate it without re-evaluation. */
 export type IndexSliceArg =
   | { kind: "Range"; start: IRExpr; step: IRExpr; end: IRExpr; span: Span }
   | { kind: "Colon"; span: Span }
-  | { kind: "Scalar"; expr: IRExpr; span: Span };
+  | { kind: "Scalar"; expr: IRExpr; span: Span }
+  | { kind: "IndexVec"; expr: IRExpr; span: Span };
 
 /** Range / colon / scalar-mix slice read. `index.length` is 1
  *  (linear) or `base.ty.dims.length` (per-axis). The result is a freshly-
  *  allocated tensor; this IR node is an owned producer and ANFs like
- *  every other tensor-producing expression. */
+ *  every other tensor-producing expression.
+ *
+ *  The base is typed `IRExpr` for the same reason as `IndexLoad.base`:
+ *  the lowerer can install a `MemberLoad` directly for `obj.f(args)`,
+ *  and ANF hoists it to a fresh `Var` before emit. */
 export interface IndexSlice {
   kind: "IndexSlice";
-  base: Var;
+  base: IRExpr;
   index: ReadonlyArray<IndexSliceArg>;
   ty: Type;
   span: Span;

@@ -7,6 +7,8 @@ test_trailing_singletons();
 test_runtime_path();
 test_sum_of_reshape_folds();
 test_reshape_zeros_chain();
+test_reshape_auto_infer_exact();
+test_reshape_auto_infer_runtime();
 
 function test_form_a_2d()
   disp(reshape([1 2 3 4 5 6], 2, 3));
@@ -66,4 +68,22 @@ function test_reshape_zeros_chain()
   % exact (Float64Array of zeros), so reshape propagates both.
   disp(reshape(zeros(3, 4), 2, 6));
   disp(reshape(ones(2, 3, 4), 4, 6));
+end
+
+function test_reshape_auto_infer_exact()
+  % `[]` auto-infer slot, input shape fully known at translate time.
+  % The lowerer fills the slot from `numel / prod(others)` and the
+  % result type carries the inferred dim.
+  disp(reshape([1 2 3 4 5 6 7 8], [], 1));   % column vector, 8 rows
+  disp(reshape([1 2 3 4 5 6 7 8], 2, []));    % 2x4
+  disp(reshape(zeros(2, 3, 4), [], 6));       % 4x6 — collapses leading axes
+end
+
+function test_reshape_auto_infer_runtime()
+  % Same pattern but the input is opaque, forcing the runtime helper
+  % to resolve the `-1L` sentinel from the actual numel.
+  a = [1 2 3 4 5 6];
+  %!numbl:opaque a
+  disp(reshape(a, [], 1));
+  disp(reshape(a, 3, []));
 end

@@ -137,18 +137,19 @@ export function irExprToString(e: IRExpr): string {
     case "MemberLoad":
       return `${irExprToString(e.base)}.${e.field}`;
     case "IndexLoad":
-      return `${e.base.name}(${e.indices.map(irExprToString).join(", ")})`;
+      return `${irExprToString(e.base)}(${e.indices.map(irExprToString).join(", ")})`;
     case "IndexSlice": {
       const slotStrs = e.index.map(slot => {
         if (slot.kind === "Colon") return ":";
         if (slot.kind === "Scalar") return irExprToString(slot.expr);
+        if (slot.kind === "IndexVec") return irExprToString(slot.expr);
         const stepPart =
           slot.step.kind === "NumLit" && slot.step.value === 1
             ? ""
             : `${irExprToString(slot.step)}:`;
         return `${irExprToString(slot.start)}:${stepPart}${irExprToString(slot.end)}`;
       });
-      return `${e.base.name}(${slotStrs.join(", ")})`;
+      return `${irExprToString(e.base)}(${slotStrs.join(", ")})`;
     }
     case "EndRef":
       return "end";
@@ -207,6 +208,7 @@ export function irStmtHeader(s: IRStmt): string | null {
       const slotStrs = s.index.map(slot => {
         if (slot.kind === "Colon") return ":";
         if (slot.kind === "Scalar") return irExprToString(slot.expr);
+        if (slot.kind === "IndexVec") return irExprToString(slot.expr);
         const stepPart =
           slot.step.kind === "NumLit" && slot.step.value === 1
             ? ""

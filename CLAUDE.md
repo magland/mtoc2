@@ -89,8 +89,13 @@ mtoc2 is a _static_ translator. Anything outside the supported subset raises
   aborts on mismatch) otherwise. Output type carries the same
   `exact: Float64Array` (column-major reinterpret) when input has
   it, the new shape is fully exact, and the result fits the cap.
-  The `[]` auto-infer slot (`reshape(A, [], 3)`) is not yet
-  supported — specify all dims explicitly.
+  Form A accepts a single `[]` auto-infer slot
+  (`reshape(A, [], 3)`); the lowerer fills it from
+  `numel(A) / prod(others)` when both are known statically, otherwise
+  the runtime helper sees a `-1L` sentinel and resolves the slot at
+  call time. Form B (`reshape(A, [d1,…,dN])`) still rejects an
+  internal `[]` placeholder — the dim vector itself must be a static
+  constant.
 - **Tensor arithmetic** — elementwise `+` `-` `.*` `./` `-` (unary)
   on same-shape tensors, tensor-with-scalar-broadcast, and
   MATLAB-style implicit expansion between tensors of different
@@ -133,14 +138,33 @@ mtoc2 is a _static_ translator. Anything outside the supported subset raises
   multi-element tensor → `mtoc2_disp_tensor`.
 - **Indexing & slicing** — scalar reads/writes (`v(i)`, `M(i,j)`,
   `T(i,j,k)`, `v(end)`, `M(end,end-1)`), range/colon slice reads/writes
-  (`v(:)`, `v(a:b)`, `M(:, j)`, `T(:, :, i) = page`), and range-as-
-  value (`v = 1:n`, `(1:5)*2`, etc.). Scalar offsets are computed via
-  the shared column-major formula `emitNdScalarOffset`; slice reads
+  (`v(:)`, `v(a:b)`, `M(:, j)`, `T(:, :, i) = page`), per-axis
+  vector-of-indices gather reads (`M(:, idx_vec)`, `T(i_vec, :, j)`
+  — the indexed axis is replaced by the numeric index tensor, which
+  the runtime bounds-checks per access), and range-as-value
+  (`v = 1:n`, `(1:5)*2`, etc.). Scalar offsets are computed via the
+  shared column-major formula `emitNdScalarOffset`; slice reads
   allocate a freshly-owned result via `mtoc2_tensor_alloc_nd` and
   loop; slice writes mutate the base buffer in place with a runtime
   count check on tensor RHS. Range-as-value lowers to a `MakeRange`
-  IR node and emits via `mtoc2_tensor_make_range`. Logical/vector-of-
-  indices indexing (`a(mask)`, `a(idx_vec)`) is not yet supported.
+  IR node and emits via `mtoc2_tensor_make_range`. Member-rooted
+  reads (`obj.field(args)`) lower via a synthesized hoist: the
+  property load lands in a fresh `_mtoc2_t<N>` temp and the index
+  args run through the standard `IndexLoad` / `IndexSlice` path
+  against that temp (see `lowerMemberRootedIndex` in
+  `src/lowering/lower.ts`). Logical-mask indexing
+  (`a(mask)`), linear-form vector-of-indices (`a(idx_vec)` in a
+  single-slot context), vector-of-indices _writes_, and
+  member-rooted _writes_ (`obj.f(i) = rhs`) are not yet supported.
+- **`sort`** — stable ascending sort on a real 1-D vector
+  (`b = sort(a)` or `[v, i] = sort(a)`). The two-output form is the
+  first builtin to opt into the multi-output ABI: the `Builtin`
+  registry entry sets `multiOutput.{minNargout, maxNargout, transfer,
+cName}` and `lowerMultiAssign` routes through the same
+  `MultiAssignCall` IR shape user functions use, with the helper's
+  C name returned by `multiOutput.cName(argTypes, nargout)`.
+  Multi-dimensional sorts (`sort(M, dim)`), `'descend'`, and the
+  matrix-default-axis path are not yet supported.
 - **Wall-clock stopwatch**: `tic` / `toc` (0-arg each) emit
   `mtoc2_tic()` / `mtoc2_toc()` via the `mtoc2_tic_toc` runtime
   snippet (POSIX `clock_gettime(CLOCK_MONOTONIC)`). The bare-`toc;`
@@ -235,10 +259,36 @@ mtoc2 is a _static_ translator. Anything outside the supported subset raises
   Argument transport is a per-call `mtoc2_fprintf_arg_t[]` compound
   literal; the shared `_format_args.ts` helper builds the slots and
   is the single source of truth for the slot tag values.
+- **Plotting** — every plotting builtin (`plot`, `surf`, `imagesc`,
+  `bar`, `errorbar`, `semilogx`, `semilogy`, `loglog`, `contour`,
+  `quiver`, `stem`, `stairs`, `fill`, `scatter`, `histogram`,
+  `figure`, `hold`, `title`, `xlabel`, `ylabel`, `zlabel`,
+  `subplot`, `legend`, `colorbar`, `axis`, `xlim`, `ylim`,
+  `drawnow`, `clf`, `cla`, `pause`, … — see
+  [src/lowering/builtins/plot/dispatch.ts](src/lowering/builtins/plot/dispatch.ts))
+  routes through one shared lowering that emits a call to
+  `mtoc2_plot_dispatch(name, n, args)`. The single C runtime
+  helper writes one line of JSON per call to stdout, prefixed
+  with the `\x1emtoc2:plot\t` ASCII RS sentinel and followed by
+  `fflush(stdout)` — a wrapper / viewer process can split stdout
+  on the prefix and feed records to numbl's existing plot module
+  in real time. Argument transport reuses the
+  `mtoc2_fprintf_arg_t` tagged union (DOUBLE / TEXT / TENSOR);
+  complex / struct / class / handle / Void / Unknown args are
+  rejected at translate. Plot calls are statement-only — they
+  return `Void`, so the value-returning variants
+  (`h = gcf`, `lim = xlim`, etc.) surface a clean type error.
+  The cross-runner globally drops the plot-prefixed lines before
+  the byte-for-byte stdout compare (numbl produces none of its
+  own, so the drop is a no-op there). MATLAB command syntax
+  (`hold on`, `figure 1`) is not supported — use the call form
+  (`hold('on')`, `figure(1)`).
 
 Not yet supported: matrix division (`mrdivide` between two tensors),
-logical / vector-of-indices indexing (`a(mask)`, `a(idx_vec)`),
-member-rooted indexing (`obj.r(1, :, :)`, `obj.f(i) = rhs`),
+logical-mask indexing (`a(mask)`), linear-form vector-of-indices
+reads (`a(idx_vec)` in a single-slot context), vector-of-indices
+_write_ (`a(idx_vec) = rhs`),
+member-rooted index _write_ (`obj.f(i) = rhs`),
 indexed-delete (`a(2:5) = []`), unknown-shape constructors
 (`zeros(n)` where `n` is a runtime-only scalar), complex, text
 concat (`[a, b]` of two chars), char arithmetic (`'A' + 1`),

@@ -348,6 +348,38 @@ requireDomain?)` quadruple. Scalar arg → emit `<cFnReal>(arg)`
   builtin set, so `workspace.resolve("pi", [], …)` returns null
   even though the source is valid). `e` is intentionally absent —
   MATLAB and numbl don't define it either (use `exp(1)`).
+- **Plot dispatch** (`plot`, `surf`, `imagesc`, `bar`, `errorbar`,
+  `semilogx`, `semilogy`, `loglog`, `contour`, `quiver`, `stem`,
+  `stairs`, `fill`, `scatter`, `histogram`, `figure`, `hold`,
+  `title`, `xlabel`, `ylabel`, `zlabel`, `subplot`, `legend`,
+  `colorbar`, `axis`, `xlim`, `ylim`, `drawnow`, … see
+  [`builtins/plot/dispatch.ts`](../src/lowering/builtins/plot/dispatch.ts)
+  for the full list). Numbl handles plotting by accumulating an
+  in-memory instruction stream that a separate viewer renders;
+  mtoc2 mirrors that data-shape on the wire by emitting one line
+  of JSON per call, prefixed with the `\x1emtoc2:plot\t` ASCII RS
+  sentinel. Every plot name routes through one shared lowering
+  function that validates args (scalar real / text / real tensor;
+  complex / struct / class / handle / Void rejected at translate),
+  returns `Void`, and codegens to a single
+  `mtoc2_plot_dispatch("<name>", n, args)` call. The C runtime
+  helper (one snippet, [`plot_dispatch.h`](../src/codegen/runtime/plot_dispatch.h))
+  serializes the call record and `fflush(stdout)`s so live updates
+  stream to a wrapper / viewer process. Argument transport reuses
+  the `mtoc2_fprintf_arg_t` tagged-union from `format_engine.h`
+  (DOUBLE / TEXT / TENSOR slots), so the entire surface is "zero
+  per-builtin C code, one-line-per-name TypeScript registration."
+  The cross-runner globally drops plot-prefixed lines before the
+  byte-for-byte stdout compare (numbl never produces them, so the
+  drop is a no-op on its side). Two routes reach the dispatch:
+  bare-name forms like `figure;` go through `lowerIdent`'s
+  arity-accepts-0 fast path; called forms like `plot(x,y)` go
+  through `lowerFunctionCall`, which falls back to mtoc2's
+  registry when `workspace.resolve` returns null (true for plot
+  drawing primitives, which numbl exposes via a runtime dispatch
+  table outside `index.builtins`). Value-returning plot variants
+  (`h = gcf`, `lim = xlim`) are deferred — assigning a Void plot
+  call surfaces a clean type error.
 
 Operator-to-builtin maps live alongside the registry.
 

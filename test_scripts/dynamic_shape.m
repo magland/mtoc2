@@ -8,6 +8,7 @@ test_zeros_3d_dyn();
 test_zeros_zero_dim();
 test_reshape_form_a_dyn();
 test_reshape_passthrough_dyn();
+test_uminus_unknown_shape();
 
 function test_zeros_row_dyn()
   k = 5;
@@ -75,4 +76,18 @@ function test_reshape_passthrough_dyn()
   cols = 6;
   %!numbl:opaque cols
   disp(reshape([1 2 3 4 5 6], 1, cols));
+end
+
+function test_uminus_unknown_shape()
+  % `-x` on a tensor with a runtime-only axis. The C helper iterates
+  % `n = prod(dims)` either way; the type system used to reject this
+  % with "uminus on tensor of unknown shape not yet supported".
+  n = 4;
+  %!numbl:opaque n
+  v = zeros(1, n);
+  v(1) = 1;
+  v(2) = -2;
+  v(3) = 3;
+  v(4) = -4;
+  disp(-v);
 end

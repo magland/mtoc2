@@ -48,6 +48,7 @@ import { reshape } from "./shape/reshape.js";
 import { transpose } from "./shape/transpose.js";
 import { size } from "./shape/size.js";
 import { flipud, fliplr, flip } from "./shape/flip.js";
+import { sort } from "./shape/sort.js";
 import { assert as assertBuiltin } from "./diag/assert.js";
 import { tic } from "./system/tic.js";
 import { toc } from "./system/toc.js";
@@ -74,8 +75,10 @@ import { pi, eps, Inf, inf, NaNBuiltin, nan } from "./math/constants.js";
 import { notBuiltin } from "./logical/not.js";
 import { oror } from "./logical/oror.js";
 import { andand } from "./logical/andand.js";
+import { plotBuiltins } from "./plot/dispatch.js";
 
 for (const b of [
+  ...plotBuiltins,
   plus,
   minus,
   times,
@@ -112,6 +115,7 @@ for (const b of [
   flipud,
   fliplr,
   flip,
+  sort,
   assertBuiltin,
   tic,
   toc,

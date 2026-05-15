@@ -45,6 +45,14 @@ test_index_write_in_while_strips_exact();
 
 test_indexed_write_widens_sign();
 
+test_index_vec_gather_2d();
+test_index_vec_gather_3d();
+test_index_vec_gather_runtime();
+test_sort_row_vec();
+test_sort_col_vec();
+test_sort_two_output();
+test_sort_then_gather();
+
 % -------- scalar index --------
 
 function test_index_read_2d()
@@ -396,4 +404,60 @@ function test_indexed_write_widens_sign()
   y = zeros(1, 5);
   y(2:3) = [9 16];
   disp(sqrt(y));
+end
+
+% -------- per-axis vector-of-indices gather (read) --------
+
+function test_index_vec_gather_2d()
+  M = [1 2 3 4; 5 6 7 8; 9 10 11 12];
+  idx = [3 1 4 2];
+  disp(M(:, idx));            % 3x4 permuted-columns
+  disp(M([2 1 3], :));        % 3x4 permuted-rows
+end
+
+function test_index_vec_gather_3d()
+  T = zeros(2, 3, 4);
+  for k = 1:4
+    T(:, :, k) = [k k+1 k+2; k+10 k+11 k+12];
+  end
+  idx = [4 1 2];
+  disp(T(:, :, idx));         % 2x3x3 permuted along the page axis
+end
+
+function test_index_vec_gather_runtime()
+  M = [10 20 30 40 50; 60 70 80 90 100];
+  idx = [5 3 1];
+  %!numbl:opaque M idx
+  disp(M(:, idx));
+end
+
+% -------- sort (multi-output builtin via [v, i] = sort(x)) --------
+
+function test_sort_row_vec()
+  a = [3 1 4 1 5 9 2 6];
+  disp(sort(a));
+end
+
+function test_sort_col_vec()
+  a = [3; 1; 4; 1; 5; 9; 2; 6];
+  %!numbl:opaque a
+  disp(sort(a));
+end
+
+function test_sort_two_output()
+  a = [3 1 4 1 5 9 2 6];
+  %!numbl:opaque a
+  [v, i] = sort(a);
+  disp(v);
+  disp(i);
+end
+
+function test_sort_then_gather()
+  % Chunkie pattern: sort gives a permutation, used to reorder
+  % another tensor's columns via vector-of-indices gather.
+  ab  = [4 2 6 1 3 5; 14 12 16 11 13 15];
+  key = ab(1, :);
+  %!numbl:opaque ab key
+  [~, isort] = sort(key);
+  disp(ab(:, isort));
 end

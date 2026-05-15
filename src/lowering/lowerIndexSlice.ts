@@ -68,13 +68,22 @@ function exactRangeCount(slot: IndexSliceArg): number | undefined {
 
 /** Per-slot result-dim kind, used by the multi-slot path. Colon takes
  *  its dim from the base; Range derives an exact dim when endpoints
- *  are statically known, else `unknown`; Scalar contributes exactly 1.
+ *  are statically known, else `unknown`; Scalar contributes exactly 1;
+ *  IndexVec contributes the slot's numel (the gathered axis size).
  *  Mirrors the doc-block table above. */
 function resultDimForSlot(slot: IndexSliceArg, baseDim: DimInfo): DimInfo {
   if (slot.kind === "Colon") return baseDim;
   if (slot.kind === "Range") {
     const n = exactRangeCount(slot);
     return n === undefined ? { kind: "unknown" } : { kind: "exact", value: n };
+  }
+  if (slot.kind === "IndexVec") {
+    const idxTy = slot.expr.ty;
+    if (isNumeric(idxTy) && idxTy.shape !== undefined) {
+      const n = idxTy.shape.reduce((a, b) => a * b, 1);
+      return { kind: "exact", value: n };
+    }
+    return { kind: "unknown" };
   }
   return { kind: "exact", value: 1 };
 }
@@ -175,7 +184,6 @@ export function lowerSliceArg(
     return { kind: "Colon", span: arg.span };
   }
   if (arg.type !== "Range") {
-    // Scalar slot — accepted only in the multi-slot mixed form.
     this.endStack.push({ baseCName, baseTy, axis });
     let expr: IRExpr;
     try {
@@ -183,13 +191,41 @@ export function lowerSliceArg(
     } finally {
       this.endStack.pop();
     }
-    if (!isScalarRealNumeric(expr.ty)) {
-      throw new TypeError(
-        `index slot must be a real scalar (got ${typeToString(expr.ty)})`,
-        arg.span
-      );
+    if (isScalarRealNumeric(expr.ty)) {
+      return { kind: "Scalar", expr, span: arg.span };
     }
-    return { kind: "Scalar", expr, span: arg.span };
+    // Tensor-valued slot — fancy "vector of indices" gather. Only valid
+    // in the multi-slot per-axis form (the linear/single-slot path is
+    // already covered by `Colon` and `Range`). Logical-mask indexing
+    // (`a(mask)` where mask is logical) isn't yet supported — we'd need
+    // a runtime path that counts truthy entries.
+    if (
+      isNumeric(expr.ty) &&
+      !expr.ty.isComplex &&
+      (expr.ty.elem === "double" || expr.ty.elem === "logical") &&
+      !isScalarRealNumeric(expr.ty)
+    ) {
+      if (axis === "linear") {
+        throw new UnsupportedConstruct(
+          `linear vector-of-indices reads (got '${typeToString(expr.ty)}' in ` +
+            `a single-slot context) are not yet supported`,
+          arg.span
+        );
+      }
+      if (expr.ty.elem === "logical") {
+        throw new UnsupportedConstruct(
+          `logical-mask indexing is not yet supported; convert to a numeric ` +
+            `index vector via 'find'`,
+          arg.span
+        );
+      }
+      return { kind: "IndexVec", expr, span: arg.span };
+    }
+    throw new TypeError(
+      `index slot must be a real scalar or a numeric index vector ` +
+        `(got ${typeToString(expr.ty)})`,
+      arg.span
+    );
   }
   this.endStack.push({ baseCName, baseTy, axis });
   let start: IRExpr;

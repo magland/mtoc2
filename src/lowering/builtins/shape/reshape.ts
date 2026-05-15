@@ -4,8 +4,7 @@
  *   Form A — variadic scalar dims:  reshape(A, d1, d2, …, dN)
  *   Form B — vector of dims:        reshape(A, [d1, d2, …, dN])
  *
- * Discipline (mirrors numbl's array-manipulation `reshape`, less
- * the `[]` auto-infer slot):
+ * Discipline (mirrors numbl's array-manipulation `reshape`):
  *   - 1 ≤ N ≤ MTOC2_MAX_NDIM (8). Trailing-singletons are stripped
  *     down to a 2-axis minimum (numbl:
  *     `while (s.length>2 && s.last===1) s.pop()`), then padded back
@@ -17,20 +16,24 @@
  *     the result lattice.
  *   - Form B — the dim vector must be a statically-known
  *     `Float64Array` of dims (runtime vectors are not yet supported).
+ *   - Form A allows at most one `[]` auto-infer slot. The translator
+ *     fills it from `numel(A)` / `prod(other dims)` when both are
+ *     known statically, else codegen passes `-1L` to
+ *     `mtoc2_reshape_nd` which computes the slot at runtime. Form B
+ *     still rejects the placeholder (the dim vector itself must be a
+ *     static constant; a single `[]` inside the bracket is ambiguous).
  *   - Input `A` must be a real numeric (scalar or tensor); complex /
  *     handle / struct / class / void / string rejected with TypeError.
  *   - Element-count check at transfer time when the input shape and
  *     every new dim are statically known; deferred to the runtime
  *     helper otherwise.
  *
- * The `[]` auto-infer slot (`reshape(A, [], 3)` etc.) is rejected with
- * a span-attributed UnsupportedConstruct in v1.
- *
  * Codegen routes through the per-op runtime helper `mtoc2_reshape_nd`
  * (declared in `src/codegen/runtime/tensor_reshape_nd.h`), which
- * already accepts a runtime `(int ndim, const long *dims)` pair. The
- * result is freshly owned, so the standard ANF / scope-exit-free
- * pipeline carries it without changes.
+ * already accepts a runtime `(int ndim, const long *dims)` pair plus
+ * an optional `-1L` auto-infer sentinel. The result is freshly owned,
+ * so the standard ANF / scope-exit-free pipeline carries it without
+ * changes.
  */
 
 import type { Span } from "../../../parser/index.js";
@@ -56,10 +59,14 @@ const MTOC2_MAX_NDIM = 8;
  *  into the original Form A dim arg list (i.e. `argTypes.slice(1)` —
  *  argIndex 0 is `argsC[1]` in the full call's argsC array). Form B
  *  always produces all-exact axes (the dim vector itself must be
- *  statically known), so the argIndex is irrelevant there. */
+ *  statically known), so the argIndex is irrelevant there.
+ *  `infer` is the `[]` auto-slot in Form A: at most one per call,
+ *  filled from `numel / prod(others)` at runtime when the value can't
+ *  be derived statically. */
 type ResolvedAxis =
   | { kind: "exact"; value: number; argIndex?: number }
-  | { kind: "dynamic"; argIndex: number };
+  | { kind: "dynamic"; argIndex: number }
+  | { kind: "infer"; argIndex: number };
 
 interface ResolvedNewShape {
   axes: ResolvedAxis[];
@@ -77,7 +84,7 @@ function isEmptyPlaceholder(t: Type): boolean {
 
 /** Apply numbl's strip / pad rules to a resolved axis list. Drops
  *  trailing exact-1 axes subject to a 2-axis floor; never strips a
- *  dynamic axis. Pads with trailing exact-1 axes if length < 2. */
+ *  dynamic or infer axis. Pads with trailing exact-1 axes if length < 2. */
 function normalizeAxes(axes: ResolvedAxis[]): ResolvedAxis[] {
   const out = axes.slice();
   while (
@@ -164,6 +171,7 @@ function resolveNewShape(dimArgTypes: Type[], span: Span): ResolvedNewShape {
       );
     }
     axes = [];
+    let sawInfer = false;
     for (let i = 0; i < dimArgTypes.length; i++) {
       const a = dimArgTypes[i];
       if (!isNumeric(a) || a.elem !== "double" || a.isComplex) {
@@ -174,10 +182,15 @@ function resolveNewShape(dimArgTypes: Type[], span: Span): ResolvedNewShape {
       }
       if (!isScalar(a)) {
         if (isEmptyPlaceholder(a)) {
-          throw new UnsupportedConstruct(
-            `reshape: '[]' auto-infer slot is not yet supported; specify all dims explicitly`,
-            span
-          );
+          if (sawInfer) {
+            throw new UnsupportedConstruct(
+              `'reshape' allows at most one '[]' auto-infer slot`,
+              span
+            );
+          }
+          sawInfer = true;
+          axes.push({ kind: "infer", argIndex: i });
+          continue;
         }
         throw new TypeError(
           `'reshape' dim arg ${i + 1} must be a scalar real double (got tensor)`,
@@ -216,9 +229,11 @@ function exactShape(r: ResolvedNewShape): number[] | undefined {
 
 /** Emit the C `long` expression for one axis. `dimArgsC` is sliced
  *  from the full Call argsC so its index 0 maps to `axes[*].argIndex
- *  = 0`. */
+ *  = 0`. The `[]` auto-infer slot emits `-1L` — `mtoc2_reshape_nd`
+ *  scans for the sentinel and fills it from `in_total / prod(others)`. */
 function dimC(axis: ResolvedAxis, dimArgsC: string[]): string {
   if (axis.kind === "exact") return `${axis.value}L`;
+  if (axis.kind === "infer") return `-1L`;
   return `(long)(${dimArgsC[axis.argIndex]})`;
 }
 
@@ -246,6 +261,48 @@ export const reshape: Builtin = {
     }
 
     const resolved = resolveNewShape(argTypes.slice(1), span);
+    // Try to materialize the `[]` slot at translate time: when the input
+    // shape AND every other axis is exact, `numel / prod(others)` pins
+    // the slot. Otherwise it stays `infer` and the runtime helper does
+    // the math.
+    if (a.shape !== undefined) {
+      const inferIdx = resolved.axes.findIndex(ax => ax.kind === "infer");
+      if (inferIdx !== -1) {
+        const others: number[] = [];
+        let allOthersExact = true;
+        for (let i = 0; i < resolved.axes.length; i++) {
+          if (i === inferIdx) continue;
+          const ax = resolved.axes[i];
+          if (ax.kind === "exact") {
+            others.push(ax.value);
+          } else {
+            allOthersExact = false;
+            break;
+          }
+        }
+        if (allOthersExact) {
+          const inTotal = a.shape.reduce((p, d) => p * d, 1);
+          const otherProd = others.reduce((p, d) => p * d, 1);
+          if (otherProd === 0 && inTotal !== 0) {
+            throw new TypeError(
+              `'reshape' element count mismatch: input has ${inTotal} ` +
+                `elements but the explicit dims around '[]' multiply to 0`,
+              span
+            );
+          }
+          if (otherProd > 0 && inTotal % otherProd !== 0) {
+            throw new TypeError(
+              `'reshape' element count mismatch: input has ${inTotal} ` +
+                `elements, not divisible by ${otherProd} (the explicit ` +
+                `dims around '[]')`,
+              span
+            );
+          }
+          const inferred = otherProd === 0 ? 0 : inTotal / otherProd;
+          resolved.axes[inferIdx] = { kind: "exact", value: inferred };
+        }
+      }
+    }
     const newShape = exactShape(resolved);
 
     if (newShape !== undefined) {
@@ -282,10 +339,11 @@ export const reshape: Builtin = {
       return tensorDouble(newShape);
     }
 
-    // At least one new dim is dynamic. Result is a tensor with a
-    // mixed exact/unknown dim lattice; element-count check is
-    // deferred to `mtoc2_reshape_nd` at runtime. Exact data on the
-    // input can't be carried (the destination shape isn't known).
+    // At least one new dim is dynamic (or infer with non-static input
+    // shape). Result is a tensor with a mixed exact/unknown dim
+    // lattice; element-count check is deferred to `mtoc2_reshape_nd`
+    // at runtime. Exact data on the input can't be carried (the
+    // destination shape isn't known).
     const dims: DimInfo[] = resolved.axes.map(axis =>
       axis.kind === "exact"
         ? axis.value === 1

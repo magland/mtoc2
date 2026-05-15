@@ -1,8 +1,8 @@
-import { UnsupportedConstruct } from "../../errors.js";
 import {
   type NumericType,
   scalarDouble,
   tensorDouble,
+  tensorDoubleFromDims,
   signFromNumber,
   flipSign,
   isMultiElement,
@@ -25,20 +25,19 @@ export const uminus: Builtin = {
       }
       return scalarDouble(flipSign(a.sign));
     }
-    // Tensor uminus: fold when exact, else runtime.
+    // Tensor uminus: fold when exact, else runtime. The C helper
+    // iterates `n = prod(dims)` regardless of whether shape is known
+    // statically, so unknown-dim tensors are fine — we just can't
+    // fold their values.
     const arr = exactRealArray(a);
     if (arr !== undefined && a.shape !== undefined) {
       const out = new Float64Array(arr.length);
       for (let i = 0; i < arr.length; i++) out[i] = -arr[i];
       return tensorDouble(a.shape, out);
     }
-    if (a.shape === undefined) {
-      throw new UnsupportedConstruct(
-        `'uminus' on a tensor of unknown shape not yet supported`,
-        span
-      );
-    }
-    return tensorDouble(a.shape);
+    const out = tensorDoubleFromDims(a.dims.slice());
+    out.sign = flipSign(a.sign);
+    return out;
   },
   codegenC(argsC, argTypes) {
     if (isMultiElement(argTypes[0])) {

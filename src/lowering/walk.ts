@@ -61,6 +61,8 @@ export function forEachSubExpr(e: IRExpr, visit: (sub: IRExpr) => void): void {
           forEachSubExpr(slot.end, visit);
         } else if (slot.kind === "Scalar") {
           forEachSubExpr(slot.expr, visit);
+        } else if (slot.kind === "IndexVec") {
+          forEachSubExpr(slot.expr, visit);
         }
       }
       return;
@@ -127,6 +129,8 @@ export function forEachTopLevelExpr(
           visit(slot.step);
           visit(slot.end);
         } else if (slot.kind === "Scalar") {
+          visit(slot.expr);
+        } else if (slot.kind === "IndexVec") {
           visit(slot.expr);
         }
       }
