@@ -74,6 +74,7 @@ import { mod } from "./math/mod.js";
 import { rem } from "./math/rem.js";
 import { atan2 } from "./math/atan2.js";
 import { hypot } from "./math/hypot.js";
+import { linspace } from "./math/linspace.js";
 import { real } from "./math/real.js";
 import { imag } from "./math/imag.js";
 import { conj } from "./math/conj.js";
@@ -148,6 +149,7 @@ for (const b of [
   rem,
   atan2,
   hypot,
+  linspace,
   real,
   imag,
   conj,

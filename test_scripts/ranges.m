@@ -12,6 +12,12 @@ test_length_one_with_step();
 test_length_one_in_arithmetic();
 test_length_one_disp_directly();
 
+test_linspace_basic();
+test_linspace_edges();
+test_linspace_fractional();
+test_linspace_default_n();
+test_linspace_runtime_n();
+
 % -------- float-step ranges --------
 
 function test_count_when_quotient_underflows()
@@ -76,4 +82,46 @@ end
 
 function test_length_one_disp_directly()
   disp(7:7);
+end
+
+% -------- linspace --------
+
+function test_linspace_basic()
+  disp(linspace(0, 1, 5));
+  disp(linspace(-1, 1, 3));
+  disp(linspace(1, 0, 5));   % negative-direction
+  disp(linspace(0, 1, 2));   % just the two endpoints
+end
+
+function test_linspace_edges()
+  % n == 1 → scalar `b` (mtoc2 collapses 1×1 to scalar, matching
+  % numbl's "disp formats 1×1 as scalar" behavior byte-for-byte).
+  disp(linspace(0, 1, 1));
+  disp(linspace(-7, 42, 1));
+  % n == 0 / n < 0 → empty tensor (disp prints nothing).
+  disp(numel(linspace(0, 1, 0)));
+  disp(numel(linspace(0, 1, -3)));
+end
+
+function test_linspace_fractional()
+  disp(linspace(0.25, 1.25, 5));
+  disp(linspace(-0.5, 0.5, 3));
+end
+
+function test_linspace_default_n()
+  % 2-arg form defaults n = 100; checking length keeps the test output
+  % stable (the full 100-element render diverges in formatting between
+  % numbl and mtoc2's disp paths).
+  disp(length(linspace(0, 1)));
+  disp(length(linspace(2, 5)));
+end
+
+function test_linspace_runtime_n()
+  n = 4;
+  %!numbl:opaque n
+  disp(linspace(0, 1, n));
+  a = -2;
+  b = 2;
+  %!numbl:opaque a b
+  disp(linspace(a, b, 5));
 end

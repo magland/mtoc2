@@ -508,6 +508,11 @@ const REGISTRY: ReadonlyMap<string, RuntimeSnippet> = new Map<
       "mtoc2_range_value",
     ]),
   ],
+  // `linspace(a, b, n)` — 1×n row of linearly-spaced values from a to b.
+  [
+    "mtoc2_tensor_linspace",
+    loadSnippet("tensor_linspace.h", ["mtoc2_tensor_t", "mtoc2_tensor_alloc"]),
+  ],
 
   // ── tic / toc (wall-clock stopwatch) ─────────────────────────────
   // One snippet covers `mtoc2_tic`, `mtoc2_toc`, and the bare-`toc;`
