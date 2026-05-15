@@ -14,45 +14,20 @@ import {
   renameFile as renameFileInDb,
   getFileContent,
 } from "../db/operations";
+import {
+  filesReducer,
+  generateUniqueName,
+  type WorkspaceFile,
+} from "./fileListReducer";
+
+export type { WorkspaceFile };
 
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder("utf-8");
 const SAVE_DEBOUNCE_MS = 500;
 
-/** Metadata-only file reference (no content loaded). */
-export interface WorkspaceFile {
-  id: string;
-  name: string;
-}
-
 export function fileText(data: Uint8Array): string {
   return textDecoder.decode(data);
-}
-
-type FilesAction =
-  | { type: "SET_FILES"; files: WorkspaceFile[] }
-  | { type: "ADD_FILE"; file: WorkspaceFile }
-  | { type: "DELETE_FILE"; fileId: string }
-  | { type: "RENAME_FILE"; fileId: string; newName: string };
-
-function filesReducer(
-  state: WorkspaceFile[],
-  action: FilesAction
-): WorkspaceFile[] {
-  switch (action.type) {
-    case "SET_FILES":
-      return action.files;
-    case "ADD_FILE":
-      return [...state, action.file];
-    case "DELETE_FILE":
-      return state.filter(f => f.id !== action.fileId);
-    case "RENAME_FILE":
-      return state.map(f =>
-        f.id === action.fileId ? { ...f, name: action.newName } : f
-      );
-    default:
-      return state;
-  }
 }
 
 export interface UseProjectFilesResult {
@@ -71,14 +46,6 @@ export interface UseProjectFilesResult {
 interface PendingSave {
   data: Uint8Array;
   timeoutId: ReturnType<typeof setTimeout>;
-}
-
-function generateUniqueName(files: WorkspaceFile[]): string {
-  const existing = new Set(files.map(f => f.name));
-  for (let i = 1; ; i++) {
-    const name = `untitled${i === 1 ? "" : i}.m`;
-    if (!existing.has(name)) return name;
-  }
 }
 
 function getStoredActiveFileId(projectName: string): string {

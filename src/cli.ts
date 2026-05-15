@@ -30,6 +30,7 @@ import { createInterface } from "node:readline";
 
 import { translateProject, type SourceFile } from "./translate.js";
 import { applyPlotRecord, newPlotDispatchState } from "./utils/plotAdapter.js";
+import { PLOT_PREFIX } from "./utils/plotProtocol.js";
 import type { PlotRecord } from "./utils/wasmRunner.worker.js";
 import { createPlotHandler } from "../../numbl/src/cli-plot-handler.js";
 import type { PlotInstruction } from "../../numbl/src/graphics/types.js";
@@ -44,13 +45,6 @@ function usage(): never {
   console.error("       mtoc2 translate <script.m> [-o out.c]");
   process.exit(2);
 }
-
-/** Byte prefix that `mtoc2_plot_dispatch` writes ahead of every JSON
- *  plot record. Kept in lockstep with `runtime/plot_dispatch.h` and
- *  the cross-runner's `GLOBAL_DROPS` (which is now redundant for
- *  mtoc2's CLI output since we strip the prefix here, but kept as a
- *  defensive backstop). */
-const PLOT_PREFIX = "\x1emtoc2:plot\t";
 
 /** Recursively scan `dir` for sibling `.m` files. Descends into
  *  `+pkg/` namespace dirs (so `+pkg/foo.m` is picked up as `pkg.foo`)

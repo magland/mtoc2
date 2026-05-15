@@ -14,6 +14,8 @@
  */
 /// <reference lib="webworker" />
 
+import { PLOT_PREFIX } from "./plotProtocol";
+
 export interface WasmRunRequest {
   type: "run";
   wasm: Uint8Array;
@@ -47,14 +49,6 @@ export type WasmRunMessage =
   | { type: "plot_record"; record: PlotRecord }
   | { type: "done"; exitCode: number }
   | { type: "error"; message: string };
-
-/** Sentinel for the wire format — same byte sequence the C runtime
- *  writes ahead of every plot record. ASCII RS (0x1e) is essentially
- *  never produced by normal MATLAB output, so we can split on it
- *  without escaping user-level `disp`/`fprintf` bytes. The
- *  cross-runner (`scripts/run_test_scripts.ts`) shares this prefix —
- *  keep them in sync if you ever change it. */
-const PLOT_PREFIX = "\x1emtoc2:plot\t";
 
 interface EmModuleOverrides {
   wasmBinary: Uint8Array;

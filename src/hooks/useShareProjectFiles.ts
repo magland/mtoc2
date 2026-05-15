@@ -6,7 +6,12 @@ import {
   useEffect,
   useRef,
 } from "react";
-import type { WorkspaceFile, UseProjectFilesResult } from "./useProjectFiles";
+import type { UseProjectFilesResult } from "./useProjectFiles";
+import {
+  filesReducer,
+  generateUniqueName,
+  type WorkspaceFile,
+} from "./fileListReducer";
 import {
   encodeShareData,
   decodeShareData,
@@ -14,40 +19,6 @@ import {
 } from "../utils/shareUrl";
 
 const textEncoder = new TextEncoder();
-
-type FilesAction =
-  | { type: "SET_FILES"; files: WorkspaceFile[] }
-  | { type: "ADD_FILE"; file: WorkspaceFile }
-  | { type: "DELETE_FILE"; fileId: string }
-  | { type: "RENAME_FILE"; fileId: string; newName: string };
-
-function filesReducer(
-  state: WorkspaceFile[],
-  action: FilesAction
-): WorkspaceFile[] {
-  switch (action.type) {
-    case "SET_FILES":
-      return action.files;
-    case "ADD_FILE":
-      return [...state, action.file];
-    case "DELETE_FILE":
-      return state.filter(f => f.id !== action.fileId);
-    case "RENAME_FILE":
-      return state.map(f =>
-        f.id === action.fileId ? { ...f, name: action.newName } : f
-      );
-    default:
-      return state;
-  }
-}
-
-function generateUniqueName(files: WorkspaceFile[]): string {
-  const existing = new Set(files.map(f => f.name));
-  for (let i = 1; ; i++) {
-    const name = `untitled${i === 1 ? "" : i}.m`;
-    if (!existing.has(name)) return name;
-  }
-}
 
 export function useShareProjectFiles(): UseProjectFilesResult & {
   urlSizeTooLarge: boolean;

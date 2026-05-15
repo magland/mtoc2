@@ -38,6 +38,18 @@ export interface RunOptions {
   optLevel?: WasmOptLevel;
 }
 
+/** Format a translate-side error for the console: `<kind> (<file>): <msg>\n`,
+ *  with the file segment omitted if no fileName is attached. Shared by the
+ *  event-channel and the build-failure paths. */
+function formatTranslateError(e: {
+  kind: string;
+  fileName?: string;
+  message: string;
+}): string {
+  const where = e.fileName ? ` (${e.fileName})` : "";
+  return `${e.kind}${where}: ${e.message}\n`;
+}
+
 interface UseWasmExecutionResult {
   status: RunStatus;
   /** Console output as a list of typed lines. Cleared at run start. */
@@ -84,10 +96,9 @@ export function useWasmExecution(): UseWasmExecutionResult {
       } else if (event.type === "compile_error") {
         append({ channel: "compile_error", text: event.text });
       } else if (event.type === "translate_error") {
-        const where = event.fileName ? ` (${event.fileName})` : "";
         append({
           channel: "translate_error",
-          text: `${event.kind}${where}: ${event.message}\n`,
+          text: formatTranslateError(event),
         });
       }
       // "done" is consumed by the caller via the resolved RunResult.
@@ -149,12 +160,9 @@ export function useWasmExecution(): UseWasmExecutionResult {
           return;
         }
         if (build.kind === "translate") {
-          const where = build.error.fileName
-            ? ` (${build.error.fileName})`
-            : "";
           append({
             channel: "translate_error",
-            text: `${build.error.kind}${where}: ${build.error.message}\n`,
+            text: formatTranslateError(build.error),
           });
           finish("error");
           return;
