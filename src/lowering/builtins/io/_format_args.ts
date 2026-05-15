@@ -44,6 +44,12 @@ export function validateFormatArgs(
   }
 }
 
+/** `mtoc2_fprintf_arg_t.kind` tag values. Must stay in lockstep with
+ *  the `MTOC2_FA_*` enum in `src/codegen/runtime/format_engine.h`. */
+const MTOC2_FA_DOUBLE = "MTOC2_FA_DOUBLE";
+const MTOC2_FA_TEXT = "MTOC2_FA_TEXT";
+const MTOC2_FA_TENSOR = "MTOC2_FA_TENSOR";
+
 /** Emit one `mtoc2_fprintf_arg_t` slot for `argsC[i]` typed `argTypes[i]`.
  *  Used to build the compound-literal slot array for fprintf / error /
  *  sprintf call sites. ANF in the lowerer guarantees multi-element
@@ -55,16 +61,16 @@ export function emitFormatSlot(
   argIndex: number
 ): string {
   if (t.kind === "String") {
-    return `{.kind = 3, .u = {.t = mtoc2_text_from_string(${c})}}`;
+    return `{.kind = ${MTOC2_FA_TEXT}, .u = {.t = mtoc2_text_from_string(${c})}}`;
   }
   if (t.kind === "Char") {
-    return `{.kind = 3, .u = {.t = mtoc2_text_from_char_tensor(${c})}}`;
+    return `{.kind = ${MTOC2_FA_TEXT}, .u = {.t = mtoc2_text_from_char_tensor(${c})}}`;
   }
   if (isScalarRealNumeric(t)) {
-    return `{.kind = 1, .u = {.d = (double)(${c})}}`;
+    return `{.kind = ${MTOC2_FA_DOUBLE}, .u = {.d = (double)(${c})}}`;
   }
   if (isNumeric(t) && isMultiElement(t)) {
-    return `{.kind = 4, .u = {.tensor = &${c}}}`;
+    return `{.kind = ${MTOC2_FA_TENSOR}, .u = {.tensor = &${c}}}`;
   }
   throw new Error(
     `internal: '${builtinName}' arg ${argIndex + 1} reached codegen with unsupported type ${t.kind}`

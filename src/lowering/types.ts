@@ -115,6 +115,11 @@ export function isDimOne(d: DimInfo): boolean {
  *  system. Anything larger drops to non-exact. */
 export const EXACT_ARRAY_MAX_ELEMENTS = 256;
 
+/** Max rank for `mtoc2_tensor_t`. Mirror of `MTOC2_MAX_NDIM` in
+ *  `src/codegen/runtime/tensor.h` — kept in lockstep with the runtime
+ *  helpers that allocate per-axis stride/index buffers on the stack. */
+export const MTOC2_MAX_NDIM = 8;
+
 /** Exact-value variants.
  *  - `number`: scalar real.
  *  - `{re,im}`: scalar complex (reserved, not yet wired through).
@@ -1006,11 +1011,13 @@ export function structTypedefName(t: StructType): string {
   return `mtoc2_struct__${hashType(canonical)}`;
 }
 
-/** Sanitize a class name to a C-identifier-safe form (replace any
- *  non-`[A-Za-z0-9_]` char with `_`). v1 only accepts unqualified
- *  class names so this is a passthrough for typical inputs. */
-function safeClassNameForC(name: string): string {
-  return name.replace(/[^A-Za-z0-9_]/g, "_");
+/** Replace every non-C-identifier character (`[^A-Za-z0-9_]`) with `_`.
+ *  Used to make `<name>__<hex>` mangled names always valid C identifiers
+ *  when the source carries class/path-like characters (e.g. `pkg.foo`,
+ *  `MyClass.method`). v1 class names are typically already C-safe, so
+ *  this is a passthrough for those. */
+export function sanitizeCIdent(s: string): string {
+  return s.replace(/[^A-Za-z0-9_]/g, "_");
 }
 
 /** Mangled C typedef name for a class instance. Same C-level
@@ -1023,7 +1030,7 @@ export function classTypedefName(t: ClassType): string {
     n: t.className,
     p: t.properties.map(p => [p.name, cFieldTypeStr(p.ty)]),
   });
-  return `mtoc2_class_${safeClassNameForC(t.className)}__${hashType(canonical)}`;
+  return `mtoc2_class_${sanitizeCIdent(t.className)}__${hashType(canonical)}`;
 }
 
 /** Class-method specialization-name source. Becomes the input to

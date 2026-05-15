@@ -16,6 +16,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, join, resolve } from "node:path";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { cpus } from "node:os";
+import { PLOT_PREFIX } from "../src/utils/plotProtocol.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -77,8 +78,8 @@ const MAX_DIFF_LINES = 30;
  */
 const GLOBAL_DROPS: ReadonlyArray<RegExp> = [
   // The \x1e (RS) sentinel is deliberate — see plot_dispatch.h.
-  // eslint-disable-next-line no-control-regex
-  /^\x1emtoc2:plot\t.*\n?/gm,
+  // PLOT_PREFIX contains no regex metacharacters, so it's safe inline.
+  new RegExp(`^${PLOT_PREFIX}.*\\n?`, "gm"),
 ];
 
 async function captureStdout(cmd: string, args: string[]): Promise<string> {

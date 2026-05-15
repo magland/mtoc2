@@ -14,5 +14,5 @@ export const min = defineReducer({
     return acc;
   },
   outputElem: "double",
-  resultSign: (t, nonEmpty) => minMaxSign("min", t, nonEmpty),
+  resultSign: minMaxSign,
 });

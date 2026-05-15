@@ -79,6 +79,7 @@ import {
   withoutExact,
   canonicalizeType,
   classMethodSpecSource,
+  sanitizeCIdent,
 } from "./types.js";
 import { exactDouble } from "./builtins/_shared.js";
 import type { ClassRegistration } from "./classDefs.js";
@@ -155,18 +156,13 @@ export class Lowerer {
    *  `specializeUserFunction` so a call from inside `helper.m`'s
    *  subfunction reports the right file in its `CallSite`. */
   private currentFile: string;
-  /** Per-specialization `nargout` value. Pushed by `specializeUserFunction`
-   *  before lowering a function body; popped after. Read by the
-   *  `nargout` identifier arm of `lowerIdent`. Empty at top level —
-   *  MATLAB rejects `nargout` outside a function body, which we mirror
-   *  by leaving an `nargout` reference unresolved. */
-  private nargoutStack: number[] = [];
-  /** Companion to `nargoutStack`: the count of supplied positional
-   *  arguments at the call site. Identical to `decl.params.length`
-   *  in mtoc2 v1 (the language doesn't yet have optional positional
-   *  args), but tracked separately so future support for omitted
-   *  trailing args lands cleanly. */
-  private narginStack: number[] = [];
+  /** Per-specialization `nargin` / `nargout` values. Pushed by
+   *  `specializeUserFunction` before lowering a function body; popped
+   *  after. Read by the matching identifier arms of `lowerIdent`. Empty
+   *  at top level — MATLAB rejects `nargin` / `nargout` outside a
+   *  function body, which we mirror by leaving the reference
+   *  unresolved (which falls through to the "undefined" error). */
+  private callFrameStack: { nargin: number; nargout: number }[] = [];
 
   constructor(private workspace: Workspace) {
     this.currentFile = workspace.mainFile;
@@ -2018,22 +2014,17 @@ export class Lowerer {
         span: e.span,
       };
     }
-    // `nargout` (and `nargin`) are MATLAB pseudo-variables that fold to
-    // a compile-time constant per specialization. The `nargoutStack`
+    // `nargout` / `nargin` are MATLAB pseudo-variables that fold to a
+    // compile-time constant per specialization. The `callFrameStack`
     // is pushed by `specializeUserFunction` before lowering the body
     // and popped after; a reference outside a function body finds it
     // empty and falls through to the "undefined" error.
-    if (e.name === "nargout" && this.nargoutStack.length > 0) {
-      const v = this.nargoutStack[this.nargoutStack.length - 1];
-      return {
-        kind: "NumLit",
-        value: v,
-        ty: scalarDouble(signFromNumber(v), v),
-        span: e.span,
-      };
-    }
-    if (e.name === "nargin" && this.narginStack.length > 0) {
-      const v = this.narginStack[this.narginStack.length - 1];
+    if (
+      (e.name === "nargout" || e.name === "nargin") &&
+      this.callFrameStack.length > 0
+    ) {
+      const frame = this.callFrameStack[this.callFrameStack.length - 1];
+      const v = e.name === "nargout" ? frame.nargout : frame.nargin;
       return {
         kind: "NumLit",
         value: v,
@@ -3207,7 +3198,7 @@ export class Lowerer {
      *  the caller can't supply a more specific value (e.g.
      *  cross-file resolver paths that don't yet thread this through).
      *  Inside the body, the `nargout` identifier folds to this value
-     *  via the `nargoutStack`. */
+     *  via the `callFrameStack`. */
     nargout?: number
   ): IRFunc {
     if (argTypes.length !== decl.params.length) {
@@ -3265,8 +3256,10 @@ export class Lowerer {
     this.env = new Map();
     this.tempCounter = 0;
     this.currentFile = file;
-    this.nargoutStack.push(effectiveNargout);
-    this.narginStack.push(argTypes.length);
+    this.callFrameStack.push({
+      nargin: argTypes.length,
+      nargout: effectiveNargout,
+    });
 
     // Bind params. The C name goes through `cIdentForUserName` so a
     // user-source `function r = f(struct)` doesn't reference the C
@@ -3314,8 +3307,7 @@ export class Lowerer {
     this.env = savedEnv;
     this.tempCounter = savedTempCounter;
     this.currentFile = savedCurrentFile;
-    this.nargoutStack.pop();
-    this.narginStack.pop();
+    this.callFrameStack.pop();
 
     const out: IRFunc = {
       ...placeholder,
@@ -3376,20 +3368,6 @@ export class Lowerer {
 }
 
 // ── Helpers (free functions) ────────────────────────────────────────────
-
-/** If the lowered cond's type carries an exact scalar value, return
- *  its boolean interpretation; otherwise null. This is the ONLY place
- *  the lowerer turns a known exact value into a compile-time decision —
- *  the resulting branch is taken/dropped before codegen. Arithmetic /
- *  comparisons / builtin calls and Ident reads all produce runtime IR
- *  even when their `ty.exact` is known. */
-/** Replace every non-C-identifier character (`[^A-Za-z0-9_]`) with
- *  `_`. Used to make `<funcname>__<hex>` mangled names always valid C
- *  identifiers when the source name comes from a class
- *  (`MyClass__method`) or carries a path-like prefix. */
-function sanitizeCIdent(s: string): string {
-  return s.replace(/[^A-Za-z0-9_]/g, "_");
-}
 
 /** C reserved words that are also legal numbl identifiers. mtoc2 maps
  *  every user variable / param name through `cIdentForUserName` at
@@ -3530,6 +3508,12 @@ function synthesizeZeroValue(
   );
 }
 
+/** If the lowered cond's type carries an exact scalar value, return
+ *  its boolean interpretation; otherwise null. This is the ONLY place
+ *  the lowerer turns a known exact value into a compile-time decision —
+ *  the resulting branch is taken/dropped before codegen. Arithmetic /
+ *  comparisons / builtin calls and Ident reads all produce runtime IR
+ *  even when their `ty.exact` is known. */
 function condToBool(cond: IRExpr): boolean | null {
   if (!isNumeric(cond.ty)) return null;
   const x = cond.ty.exact;

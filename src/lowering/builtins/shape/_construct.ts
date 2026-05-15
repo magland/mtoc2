@@ -30,6 +30,7 @@ import { UnsupportedConstruct, TypeError } from "../../errors.js";
 import {
   DIM_ONE,
   EXACT_ARRAY_MAX_ELEMENTS,
+  MTOC2_MAX_NDIM,
   tensorDouble,
   tensorDoubleFromDims,
   scalarDouble,
@@ -40,9 +41,6 @@ import {
 import type { DimInfo, NumericType, Type } from "../../types.js";
 import type { Builtin } from "../registry.js";
 import { exactDouble, exactRealArray } from "../_shared.js";
-
-/** Mirror of `MTOC2_MAX_NDIM` in src/codegen/runtime/tensor.h. */
-const MTOC2_MAX_NDIM = 8;
 
 /** Per-axis resolution. `argIndex` is the position in the original
  *  argTypes/argsC arrays that supplies this axis's value — both axes

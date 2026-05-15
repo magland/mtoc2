@@ -41,6 +41,7 @@ import { TypeError, UnsupportedConstruct } from "../../errors.js";
 import {
   DIM_ONE,
   EXACT_ARRAY_MAX_ELEMENTS,
+  MTOC2_MAX_NDIM,
   tensorDouble,
   tensorDoubleFromDims,
   scalarDouble,
@@ -51,9 +52,6 @@ import {
 import type { DimInfo, Type } from "../../types.js";
 import type { Builtin } from "../registry.js";
 import { exactDouble, exactRealArray } from "../_shared.js";
-
-/** Mirror of `MTOC2_MAX_NDIM` in src/codegen/runtime/tensor.h. */
-const MTOC2_MAX_NDIM = 8;
 
 /** Per-axis resolution. `argIndex` (when present) refers to the index
  *  into the original Form A dim arg list (i.e. `argTypes.slice(1)` —

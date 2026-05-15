@@ -797,7 +797,7 @@ export function defineReducer(spec: KernelSpec): Builtin {
       dimArgIndex: spec.dimArgIndex,
       outputElem: spec.outputElem,
     }),
-    runtimeDeps: [`mtoc2_${spec.name}_all`, `mtoc2_${spec.name}_dim`],
+    runtimeDeps: ["mtoc2_tensor_reduce_real"],
   };
 }
 
@@ -854,29 +854,14 @@ export function prodSign(t: NumericType, nonEmpty: boolean): Sign {
   }
 }
 
-export function minMaxSign(
-  which: "min" | "max",
-  t: NumericType,
-  nonEmpty: boolean
-): Sign {
+/** Sign transfer for `min` and `max` reductions on a real fiber.
+ *  min and max preserve the same sign classes: both stay in the
+ *  half-line their input occupies (positive→positive,
+ *  negative→negative, nonneg/zero→nonneg, nonpositive→nonpositive),
+ *  so the two ops share one transfer. */
+export function minMaxSign(t: NumericType, nonEmpty: boolean): Sign {
   // Empty min/max → NaN → unknown sign.
   if (!nonEmpty) return "unknown";
-  if (which === "min") {
-    switch (t.sign) {
-      case "positive":
-        return "positive";
-      case "nonneg":
-      case "zero":
-        return "nonneg";
-      case "negative":
-        return "negative";
-      case "nonpositive":
-        return "nonpositive";
-      default:
-        return "unknown";
-    }
-  }
-  // max
   switch (t.sign) {
     case "positive":
       return "positive";

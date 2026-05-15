@@ -114,13 +114,14 @@ export function emitProgram(prog: IRProgram, opts: EmitOptions = {}): string {
 
   // Main.
   userParts.push("int main(void) {");
-  const mainOwned = collectOwnedLocals(prog.topLevelStmts);
+  const mainLocals = collectLocals(prog.topLevelStmts);
+  const mainOwned = mainLocals.owned;
   for (const o of mainOwned) {
     activateOwnedRuntime(o.ty, state);
     const h = requireOwnedHelpers(o.ty);
     userParts.push(`  ${cTypeFor(o.ty)} ${o.cName} = ${h.empty}();`);
   }
-  for (const o of collectHoistedScalarLocals(prog.topLevelStmts)) {
+  for (const o of mainLocals.scalars) {
     userParts.push(`  ${cTypeFor(o.ty)} ${o.cName} = ${defaultInitFor()};`);
   }
   const mainFutureTouches = computeFutureTouches(prog.topLevelStmts);
@@ -347,8 +348,7 @@ function fnParamList(fn: IRFunc): string {
  *  of-function predeclaration. Includes Assign LHSes, MultiAssignCall
  *  slot bindings, and For loop vars (the For node carries its own
  *  loop var so reads after the loop see the last iteration's value).
- *  Owned vs scalar is decided downstream by the caller — see
- *  `collectOwnedLocals` and `collectHoistedScalarLocals`. */
+ *  Callers partition the result into owned / non-owned with `isOwned`. */
 function collectAllLocals(stmts: IRStmt[]): { cName: string; ty: Type }[] {
   const seen = new Map<string, Type>();
   const order: string[] = [];
@@ -389,22 +389,25 @@ function collectAllLocals(stmts: IRStmt[]): { cName: string; ty: Type }[] {
   return order.map(cName => ({ cName, ty: seen.get(cName)! }));
 }
 
-function collectOwnedLocals(stmts: IRStmt[]): { cName: string; ty: Type }[] {
-  return collectAllLocals(stmts).filter(({ ty }) => isOwned(ty));
-}
-
-/** Non-owned locals (scalars, including For loop vars and multi-assign
- *  slot bindings) so they can be pre-declared at function top with
- *  `double v = 0.0;`. Symmetric with `collectOwnedLocals`: every local
- *  is declared at function top, every Assign / loop-var rebinding is a
- *  plain `v = rhs;`. Without this, inner-block declarations would scope
- *  to the block and a later read (now reachable after the
- *  `mergeBranchEnvs` change that keeps partial-branch variables in
- *  scope) would reference an undeclared C variable. */
-function collectHoistedScalarLocals(
-  stmts: IRStmt[]
-): { cName: string; ty: Type }[] {
-  return collectAllLocals(stmts).filter(({ ty }) => !isOwned(ty));
+/** Walk `stmts` once and split the result into owned vs non-owned
+ *  locals. Every local is pre-declared at function top — owned with
+ *  the per-type `_empty()` helper, scalars with the default init
+ *  (`0.0` / `0`). The non-owned half also picks up For loop vars and
+ *  multi-assign slot bindings so that a later read of a variable
+ *  first written inside an If / While / For body (reachable via
+ *  `mergeBranchEnvs` keeping partial-branch keys) doesn't reference
+ *  an out-of-scope C local. */
+function collectLocals(stmts: IRStmt[]): {
+  owned: { cName: string; ty: Type }[];
+  scalars: { cName: string; ty: Type }[];
+} {
+  const owned: { cName: string; ty: Type }[] = [];
+  const scalars: { cName: string; ty: Type }[] = [];
+  for (const local of collectAllLocals(stmts)) {
+    if (isOwned(local.ty)) owned.push(local);
+    else scalars.push(local);
+  }
+  return { owned, scalars };
 }
 
 function emitFunction(fn: IRFunc, state: RuntimeState): string {
@@ -435,30 +438,23 @@ function emitFunction(fn: IRFunc, state: RuntimeState): string {
       lines.push(`  double ${cOut} = 0.0;`);
     }
   }
-  // Pre-declare owned locals (excluding outputs and params, both of
-  // which are already declared elsewhere — outputs above, params in
-  // the function signature). Without the paramNames filter, a body
-  // that reassigns an owned param (`function f(xs); xs = xs(:); ...`)
-  // would emit a duplicate `mtoc2_tensor_t xs = mtoc2_tensor_empty();`
-  // and the C compiler would reject the redeclaration.
-  const owned = collectOwnedLocals(fn.body).filter(
-    o => !outputCNames.has(o.cName) && !paramNames.has(o.cName)
-  );
+  // Pre-declare every body local at function top (excluding outputs
+  // and params, both of which are already declared elsewhere —
+  // outputs above, params in the function signature). Without the
+  // paramNames filter, a body that reassigns an owned param
+  // (`function f(xs); xs = xs(:); ...`) would emit a duplicate
+  // `mtoc2_tensor_t xs = mtoc2_tensor_empty();` and the C compiler
+  // would reject the redeclaration.
+  const isLocalDeclSite = (o: { cName: string }): boolean =>
+    !outputCNames.has(o.cName) && !paramNames.has(o.cName);
+  const fnLocals = collectLocals(fn.body);
+  const owned = fnLocals.owned.filter(isLocalDeclSite);
   for (const o of owned) {
     activateOwnedRuntime(o.ty, state);
     const h = requireOwnedHelpers(o.ty);
     lines.push(`  ${cTypeFor(o.ty)} ${o.cName} = ${h.empty}();`);
   }
-  // Pre-declare non-owned locals (scalars, For loop vars, multi-assign
-  // slot bindings) at function top. Symmetric with the owned-locals
-  // pass above; ensures a later read of a variable first written inside
-  // an If / While / For body (now reachable thanks to mergeBranchEnvs
-  // keeping partial-branch keys) doesn't reference an out-of-scope C
-  // local.
-  const hoistedScalars = collectHoistedScalarLocals(fn.body).filter(
-    o => !outputCNames.has(o.cName) && !paramNames.has(o.cName)
-  );
-  for (const o of hoistedScalars) {
+  for (const o of fnLocals.scalars.filter(isLocalDeclSite)) {
     lines.push(`  ${cTypeFor(o.ty)} ${o.cName} = ${defaultInitFor()};`);
   }
   // Keep each owned output alive through the body so the future-touch
@@ -725,7 +721,7 @@ function emitStmt(
         `${indent}  for (long _mtoc2_for_i = 0; _mtoc2_for_i < _mtoc2_for_n; _mtoc2_for_i++) {`
       );
       // The loop var is pre-declared at function top by
-      // `collectHoistedScalarLocals`, so the rebind here is a plain
+      // `collectLocals`, so the rebind here is a plain
       // assignment. This lets reads after the loop see the final
       // iteration's value (matching numbl).
       lines.push(
@@ -759,8 +755,7 @@ function emitStmt(
     case "MultiAssignCall": {
       // N≥2-output user-function call OR builtin with a `multiOutput`
       // hook (e.g. `[v, i] = sort(a)`). Named slots' `binding.cName` is
-      // pre-declared at function top — owned slots by `collectOwnedLocals`,
-      // scalar slots by `collectHoistedScalarLocals`. Ignored slots
+      // pre-declared at function top by `collectLocals`. Ignored slots
       // become `_mtoc2_discard_<callIdx>_<i>` locals scoped to the
       // call's `{}` block.
       //

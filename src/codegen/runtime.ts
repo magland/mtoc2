@@ -317,10 +317,9 @@ const REGISTRY: ReadonlyMap<string, RuntimeSnippet> = new Map<
   ],
 
   // ── Reductions (sum/prod/mean/min/max/any/all on real tensors) ────
-  // One shared snippet defines every `_all` + `_dim` variant via
-  // C-side macros; the per-name entries below pull it in transitively
-  // so any reducer builtin's `runtimeDeps` activates the whole pack
-  // (dedupe is automatic via the snippet activator).
+  // One shared snippet defines every `_all` + `_dim` variant via C-side
+  // macros. Reducer builtins all set `runtimeDeps: ["mtoc2_tensor_reduce_real"]`
+  // directly (see `defineReducer` in builtins/reduction/_shape.ts).
   [
     "mtoc2_tensor_reduce_real",
     loadSnippet("tensor_reduce_real.h", [
@@ -328,62 +327,6 @@ const REGISTRY: ReadonlyMap<string, RuntimeSnippet> = new Map<
       "mtoc2_alloc",
       "mtoc2_tensor_alloc_nd",
     ]),
-  ],
-  [
-    "mtoc2_sum_all",
-    { headers: [], code: "", deps: ["mtoc2_tensor_reduce_real"] },
-  ],
-  [
-    "mtoc2_sum_dim",
-    { headers: [], code: "", deps: ["mtoc2_tensor_reduce_real"] },
-  ],
-  [
-    "mtoc2_prod_all",
-    { headers: [], code: "", deps: ["mtoc2_tensor_reduce_real"] },
-  ],
-  [
-    "mtoc2_prod_dim",
-    { headers: [], code: "", deps: ["mtoc2_tensor_reduce_real"] },
-  ],
-  [
-    "mtoc2_mean_all",
-    { headers: [], code: "", deps: ["mtoc2_tensor_reduce_real"] },
-  ],
-  [
-    "mtoc2_mean_dim",
-    { headers: [], code: "", deps: ["mtoc2_tensor_reduce_real"] },
-  ],
-  [
-    "mtoc2_min_all",
-    { headers: [], code: "", deps: ["mtoc2_tensor_reduce_real"] },
-  ],
-  [
-    "mtoc2_min_dim",
-    { headers: [], code: "", deps: ["mtoc2_tensor_reduce_real"] },
-  ],
-  [
-    "mtoc2_max_all",
-    { headers: [], code: "", deps: ["mtoc2_tensor_reduce_real"] },
-  ],
-  [
-    "mtoc2_max_dim",
-    { headers: [], code: "", deps: ["mtoc2_tensor_reduce_real"] },
-  ],
-  [
-    "mtoc2_any_all",
-    { headers: [], code: "", deps: ["mtoc2_tensor_reduce_real"] },
-  ],
-  [
-    "mtoc2_any_dim",
-    { headers: [], code: "", deps: ["mtoc2_tensor_reduce_real"] },
-  ],
-  [
-    "mtoc2_all_all",
-    { headers: [], code: "", deps: ["mtoc2_tensor_reduce_real"] },
-  ],
-  [
-    "mtoc2_all_dim",
-    { headers: [], code: "", deps: ["mtoc2_tensor_reduce_real"] },
   ],
 
   // ── length / numel (tensor → scalar shape queries) ───────────────
