@@ -639,6 +639,12 @@ export class Lowerer {
                 expr: this.anfRequireScalarOrVar(slot.expr, hoists),
               };
             }
+            if (slot.kind === "LogicalMask") {
+              return {
+                ...slot,
+                expr: this.anfRequireScalarOrVar(slot.expr, hoists),
+              };
+            }
             return slot;
           }),
         };

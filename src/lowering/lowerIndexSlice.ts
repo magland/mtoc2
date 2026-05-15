@@ -72,7 +72,8 @@ function exactRangeCount(slot: IndexSliceArg): number | undefined {
 /** Per-slot result-dim kind, used by the multi-slot path. Colon takes
  *  its dim from the base; Range derives an exact dim when endpoints
  *  are statically known, else `unknown`; Scalar contributes exactly 1;
- *  IndexVec contributes the slot's numel (the gathered axis size).
+ *  IndexVec contributes the slot's numel (the gathered axis size);
+ *  LogicalMask contributes `sum(mask)` which is only known at runtime.
  *  Mirrors the doc-block table above. */
 function resultDimForSlot(slot: IndexSliceArg, baseDim: DimInfo): DimInfo {
   if (slot.kind === "Colon") return baseDim;
@@ -86,6 +87,9 @@ function resultDimForSlot(slot: IndexSliceArg, baseDim: DimInfo): DimInfo {
       const n = idxTy.shape.reduce((a, b) => a * b, 1);
       return { kind: "exact", value: n };
     }
+    return { kind: "unknown" };
+  }
+  if (slot.kind === "LogicalMask") {
     return { kind: "unknown" };
   }
   return { kind: "exact", value: 1 };
@@ -153,6 +157,23 @@ export function lowerIndexSlice(
       resultTy = wantComplex
         ? tensorComplexFromDims(resultDims)
         : tensorDoubleFromDims(resultDims);
+    } else if (slot.kind === "LogicalMask") {
+      // Single-slot linear logical-mask read. The length is `sum(mask)`
+      // — only known at runtime. Result shape follows the same rule
+      // as single-slot Range: row-vec base → row, col-vec base → col,
+      // matrix / N-D base → column vector (numbl matches MATLAB here).
+      const isRowVec = isRowVecTy(baseTy);
+      const isColVec = isColVecTy(baseTy);
+      const unkDim: DimInfo = { kind: "unknown" };
+      const oneDim: DimInfo = { kind: "exact", value: 1 };
+      const resultDims: DimInfo[] = isRowVec
+        ? [oneDim, unkDim]
+        : isColVec
+          ? [unkDim, oneDim]
+          : [unkDim, oneDim];
+      resultTy = wantComplex
+        ? tensorComplexFromDims(resultDims)
+        : tensorDoubleFromDims(resultDims);
     } else {
       throw new UnsupportedConstruct(
         `internal: single-slot scalar slice should have routed through ` +
@@ -205,28 +226,23 @@ export function lowerSliceArg(
     if (isScalarRealNumeric(expr.ty)) {
       return { kind: "Scalar", expr, span: arg.span };
     }
-    // Tensor-valued slot — fancy "vector of indices" gather. Only valid
-    // in the multi-slot per-axis form (the linear/single-slot path is
-    // already covered by `Colon` and `Range`). Logical-mask indexing
-    // (`a(mask)` where mask is logical) isn't yet supported — we'd need
-    // a runtime path that counts truthy entries.
+    // Tensor-valued slot — either a numeric "vector of indices" gather
+    // (IndexVec) or a logical mask (LogicalMask). LogicalMask is valid
+    // in both single-slot (linear) and per-axis forms; IndexVec is
+    // only valid in the multi-slot per-axis form for now.
     if (
       isNumeric(expr.ty) &&
       !expr.ty.isComplex &&
       (expr.ty.elem === "double" || expr.ty.elem === "logical") &&
       !isScalarRealNumeric(expr.ty)
     ) {
+      if (expr.ty.elem === "logical") {
+        return { kind: "LogicalMask", expr, span: arg.span };
+      }
       if (axis === "linear") {
         throw new UnsupportedConstruct(
           `linear vector-of-indices reads (got '${typeToString(expr.ty)}' in ` +
             `a single-slot context) are not yet supported`,
-          arg.span
-        );
-      }
-      if (expr.ty.elem === "logical") {
-        throw new UnsupportedConstruct(
-          `logical-mask indexing is not yet supported; convert to a numeric ` +
-            `index vector via 'find'`,
           arg.span
         );
       }

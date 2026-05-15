@@ -145,6 +145,7 @@ function irExprToString(e: IRExpr): string {
         if (slot.kind === "Colon") return ":";
         if (slot.kind === "Scalar") return irExprToString(slot.expr);
         if (slot.kind === "IndexVec") return irExprToString(slot.expr);
+        if (slot.kind === "LogicalMask") return irExprToString(slot.expr);
         const stepPart =
           slot.step.kind === "NumLit" && slot.step.value === 1
             ? ""
@@ -211,6 +212,7 @@ export function irStmtHeader(s: IRStmt): string | null {
         if (slot.kind === "Colon") return ":";
         if (slot.kind === "Scalar") return irExprToString(slot.expr);
         if (slot.kind === "IndexVec") return irExprToString(slot.expr);
+        if (slot.kind === "LogicalMask") return irExprToString(slot.expr);
         const stepPart =
           slot.step.kind === "NumLit" && slot.step.value === 1
             ? ""

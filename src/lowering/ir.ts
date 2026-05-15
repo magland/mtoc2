@@ -195,13 +195,18 @@ export interface IndexLoad {
  *  for index-position ranges. `IndexVec` carries a tensor expression
  *  whose values are 1-based indices into the corresponding axis —
  *  gather-style fancy indexing (read-only on v1's IndexSlice; not yet
- *  plumbed through IndexSliceStore). The carried expression is ANF'd
+ *  plumbed through IndexSliceStore). `LogicalMask` carries a logical-
+ *  typed tensor whose truthy positions select indices into the
+ *  corresponding axis (or the linear column-major flat buffer for
+ *  the single-slot form). The result-axis size equals `sum(mask)`,
+ *  which is only known at runtime. The carried expression is ANF'd
  *  to a `Var` so codegen can iterate it without re-evaluation. */
 export type IndexSliceArg =
   | { kind: "Range"; start: IRExpr; step: IRExpr; end: IRExpr; span: Span }
   | { kind: "Colon"; span: Span }
   | { kind: "Scalar"; expr: IRExpr; span: Span }
-  | { kind: "IndexVec"; expr: IRExpr; span: Span };
+  | { kind: "IndexVec"; expr: IRExpr; span: Span }
+  | { kind: "LogicalMask"; expr: IRExpr; span: Span };
 
 /** Range / colon / scalar-mix slice read. `index.length` is 1
  *  (linear) or `base.ty.dims.length` (per-axis). The result is a freshly-

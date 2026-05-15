@@ -35,6 +35,7 @@ import {
   classTypedefName,
   handleTypedefName,
   isColVecTy,
+  isRowVecTy,
   isDimOne,
   isNumeric,
   isOwned,
@@ -1343,13 +1344,20 @@ function formatNdOffset(
  *  `_mtoc2_n_<i>` (per-slot iteration count) and any Range / Scalar
  *  locals into `lines`. Returns the per-slot source-index expression
  *  (in terms of `_mtoc2_k_<i>` for Colon/Range, or the precomputed
- *  `_mtoc2_src_<i>` local for Scalar slots). */
+ *  `_mtoc2_src_<i>` local for Scalar slots).
+ *
+ *  `cleanups`, when provided, is populated with lines that must run
+ *  after the iter loop (currently used for LogicalMask slots to free
+ *  the precomputed source-index buffer). The caller is expected to
+ *  emit these lines immediately after closing the slot iteration
+ *  loops and before the GCC statement-expression's yield expression. */
 function emitSliceSlotSetup(
   state: RuntimeState,
   lines: string[],
   indent: string,
   slotsTyped: ReadonlyArray<IndexSliceArg>,
-  baseCName: string
+  baseCName: string,
+  cleanups?: string[]
 ): string[] {
   const slotSrc: string[] = [];
   for (let i = 0; i < slotsTyped.length; i++) {
@@ -1397,6 +1405,42 @@ function emitSliceSlotSetup(
       slotSrc.push(
         `mtoc2_idx_axis(&${baseCName}, ${i}, (long)${idxCName}.real[${kVar}], ${loc})`
       );
+    } else if (slot.kind === "LogicalMask") {
+      // Per-axis logical-mask gather. Scan the mask once at setup time
+      // and fill a `long[]` index buffer with the 0-based source-axis
+      // positions where the mask is truthy. The truthy count is the
+      // per-slot iteration count; per-iter the source index is the
+      // i-th entry of the buffer. Buffer is freed after the iter loop
+      // via `cleanups`.
+      if (slot.expr.kind !== "Var") {
+        throw new Error(
+          "emit internal: LogicalMask slot expr must be a Var after ANF"
+        );
+      }
+      useRuntimeByName(state, "mtoc2_logical_mask_indices");
+      useRuntimeByName(state, "mtoc2_alloc");
+      const maskCName = slot.expr.cName;
+      const maskTy = slot.expr.ty;
+      const maskDimsProd: string[] = [];
+      if (maskTy.kind === "Numeric") {
+        for (let j = 0; j < maskTy.dims.length; j++) {
+          maskDimsProd.push(`${maskCName}.dims[${j}]`);
+        }
+      }
+      const maskNumelExpr =
+        maskDimsProd.length === 0 ? "0L" : maskDimsProd.join(" * ");
+      const loc = locStringOf(slot.span);
+      lines.push(`${indent}long _mtoc2_mask_n_${i} = ${maskNumelExpr};`);
+      lines.push(
+        `${indent}long *_mtoc2_idx_${i} = (long *)mtoc2_alloc(sizeof(long) * (_mtoc2_mask_n_${i} > 0 ? (size_t)_mtoc2_mask_n_${i} : 1));`
+      );
+      lines.push(
+        `${indent}long _mtoc2_n_${i} = mtoc2_logical_mask_indices(${maskCName}, ${baseCName}.dims[${i}], ${i}, ${loc}, _mtoc2_idx_${i});`
+      );
+      if (cleanups) {
+        cleanups.push(`${indent}free(_mtoc2_idx_${i});`);
+      }
+      slotSrc.push(`_mtoc2_idx_${i}[${kVar}]`);
     } else {
       if (slot.step.kind !== "NumLit") {
         throw new Error(
@@ -1744,6 +1788,7 @@ function emitIndexSliceProducer(
     let srcIndexFor: (kVar: string) => string;
     let resultRows: string;
     let resultCols: string;
+    let linearCleanup: string | null = null;
     if (slot.kind === "Colon") {
       const parts: string[] = [];
       if (e.base.ty.kind === "Numeric") {
@@ -1768,6 +1813,58 @@ function emitIndexSliceProducer(
         resultRows = "1";
         resultCols = "_mtoc2_n";
       }
+    } else if (slot.kind === "LogicalMask") {
+      // Single-slot linear logical-mask read: scan the mask once,
+      // collect 0-based positions where it's truthy, then walk the
+      // buffer. Each truthy mask position must be < numel(base);
+      // `mtoc2_logical_mask_indices` aborts otherwise. Result shape
+      // mirrors single-slot Range: row-vec base → row; col-vec base
+      // → col; matrix / N-D base → column vector.
+      if (slot.expr.kind !== "Var") {
+        throw new Error(
+          "emit internal: LogicalMask slot expr must be a Var after ANF"
+        );
+      }
+      useRuntimeByName(state, "mtoc2_logical_mask_indices");
+      useRuntimeByName(state, "mtoc2_alloc");
+      const maskCName = slot.expr.cName;
+      const maskTy = slot.expr.ty;
+      const maskDimsProd: string[] = [];
+      if (maskTy.kind === "Numeric") {
+        for (let j = 0; j < maskTy.dims.length; j++) {
+          maskDimsProd.push(`${maskCName}.dims[${j}]`);
+        }
+      }
+      const maskNumelExpr =
+        maskDimsProd.length === 0 ? "0L" : maskDimsProd.join(" * ");
+      const baseDimsProd: string[] = [];
+      if (e.base.ty.kind === "Numeric") {
+        for (let j = 0; j < e.base.ty.dims.length; j++) {
+          baseDimsProd.push(`${baseCName}.dims[${j}]`);
+        }
+      }
+      const baseNumelExpr =
+        baseDimsProd.length === 0 ? "0L" : baseDimsProd.join(" * ");
+      const loc = locStringOf(slot.span);
+      lines.push(`long _mtoc2_mask_n = ${maskNumelExpr};`);
+      lines.push(`long _mtoc2_base_n = ${baseNumelExpr};`);
+      lines.push(
+        `long *_mtoc2_idx = (long *)mtoc2_alloc(sizeof(long) * (_mtoc2_mask_n > 0 ? (size_t)_mtoc2_mask_n : 1));`
+      );
+      lines.push(
+        `long _mtoc2_n = mtoc2_logical_mask_indices(${maskCName}, _mtoc2_base_n, -1, ${loc}, _mtoc2_idx);`
+      );
+      count = "_mtoc2_n";
+      srcIndexFor = k => `_mtoc2_idx[${k}]`;
+      const isRowBase = e.base.ty.kind === "Numeric" && isRowVecTy(e.base.ty);
+      if (isRowBase) {
+        resultRows = "1";
+        resultCols = "_mtoc2_n";
+      } else {
+        resultRows = "_mtoc2_n";
+        resultCols = "1";
+      }
+      linearCleanup = `free(_mtoc2_idx);`;
     } else {
       throw new Error(
         "emit internal: single-slot Scalar IndexSlice should have routed to IndexLoad"
@@ -1779,13 +1876,22 @@ function emitIndexSliceProducer(
     lines.push(`for (long _mtoc2_k = 0; _mtoc2_k < ${count}; _mtoc2_k++) {`);
     lines.push(`  ${copyElem("_mtoc2_k", srcIndexFor("_mtoc2_k"))}`);
     lines.push(`}`);
+    if (linearCleanup !== null) lines.push(linearCleanup);
     lines.push(`_mtoc2_t;`);
     return `({ ${lines.join(" ")} })`;
   }
 
   // Multi-slot per-axis form.
   const ndim = e.index.length;
-  const slotSrc = emitSliceSlotSetup(state, lines, "", e.index, baseCName);
+  const cleanups: string[] = [];
+  const slotSrc = emitSliceSlotSetup(
+    state,
+    lines,
+    "",
+    e.index,
+    baseCName,
+    cleanups
+  );
   const resultRank =
     e.ty.kind === "Numeric" ? Math.max(2, e.ty.dims.length) : 2;
   const dimsList: string[] = [];
@@ -1813,6 +1919,7 @@ function emitIndexSliceProducer(
   for (let i = ndim - 1; i >= 0; i--) {
     lines.push(`}`);
   }
+  for (const c of cleanups) lines.push(c);
   lines.push(`_mtoc2_t;`);
   return `({ ${lines.join(" ")} })`;
 }
@@ -1859,6 +1966,7 @@ function emitIndexSliceStore(
   if (s.index.length === 1) {
     const slot = s.index[0];
     let dstOffsetFor: (kVar: string) => string;
+    let linearStoreCleanup: string | null = null;
     if (slot.kind === "Colon") {
       const parts: string[] = [];
       if (s.base.ty.kind === "Numeric") {
@@ -1876,6 +1984,45 @@ function emitIndexSliceStore(
         `${indent}  `,
         state
       );
+    } else if (slot.kind === "LogicalMask") {
+      // Single-slot linear logical-mask write: precompute the buffer of
+      // 0-based truthy positions, then walk it.
+      if (slot.expr.kind !== "Var") {
+        throw new Error(
+          "emit internal: LogicalMask slot expr must be a Var after ANF"
+        );
+      }
+      useRuntimeByName(state, "mtoc2_logical_mask_indices");
+      useRuntimeByName(state, "mtoc2_alloc");
+      const maskCName = slot.expr.cName;
+      const maskTy = slot.expr.ty;
+      const maskDimsProd: string[] = [];
+      if (maskTy.kind === "Numeric") {
+        for (let j = 0; j < maskTy.dims.length; j++) {
+          maskDimsProd.push(`${maskCName}.dims[${j}]`);
+        }
+      }
+      const maskNumelExpr =
+        maskDimsProd.length === 0 ? "0L" : maskDimsProd.join(" * ");
+      const baseDimsProd: string[] = [];
+      if (s.base.ty.kind === "Numeric") {
+        for (let j = 0; j < s.base.ty.dims.length; j++) {
+          baseDimsProd.push(`${baseCName}.dims[${j}]`);
+        }
+      }
+      const baseNumelExpr =
+        baseDimsProd.length === 0 ? "0L" : baseDimsProd.join(" * ");
+      const loc = locStringOf(slot.span);
+      lines.push(`${indent}  long _mtoc2_mask_n = ${maskNumelExpr};`);
+      lines.push(`${indent}  long _mtoc2_base_n = ${baseNumelExpr};`);
+      lines.push(
+        `${indent}  long *_mtoc2_idx = (long *)mtoc2_alloc(sizeof(long) * (_mtoc2_mask_n > 0 ? (size_t)_mtoc2_mask_n : 1));`
+      );
+      lines.push(
+        `${indent}  long _mtoc2_n = mtoc2_logical_mask_indices(${maskCName}, _mtoc2_base_n, -1, ${loc}, _mtoc2_idx);`
+      );
+      dstOffsetFor = k => `_mtoc2_idx[${k}]`;
+      linearStoreCleanup = `${indent}  free(_mtoc2_idx);`;
     } else {
       throw new Error(
         "emit internal: single-slot Scalar IndexSliceStore should have routed to IndexStore"
@@ -1923,6 +2070,7 @@ function emitIndexSliceStore(
       );
       lines.push(`${indent}  }`);
     }
+    if (linearStoreCleanup !== null) lines.push(linearStoreCleanup);
     lines.push(`${indent}}`);
     return lines.join("\n");
   }

@@ -48,6 +48,16 @@ test_indexed_write_widens_sign();
 test_index_vec_gather_2d();
 test_index_vec_gather_3d();
 test_index_vec_gather_runtime();
+test_logical_mask_perdim_cols();
+test_logical_mask_perdim_rows();
+test_logical_mask_perdim_3d();
+test_logical_mask_linear_row();
+test_logical_mask_linear_col();
+test_logical_mask_linear_matrix();
+test_logical_mask_inline_expr();
+test_logical_mask_write_scalar();
+test_logical_mask_write_vector();
+test_logical_mask_write_in_loop();
 test_sort_row_vec();
 test_sort_col_vec();
 test_sort_two_output();
@@ -435,6 +445,95 @@ function test_index_vec_gather_runtime()
   idx = [5 3 1];
   %!numbl:opaque M idx
   disp(M(:, idx));
+end
+
+% -------- logical-mask indexing --------
+
+% Per-axis read: pick columns where mask is true. Mask hoisted via
+% double-not so its type is `logical[1x4]`.
+function test_logical_mask_perdim_cols()
+  M = [1 2 3 4; 5 6 7 8];
+  mask = ~[0 1 1 0];
+  disp(M(:, mask));
+end
+
+% Per-axis read: pick rows where mask is true.
+function test_logical_mask_perdim_rows()
+  M = [1 2 3; 4 5 6; 7 8 9];
+  rmask = ~[0; 1; 0];
+  disp(M(rmask, :));
+end
+
+% Per-axis logical mask along the page axis of a 3-D tensor.
+function test_logical_mask_perdim_3d()
+  T = zeros(2, 3, 4);
+  for k = 1:4
+    T(:, :, k) = [k k+1 k+2; k+10 k+11 k+12];
+  end
+  pmask = ~[0 1 0 1];
+  disp(T(:, :, pmask));
+end
+
+% Linear single-slot mask on a row vector → row vector result.
+function test_logical_mask_linear_row()
+  a = [10 20 30 40 50];
+  mask = ~[1 0 1 0 1];
+  disp(a(mask));
+end
+
+% Linear single-slot mask on a column vector → column vector result.
+function test_logical_mask_linear_col()
+  c = [10; 20; 30; 40; 50];
+  mask = ~[1 0 1 0 1];
+  disp(c(mask));
+end
+
+% Linear single-slot mask on a matrix → column vector (column-major flatten).
+function test_logical_mask_linear_matrix()
+  M = [1 2; 3 4; 5 6];
+  mask = ~[1 0; 0 1; 1 0];
+  disp(M(mask));
+end
+
+% Mask built inline (no named variable) — exercises the ANF hoist
+% inside lowerIndexSlice / lowerIndexSliceStore for a non-Var slot expr.
+function test_logical_mask_inline_expr()
+  a = [10 20 30 40 50];
+  disp(a(~[0 1 0 1 0]));
+  a(~[1 0 1 0 1]) = 0;
+  disp(a);
+end
+
+% Scalar broadcast write through a linear logical mask.
+function test_logical_mask_write_scalar()
+  v = [1 2 3 4 5 6];
+  mask = ~[0 0 1 0 1 0];
+  v(mask) = -1;
+  disp(v);
+end
+
+% Vector RHS write through a linear logical mask. RHS length must
+% equal sum(mask); both numbl and mtoc2 surface a runtime error on
+% mismatch.
+function test_logical_mask_write_vector()
+  v = [10 20 30 40 50];
+  mask = ~[0 1 0 0 1];
+  v(mask) = [100 200 300];
+  disp(v);
+end
+
+% Logical-mask write in a loop body — exercises the env-widening /
+% exact-strip path through `collectAssignedNames`.
+function test_logical_mask_write_in_loop()
+  v = zeros(1, 5);
+  for k = 1:5
+    v(k) = k;
+  end
+  mask = ~[1 0 0 1 0];
+  for k = 1:3
+    v(mask) = k * 10;
+  end
+  disp(v);
 end
 
 % -------- sort (multi-output builtin via [v, i] = sort(x)) --------

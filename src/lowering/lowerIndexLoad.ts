@@ -14,6 +14,7 @@ import type { Expr, Span } from "../parser/index.js";
 import { TypeError } from "./errors.js";
 import type { IRExpr } from "./ir.js";
 import {
+  isMultiElement,
   isNumeric,
   isScalarRealNumeric,
   scalarComplex,
@@ -24,6 +25,7 @@ import {
 import type { NumericType } from "./types.js";
 import type { Lowerer } from "./lower.js";
 import { resolveIndexBase } from "./indexResolve.js";
+import { lowerIndexSlice } from "./lowerIndexSlice.js";
 
 /** Lower an index-read of an in-scope variable. */
 export function lowerIndexLoad(
@@ -52,6 +54,20 @@ export function lowerIndexLoad(
       this.endStack.pop();
     }
     if (!isScalarRealNumeric(lowered.ty)) {
+      // Multi-element real-numeric (logical or double) tensor in an
+      // index slot is a fancy-index access — logical-mask or vector-of-
+      // indices. Route to lowerIndexSlice which builds an IndexSlice IR
+      // node with a LogicalMask or IndexVec slot. Re-lowering happens
+      // there (deterministic; no externally-visible side effects), so
+      // this is safe to bail late.
+      if (
+        isNumeric(lowered.ty) &&
+        !lowered.ty.isComplex &&
+        isMultiElement(lowered.ty) &&
+        (lowered.ty.elem === "double" || lowered.ty.elem === "logical")
+      ) {
+        return lowerIndexSlice.call(this, name, argExprs, span);
+      }
       throw new TypeError(
         `index ${slot + 1} of '${name}' must be a real scalar ` +
           `(got ${typeToString(lowered.ty)})`,

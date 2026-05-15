@@ -41,12 +41,42 @@ export function lowerIndexSliceStore(
   });
 
   const isSingleSlot = lvalue.indices.length === 1;
+  const slotHoists: IRStmt[] = [];
   const slots: IndexSliceArg[] = [];
   for (let i = 0; i < lvalue.indices.length; i++) {
     const axis: number | "linear" = isSingleSlot ? "linear" : i;
-    slots.push(
-      lowerSliceArg.call(this, r.baseCName, r.baseTy, axis, lvalue.indices[i])
+    const slot = lowerSliceArg.call(
+      this,
+      r.baseCName,
+      r.baseTy,
+      axis,
+      lvalue.indices[i]
     );
+    // The LogicalMask slot's expr is consumed at emit time as a Var
+    // (codegen reads `.real[i]` / `.dims[k]` off it). ANF it here so a
+    // non-Var producer (e.g. a Unary `~` directly in the slot) lands in
+    // a named temp before the IndexSliceStore is emitted.
+    if (slot.kind === "LogicalMask") {
+      slots.push({
+        ...slot,
+        expr: this.anfRequireScalarOrVar(slot.expr, slotHoists),
+      });
+    } else {
+      slots.push(slot);
+    }
+  }
+  // Per-axis logical-mask writes (e.g. `M(:, mask) = rhs`) aren't yet
+  // supported; only single-slot linear `a(mask) = rhs` is handled.
+  if (!isSingleSlot) {
+    for (const slot of slots) {
+      if (slot.kind === "LogicalMask") {
+        throw new UnsupportedConstruct(
+          `per-axis logical-mask writes are not yet supported; only ` +
+            `linear-form 'a(mask) = rhs' is handled`,
+          slot.span
+        );
+      }
+    }
   }
 
   const rawRhs = this.lowerExpr(exprAst);
@@ -103,6 +133,7 @@ export function lowerIndexSliceStore(
     rhs,
     span,
   };
-  if (hoists.length === 0) return store;
-  return [...hoists, store];
+  const allHoists = [...slotHoists, ...hoists];
+  if (allHoists.length === 0) return store;
+  return [...allHoists, store];
 }

@@ -11,6 +11,7 @@ import type { Expr, LValue, Span } from "../parser/index.js";
 import { TypeError, UnsupportedConstruct } from "./errors.js";
 import type { IRExpr, IRStmt } from "./ir.js";
 import {
+  isMultiElement,
   isNumeric,
   isScalar,
   isScalarRealNumeric,
@@ -18,13 +19,14 @@ import {
 } from "./types.js";
 import type { Lowerer } from "./lower.js";
 import { resolveIndexBase } from "./indexResolve.js";
+import { lowerIndexSliceStore } from "./lowerIndexSliceStore.js";
 
 export function lowerIndexStore(
   this: Lowerer,
   lvalue: Extract<LValue, { type: "Index" }>,
   exprAst: Expr,
   span: Span
-): IRStmt {
+): IRStmt | IRStmt[] {
   if (lvalue.base.type !== "Ident") {
     throw new UnsupportedConstruct(
       `indexed assignment requires a simple variable on the left ` +
@@ -69,6 +71,19 @@ export function lowerIndexStore(
       this.endStack.pop();
     }
     if (!isScalarRealNumeric(lowered.ty)) {
+      // Multi-element tensor in an index slot of a write is a logical-
+      // mask write (only the linear single-slot form is supported; the
+      // multi-slot logical-mask write is rejected inside
+      // lowerIndexSliceStore). Vector-of-indices writes aren't yet
+      // plumbed.
+      if (
+        isNumeric(lowered.ty) &&
+        !lowered.ty.isComplex &&
+        isMultiElement(lowered.ty) &&
+        lowered.ty.elem === "logical"
+      ) {
+        return lowerIndexSliceStore.call(this, lvalue, exprAst, span);
+      }
       throw new TypeError(
         `index ${slot + 1} of '${name}' must be a real scalar ` +
           `(got ${typeToString(lowered.ty)})`,
