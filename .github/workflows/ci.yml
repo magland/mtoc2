@@ -1,0 +1,83 @@
+name: CI
+
+# mtoc2 imports numbl's parser and several IDE components directly from a
+# sibling `../numbl` source tree. Every job below checks numbl out next to
+# the mtoc2 checkout so those relative imports resolve. The cross-runner
+# (`scripts/run_test_scripts.ts`) is intentionally not run here — it shells
+# out to `cc` per script and runs locally as part of the dev loop. CI here
+# covers lint + format + typecheck + vitest.
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout mtoc2
+        uses: actions/checkout@v4
+        with:
+          path: mtoc2
+
+      - name: Checkout numbl (sibling)
+        uses: actions/checkout@v4
+        with:
+          repository: flatironinstitute/numbl
+          path: numbl
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: mtoc2/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+        working-directory: mtoc2
+
+      - name: Check formatting
+        run: npm run format:check
+        working-directory: mtoc2
+
+      - name: Run ESLint
+        run: npm run lint
+        working-directory: mtoc2
+
+      - name: Type check
+        run: npm run typecheck
+        working-directory: mtoc2
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout mtoc2
+        uses: actions/checkout@v4
+        with:
+          path: mtoc2
+
+      - name: Checkout numbl (sibling)
+        uses: actions/checkout@v4
+        with:
+          repository: flatironinstitute/numbl
+          path: numbl
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: mtoc2/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+        working-directory: mtoc2
+
+      - name: Run tests
+        run: npm run test
+        working-directory: mtoc2
