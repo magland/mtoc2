@@ -95,7 +95,6 @@ export interface RunResult {
 export type WasmOptLevel = "O0" | "O2" | "O3";
 
 export interface WasmBuildOpts {
-  enableTempInlining?: boolean;
   fastMath?: boolean;
   simd?: boolean;
   optLevel?: WasmOptLevel;
@@ -133,10 +132,6 @@ function base64ToUint8Array(b64: string): Uint8Array {
  * Translate the project to C in-browser, then POST the C to the public
  * compile service. The compile service has no concept of `.m` files —
  * it's a generic C-to-wasm endpoint — so translation must happen here.
- *
- * Translation forces `threads = 1`: emcc currently has no libomp port
- * shipped with the upstream emsdk, so any `<omp.h>` include in the C
- * source breaks the build.
  */
 export interface BuildWasmHooks {
   /** Fires once we've determined a network compile is necessary —
@@ -156,10 +151,7 @@ export async function buildWasm(
 ): Promise<BuildWasmResult> {
   // Step 1: translate in-browser. Any UnsupportedConstruct / TypeError
   // raised by the lowerer surfaces here, before we touch the network.
-  const translateResult = translateProject(files, activeName, {
-    enableTempInlining: opts.enableTempInlining ?? false,
-    threads: 1,
-  });
+  const translateResult = translateProject(files, activeName);
   if (translateResult.error) {
     return { ok: false, kind: "translate", error: translateResult.error };
   }

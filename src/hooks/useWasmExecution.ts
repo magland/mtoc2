@@ -32,7 +32,6 @@ export interface ConsoleLine {
 }
 
 export interface RunOptions {
-  enableTempInlining?: boolean;
   fastMath?: boolean;
   simd?: boolean;
   optLevel?: WasmOptLevel;
@@ -127,7 +126,6 @@ export function useWasmExecution(): UseWasmExecutionResult {
         files,
         activeName,
         {
-          enableTempInlining: opts.enableTempInlining ?? false,
           fastMath: opts.fastMath ?? false,
           simd: opts.simd ?? false,
           optLevel: opts.optLevel ?? "O3",

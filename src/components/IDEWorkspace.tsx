@@ -83,16 +83,11 @@ export function IDEWorkspace({ filesApi, header }: IDEWorkspaceProps) {
   const loadedRef = useRef(new Set<string>());
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [includeRuntime, setIncludeRuntime] = useState(false);
-  // Initial trio = whatever `default` profile resolves to. The profile
-  // dropdown lets the user jump between presets; the two individual
-  // toggles override on top. The `threads` field of the profile is
-  // ignored: the WASM build path always forces 1 thread (emcc doesn't
-  // ship libomp).
+  // Initial settings = whatever `default` profile resolves to. The
+  // profile dropdown lets the user jump between presets; the fast-math
+  // toggle overrides on top.
   const initialOpt = profileSettings(DEFAULT_OPT_PROFILE);
   const [profile, setProfile] = useState<OptProfile>(DEFAULT_OPT_PROFILE);
-  const [enableTempInlining, setEnableTempInlining] = useState(
-    initialOpt.enableTempInlining
-  );
   const [fastMath, setFastMath] = useState(initialOpt.fastMath);
   const [wasmOptLevel, setWasmOptLevel] = useState<WasmOptLevel>(() =>
     readWasmOptLevel()
@@ -106,16 +101,13 @@ export function IDEWorkspace({ filesApi, header }: IDEWorkspaceProps) {
     setWasmSimd(next);
     localStorage.setItem(WASM_SIMD_KEY, String(next));
   };
-  /** Selecting a profile resets the inline-temps and fast-math toggles
-   *  to the profile's defaults; the dropdown itself stays on the
-   *  selected profile name even after the user nudges an individual
-   *  switch. That's a useful display — "I was in `aggressive`, then
-   *  turned fast-math off." */
+  /** Selecting a profile resets the fast-math toggle to the profile's
+   *  default; the dropdown itself stays on the selected profile name
+   *  even after the user nudges the switch. That's a useful display —
+   *  "I was in `aggressive`, then turned fast-math off." */
   const handleProfileChange = (p: OptProfile) => {
     setProfile(p);
-    const s = profileSettings(p);
-    setEnableTempInlining(s.enableTempInlining);
-    setFastMath(s.fastMath);
+    setFastMath(profileSettings(p).fastMath);
   };
   const exec = useWasmExecution();
 
@@ -173,17 +165,11 @@ export function IDEWorkspace({ filesApi, header }: IDEWorkspaceProps) {
     [sourceFiles, active]
   );
 
-  // The WASM build path forces 1 thread: emcc doesn't ship libomp, so
-  // any `#include <omp.h>` in the generated C breaks the build. Keeping
-  // the displayed C consistent with what actually compiles means
-  // translating with threads=1 here too.
   const { c, error } = useTranslation(
     sourceFiles,
     active ?? "",
     editorModel,
-    includeRuntime,
-    enableTempInlining,
-    1
+    includeRuntime
   );
 
   const handleEditorMount: OnMount = editorInstance => {
@@ -215,7 +201,6 @@ export function IDEWorkspace({ filesApi, header }: IDEWorkspaceProps) {
   const handleRun = () => {
     if (!active) return;
     exec.run(sourceFiles, active, {
-      enableTempInlining,
       fastMath,
       simd: wasmSimd,
       optLevel: wasmOptLevel,
@@ -306,8 +291,6 @@ export function IDEWorkspace({ filesApi, header }: IDEWorkspaceProps) {
               onIncludeRuntimeChange={setIncludeRuntime}
               profile={profile}
               onProfileChange={handleProfileChange}
-              enableTempInlining={enableTempInlining}
-              onEnableTempInliningChange={setEnableTempInlining}
               fastMath={fastMath}
               onFastMathChange={setFastMath}
               wasmOptLevel={wasmOptLevel}

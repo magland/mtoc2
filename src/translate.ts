@@ -40,14 +40,13 @@ export interface TranslateResult {
 }
 
 export interface TranslateOptions {
-  /** Reserved for future use; mtoc2 always inlines runtime helpers. */
+  /** When false, the emitter omits the activated runtime helpers
+   *  (replaced by a placeholder comment) — used by the IDE's "runtime
+   *  helpers" toggle to show user-level code in isolation. The result
+   *  is not compilable in that mode. Defaults to true. */
   includeRuntime?: boolean;
   /** Reserved for future use. */
   searchPaths?: ReadonlyArray<string>;
-  /** Reserved for future use. */
-  enableTempInlining?: boolean;
-  /** Reserved for future use. */
-  threads?: number | "auto";
 }
 
 export function translateProject(

@@ -20,9 +20,7 @@ export function useTranslation(
   files: SourceFile[],
   activeName: string,
   editorModel: editor.ITextModel | null,
-  includeRuntime: boolean = false,
-  enableTempInlining: boolean = false,
-  threads: number | "auto" = 1
+  includeRuntime: boolean = false
 ): UseTranslationResult {
   const [c, setC] = useState<string>("");
   const [error, setError] = useState<TranslateError | null>(null);
@@ -31,11 +29,7 @@ export function useTranslation(
 
   useEffect(() => {
     const handle = window.setTimeout(() => {
-      const result = translateProject(files, activeName, {
-        includeRuntime,
-        enableTempInlining,
-        threads,
-      });
+      const result = translateProject(files, activeName, { includeRuntime });
       if (result.error) {
         setError(result.error);
         // Keep the previously-good C source so the user can still see
@@ -47,7 +41,7 @@ export function useTranslation(
       }
     }, DEBOUNCE_MS);
     return () => window.clearTimeout(handle);
-  }, [files, activeName, includeRuntime, enableTempInlining, threads]);
+  }, [files, activeName, includeRuntime]);
 
   // Drive Monaco markers off of (error, editorModel, monaco).
   useEffect(() => {

@@ -26,14 +26,12 @@ interface CSourcePanelProps {
   activeName: string;
   includeRuntime: boolean;
   onIncludeRuntimeChange: (value: boolean) => void;
-  /** Last-selected optimization profile. Changing this resets the three
-   *  toggles below to the profile's defaults via `onProfileChange`; the
-   *  user can then override individual toggles without the dropdown
-   *  "drifting." */
+  /** Last-selected optimization profile. Changing this resets the
+   *  fast-math toggle below to the profile's default via
+   *  `onProfileChange`; the user can then override without the
+   *  dropdown "drifting." */
   profile: OptProfile;
   onProfileChange: (value: OptProfile) => void;
-  enableTempInlining: boolean;
-  onEnableTempInliningChange: (value: boolean) => void;
   /** `-ffast-math` toggle. Does NOT change the displayed C — only
    *  affects the compile-and-run output. Lives here alongside the
    *  other build toggles for a single place to find them. */
@@ -95,8 +93,6 @@ export function CSourcePanel({
   onIncludeRuntimeChange,
   profile,
   onProfileChange,
-  enableTempInlining,
-  onEnableTempInliningChange,
   fastMath,
   onFastMathChange,
   wasmOptLevel,
@@ -152,23 +148,6 @@ export function CSourcePanel({
               ))}
             </Select>
           </FormControl>
-          <Tooltip title="Inline single-use tensor temporaries.">
-            <FormControlLabel
-              sx={{ m: 0 }}
-              control={
-                <Switch
-                  size="small"
-                  checked={enableTempInlining}
-                  onChange={e => onEnableTempInliningChange(e.target.checked)}
-                />
-              }
-              label={
-                <Typography variant="caption" color="text.secondary">
-                  inline temps
-                </Typography>
-              }
-            />
-          </Tooltip>
           <Tooltip title="Compile with -ffast-math.">
             <FormControlLabel
               sx={{ m: 0 }}
