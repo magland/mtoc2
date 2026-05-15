@@ -97,6 +97,21 @@ export async function getFileContent(fileId: string): Promise<Uint8Array> {
   return record?.data ?? new Uint8Array(0);
 }
 
+export async function getAllFileContents(
+  projectName: string
+): Promise<Map<string, Uint8Array>> {
+  const fileIds = await db.files
+    .where("projectName")
+    .equals(projectName)
+    .primaryKeys();
+  const contents = await db.fileContents.bulkGet(fileIds);
+  const map = new Map<string, Uint8Array>();
+  for (let i = 0; i < fileIds.length; i++) {
+    map.set(fileIds[i], contents[i]?.data ?? new Uint8Array(0));
+  }
+  return map;
+}
+
 export async function saveFileData(
   fileId: string,
   data: Uint8Array

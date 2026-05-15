@@ -1,20 +1,13 @@
 import {
   Box,
   Alert,
-  FormControl,
   FormControlLabel,
-  MenuItem,
-  Select,
   Switch,
   Tooltip,
   Typography,
 } from "@mui/material";
 import Editor from "@monaco-editor/react";
 import type { TranslateError, SourceFile } from "../translate";
-import { OPT_PROFILES, type OptProfile } from "../optProfile";
-import type { WasmOptLevel } from "../utils/wasmExecution";
-
-const WASM_OPT_LEVELS: ReadonlyArray<WasmOptLevel> = ["O0", "O2", "O3"];
 
 interface CSourcePanelProps {
   c: string;
@@ -26,27 +19,6 @@ interface CSourcePanelProps {
   activeName: string;
   includeRuntime: boolean;
   onIncludeRuntimeChange: (value: boolean) => void;
-  /** Last-selected optimization profile. Changing this resets the
-   *  fast-math toggle below to the profile's default via
-   *  `onProfileChange`; the user can then override without the
-   *  dropdown "drifting." */
-  profile: OptProfile;
-  onProfileChange: (value: OptProfile) => void;
-  /** `-ffast-math` toggle. Does NOT change the displayed C — only
-   *  affects the compile-and-run output. Lives here alongside the
-   *  other build toggles for a single place to find them. */
-  fastMath: boolean;
-  onFastMathChange: (value: boolean) => void;
-  /** Optimization level for the WASM build (`emcc -O{0,2,3}`). */
-  wasmOptLevel: WasmOptLevel;
-  onWasmOptLevelChange: (value: WasmOptLevel) => void;
-  /** Whether to pass `-msimd128` to emcc. WASM-mode only. */
-  wasmSimd: boolean;
-  onWasmSimdChange: (value: boolean) => void;
-  /** True while a run is in flight — toggling fast-math mid-run
-   *  wouldn't take effect until the next run. We disable the switch
-   *  to make that obvious. */
-  isRunning: boolean;
 }
 
 const UNRESOLVED_PATTERN = /unresolved function or builtin '(\w+)'/;
@@ -91,15 +63,6 @@ export function CSourcePanel({
   activeName,
   includeRuntime,
   onIncludeRuntimeChange,
-  profile,
-  onProfileChange,
-  fastMath,
-  onFastMathChange,
-  wasmOptLevel,
-  onWasmOptLevelChange,
-  wasmSimd,
-  onWasmSimdChange,
-  isRunning,
 }: CSourcePanelProps) {
   return (
     <Box
@@ -127,104 +90,23 @@ export function CSourcePanel({
         >
           GENERATED C
         </Typography>
-        <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
-          <FormControl size="small" sx={{ m: 0 }}>
-            <Select
-              value={profile}
-              onChange={e => onProfileChange(e.target.value as OptProfile)}
-              variant="standard"
-              disableUnderline
-              renderValue={v => `opt: ${v}`}
-              sx={{
-                fontSize: 12,
-                color: "text.secondary",
-                "& .MuiSelect-select": { py: 0, pr: "18px !important" },
-              }}
-            >
-              {OPT_PROFILES.map(p => (
-                <MenuItem key={p} value={p} dense>
-                  <Typography variant="caption">opt: {p}</Typography>
-                </MenuItem>
-              ))}
-            </Select>
-          </FormControl>
-          <Tooltip title="Compile with -ffast-math.">
-            <FormControlLabel
-              sx={{ m: 0 }}
-              control={
-                <Switch
-                  size="small"
-                  checked={fastMath}
-                  onChange={e => onFastMathChange(e.target.checked)}
-                  disabled={isRunning}
-                />
-              }
-              label={
-                <Typography variant="caption" color="text.secondary">
-                  fast math
-                </Typography>
-              }
-            />
-          </Tooltip>
-          <FormControl size="small" sx={{ m: 0 }}>
-            <Select
-              value={wasmOptLevel}
-              onChange={e =>
-                onWasmOptLevelChange(e.target.value as WasmOptLevel)
-              }
-              variant="standard"
-              disableUnderline
-              renderValue={v => `-${v}`}
-              disabled={isRunning}
-              sx={{
-                fontSize: 12,
-                color: "text.secondary",
-                "& .MuiSelect-select": { py: 0, pr: "18px !important" },
-              }}
-            >
-              {WASM_OPT_LEVELS.map(p => (
-                <MenuItem key={p} value={p} dense>
-                  <Typography variant="caption">-{p}</Typography>
-                </MenuItem>
-              ))}
-            </Select>
-          </FormControl>
-          <Tooltip title="Compile WASM with -msimd128 for vectorized loops.">
-            <FormControlLabel
-              sx={{ m: 0 }}
-              control={
-                <Switch
-                  size="small"
-                  checked={wasmSimd}
-                  onChange={e => onWasmSimdChange(e.target.checked)}
-                  disabled={isRunning}
-                />
-              }
-              label={
-                <Typography variant="caption" color="text.secondary">
-                  simd
-                </Typography>
-              }
-            />
-          </Tooltip>
-          <Tooltip title="Show runtime helpers inline.">
-            <FormControlLabel
-              sx={{ m: 0 }}
-              control={
-                <Switch
-                  size="small"
-                  checked={includeRuntime}
-                  onChange={e => onIncludeRuntimeChange(e.target.checked)}
-                />
-              }
-              label={
-                <Typography variant="caption" color="text.secondary">
-                  runtime helpers
-                </Typography>
-              }
-            />
-          </Tooltip>
-        </Box>
+        <Tooltip title="Show runtime helpers inline.">
+          <FormControlLabel
+            sx={{ m: 0 }}
+            control={
+              <Switch
+                size="small"
+                checked={includeRuntime}
+                onChange={e => onIncludeRuntimeChange(e.target.checked)}
+              />
+            }
+            label={
+              <Typography variant="caption" color="text.secondary">
+                runtime helpers
+              </Typography>
+            }
+          />
+        </Tooltip>
       </Box>
       {error && (
         <Alert
