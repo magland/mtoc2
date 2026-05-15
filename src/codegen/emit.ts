@@ -24,13 +24,12 @@
 
 import type { IRExpr, IRStmt, IRFunc, IRProgram } from "../lowering/ir.js";
 import { getBuiltin } from "../lowering/builtins/index.js";
+import { cTypeFor, requireOwnedHelpers } from "./cHelpers.js";
 import {
   classTypedefName,
   handleTypedefName,
   isColVecTy,
   isDimOne,
-  isHandle,
-  isMultiElement,
   isNumeric,
   isOwned,
   isScalar,
@@ -112,7 +111,7 @@ export function emitProgram(prog: IRProgram, opts: EmitOptions = {}): string {
   const mainOwned = collectOwnedLocals(prog.topLevelStmts);
   for (const o of mainOwned) {
     activateOwnedRuntime(o.ty, state);
-    const h = ownedHelpersFor(o.ty);
+    const h = requireOwnedHelpers(o.ty);
     userParts.push(`  ${cTypeFor(o.ty)} ${o.cName} = ${h.empty}();`);
   }
   for (const o of collectHoistedScalarLocals(prog.topLevelStmts)) {
@@ -142,7 +141,7 @@ export function emitProgram(prog: IRProgram, opts: EmitOptions = {}): string {
   // every early-return path.
   for (const o of mainOwned) {
     activateOwnedRuntime(o.ty, state);
-    const h = ownedHelpersFor(o.ty);
+    const h = requireOwnedHelpers(o.ty);
     userParts.push(`  ${h.free}(&${o.cName});`);
   }
   userParts.push("  return 0;");
@@ -285,16 +284,6 @@ function topoSortNamedTypedefs(
   return out;
 }
 
-function cTypeFor(t: Type): string {
-  if (isMultiElement(t)) return "mtoc2_tensor_t";
-  if (isHandle(t)) return handleTypedefName(t);
-  if (t.kind === "Struct") return structTypedefName(t);
-  if (t.kind === "Class") return classTypedefName(t);
-  if (t.kind === "String") return "mtoc2_string_t";
-  if (t.kind === "Char") return "mtoc2_char_tensor_t";
-  return "double";
-}
-
 /** Default initializer for a freshly-declared non-owned local. Owned
  *  types (tensors, structs, classes, handles) route through their
  *  `_empty()` helper instead and never hit this path; everything
@@ -303,85 +292,8 @@ function defaultInitFor(): string {
   return "0.0";
 }
 
-/** Per-owned-kind helper-name family. Tensors use the global
- *  `mtoc2_tensor_*` runtime snippet names; structs and classes use
- *  their program-emitted `<typedef>_*` family. Pure POD owned isn't
- *  a thing — every owned type has all four helpers. */
-interface OwnedHelpers {
-  empty: string;
-  assign: string;
-  copy: string;
-  free: string;
-  /** When true, `assign`/`copy`/`free` are loaded from the runtime
-   *  snippet registry. When false, they're emitted directly into the
-   *  generated C by `emitNamedTypedef` and need no `useRuntimeByName`
-   *  activation. */
-  isRuntime: boolean;
-}
-
-function ownedHelpersFor(t: Type): OwnedHelpers {
-  if (isMultiElement(t)) {
-    return {
-      empty: "mtoc2_tensor_empty",
-      assign: "mtoc2_tensor_assign",
-      copy: "mtoc2_tensor_copy",
-      free: "mtoc2_tensor_free",
-      isRuntime: true,
-    };
-  }
-  if (t.kind === "String") {
-    return {
-      empty: "mtoc2_string_empty",
-      assign: "mtoc2_string_assign",
-      copy: "mtoc2_string_copy",
-      free: "mtoc2_string_free",
-      isRuntime: true,
-    };
-  }
-  if (t.kind === "Char") {
-    return {
-      empty: "mtoc2_char_tensor_empty",
-      assign: "mtoc2_char_tensor_assign",
-      copy: "mtoc2_char_tensor_copy",
-      free: "mtoc2_char_tensor_free",
-      isRuntime: true,
-    };
-  }
-  if (t.kind === "Struct") {
-    const name = structTypedefName(t);
-    return {
-      empty: `${name}_empty`,
-      assign: `${name}_assign`,
-      copy: `${name}_copy`,
-      free: `${name}_free`,
-      isRuntime: false,
-    };
-  }
-  if (t.kind === "Class") {
-    const name = classTypedefName(t);
-    return {
-      empty: `${name}_empty`,
-      assign: `${name}_assign`,
-      copy: `${name}_copy`,
-      free: `${name}_free`,
-      isRuntime: false,
-    };
-  }
-  if (t.kind === "Handle") {
-    const name = handleTypedefName(t);
-    return {
-      empty: `${name}_empty`,
-      assign: `${name}_assign`,
-      copy: `${name}_copy`,
-      free: `${name}_free`,
-      isRuntime: false,
-    };
-  }
-  throw new Error(`ownedHelpersFor: non-owned type ${typeToString(t)}`);
-}
-
 function activateOwnedRuntime(t: Type, state: RuntimeState): void {
-  const h = ownedHelpersFor(t);
+  const h = requireOwnedHelpers(t);
   if (h.isRuntime) {
     useRuntimeByName(state, h.empty);
     useRuntimeByName(state, h.assign);
@@ -543,7 +455,7 @@ function emitFunction(fn: IRFunc, state: RuntimeState): string {
     if (paramNames.has(cOut)) continue;
     if (outTy && isOwned(outTy)) {
       activateOwnedRuntime(outTy, state);
-      const h = ownedHelpersFor(outTy);
+      const h = requireOwnedHelpers(outTy);
       lines.push(`  ${cTypeFor(outTy)} ${cOut} = ${h.empty}();`);
     } else if (outTy !== undefined) {
       lines.push(`  ${cTypeFor(outTy)} ${cOut} = ${defaultInitFor()};`);
@@ -562,7 +474,7 @@ function emitFunction(fn: IRFunc, state: RuntimeState): string {
   );
   for (const o of owned) {
     activateOwnedRuntime(o.ty, state);
-    const h = ownedHelpersFor(o.ty);
+    const h = requireOwnedHelpers(o.ty);
     lines.push(`  ${cTypeFor(o.ty)} ${o.cName} = ${h.empty}();`);
   }
   // Pre-declare non-owned locals (scalars, For loop vars, multi-assign
@@ -630,7 +542,7 @@ function emitFunction(fn: IRFunc, state: RuntimeState): string {
       const outTy = fn.outputTypes[i];
       if (outTy && isOwned(outTy)) {
         activateOwnedRuntime(outTy, state);
-        const h = ownedHelpersFor(outTy);
+        const h = requireOwnedHelpers(outTy);
         lines.push(`  ${h.assign}(_mtoc2_o${i}, ${fn.cOutputs[i]});`);
       } else {
         lines.push(`  *_mtoc2_o${i} = ${fn.cOutputs[i]};`);
@@ -652,7 +564,7 @@ function emitFunction(fn: IRFunc, state: RuntimeState): string {
     // caller now owns.
     if (isMulti && outputCNames.has(o.cName)) continue;
     activateOwnedRuntime(o.ty, state);
-    const h = ownedHelpersFor(o.ty);
+    const h = requireOwnedHelpers(o.ty);
     lines.push(`  ${h.free}(&${o.cName});`);
   }
   if (isVoidFn) {
@@ -714,7 +626,7 @@ function emitBody(
         );
       }
       activateOwnedRuntime(ty, state);
-      const h = ownedHelpersFor(ty);
+      const h = requireOwnedHelpers(ty);
       out.push(`${indent}${h.free}(&${v});`);
     }
   }
@@ -734,7 +646,7 @@ function emitStmt(
     case "Assign": {
       if (isOwned(s.ty)) {
         activateOwnedRuntime(s.ty, state);
-        const h = ownedHelpersFor(s.ty);
+        const h = requireOwnedHelpers(s.ty);
         const rhs = emitOwnedRhs(s.expr, state);
         return `${indent}${h.assign}(&${s.cName}, ${rhs});`;
       }
@@ -745,7 +657,7 @@ function emitStmt(
       const slot = [s.base.cName, ...s.fieldPath].join(".");
       if (isOwned(s.leafTy)) {
         activateOwnedRuntime(s.leafTy, state);
-        const h = ownedHelpersFor(s.leafTy);
+        const h = requireOwnedHelpers(s.leafTy);
         const rhs = emitOwnedRhs(s.rhs, state);
         return `${indent}${h.assign}(&${slot}, ${rhs});`;
       }
@@ -914,7 +826,7 @@ function emitStmt(
             // extension.) Initialize the discard temp to an empty
             // handle so the callee's `_assign` sees a freeable slot.
             activateOwnedRuntime(slot.ty, state);
-            const h = ownedHelpersFor(slot.ty);
+            const h = requireOwnedHelpers(slot.ty);
             out.push(`${indent}  ${cTypeFor(slot.ty)} ${tmp} = ${h.empty}();`);
           } else {
             out.push(
@@ -934,7 +846,7 @@ function emitStmt(
         const slot = s.outputs[i];
         if (slot.binding === null && isOwned(slot.ty)) {
           activateOwnedRuntime(slot.ty, state);
-          const h = ownedHelpersFor(slot.ty);
+          const h = requireOwnedHelpers(slot.ty);
           out.push(`${indent}  ${h.free}(&_mtoc2_discard_${callIdx}_${i});`);
         }
       }
@@ -964,17 +876,17 @@ function emitStmt(
 function emitOwnedRhs(e: IRExpr, state: RuntimeState): string {
   if (e.kind === "Var") {
     activateOwnedRuntime(e.ty, state);
-    const h = ownedHelpersFor(e.ty);
+    const h = requireOwnedHelpers(e.ty);
     return `${h.copy}(${e.cName})`;
   }
   if (e.kind === "MemberLoad" && isOwned(e.ty)) {
     activateOwnedRuntime(e.ty, state);
-    const h = ownedHelpersFor(e.ty);
+    const h = requireOwnedHelpers(e.ty);
     return `${h.copy}(${emitMemberLoadBare(e, state)})`;
   }
   if (e.kind === "HandleCaptureLoad" && isOwned(e.ty)) {
     activateOwnedRuntime(e.ty, state);
-    const h = ownedHelpersFor(e.ty);
+    const h = requireOwnedHelpers(e.ty);
     return `${h.copy}(${e.base.cName}.cap_${e.captureName})`;
   }
   return emitExpr(e, state);

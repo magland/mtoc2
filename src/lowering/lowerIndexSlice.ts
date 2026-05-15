@@ -294,4 +294,3 @@ export function lowerSliceArg(
   }
   return { kind: "Range", start, step, end, span: arg.span };
 }
-

@@ -27,7 +27,6 @@
 import {
   classTypedefName,
   handleTypedefName,
-  isHandle,
   isMultiElement,
   structTypedefName,
   type ClassType,
@@ -35,67 +34,8 @@ import {
   type StructType,
   type Type,
 } from "../lowering/types.js";
+import { cTypeFor, ownedHelpersFor } from "./cHelpers.js";
 import { useRuntimeByName, type RuntimeState } from "./runtime.js";
-
-/** Catch-all C-type renderer that mirrors `cTypeFor` in emit.ts but
- *  also knows about structs and classes. Imported here as a small
- *  duplication to avoid a circular import with emit.ts. */
-export function cTypeForField(t: Type): string {
-  if (isMultiElement(t)) return "mtoc2_tensor_t";
-  if (isHandle(t)) return handleTypedefName(t);
-  if (t.kind === "Struct") return structTypedefName(t);
-  if (t.kind === "Class") return classTypedefName(t);
-  return "double";
-}
-
-/** Owned-helper family for a single field. Returns null for non-
- *  owned (POD) field types — those get plain assignment / no copy /
- *  no free. */
-interface FieldOwnedOps {
-  empty: string;
-  assign: string;
-  copy: string;
-  free: string;
-}
-
-function ownedOpsFor(t: Type): FieldOwnedOps | null {
-  if (isMultiElement(t)) {
-    return {
-      empty: "mtoc2_tensor_empty",
-      assign: "mtoc2_tensor_assign",
-      copy: "mtoc2_tensor_copy",
-      free: "mtoc2_tensor_free",
-    };
-  }
-  if (t.kind === "Struct") {
-    const name = structTypedefName(t);
-    return {
-      empty: `${name}_empty`,
-      assign: `${name}_assign`,
-      copy: `${name}_copy`,
-      free: `${name}_free`,
-    };
-  }
-  if (t.kind === "Class") {
-    const name = classTypedefName(t);
-    return {
-      empty: `${name}_empty`,
-      assign: `${name}_assign`,
-      copy: `${name}_copy`,
-      free: `${name}_free`,
-    };
-  }
-  if (t.kind === "Handle") {
-    const name = handleTypedefName(t);
-    return {
-      empty: `${name}_empty`,
-      assign: `${name}_assign`,
-      copy: `${name}_copy`,
-      free: `${name}_free`,
-    };
-  }
-  return null;
-}
 
 export interface NamedTypedefSpec {
   /** Typedef name. The C output uses this as both the struct tag and
@@ -142,7 +82,7 @@ export function emitNamedTypedef(
     lines.push(`  char _placeholder;`);
   } else {
     for (const f of spec.fields) {
-      lines.push(`  ${cTypeForField(f.ty)} ${f.name};`);
+      lines.push(`  ${cTypeFor(f.ty)} ${f.name};`);
     }
   }
   lines.push(`} ${spec.name};`);
@@ -157,7 +97,7 @@ export function emitNamedTypedef(
     lines.push(`  v._placeholder = 0;`);
   } else {
     for (const f of spec.fields) {
-      const ops = ownedOpsFor(f.ty);
+      const ops = ownedHelpersFor(f.ty);
       if (ops !== null) {
         lines.push(`  v.${f.name} = ${ops.empty}();`);
       } else {
@@ -175,7 +115,7 @@ export function emitNamedTypedef(
     lines.push(`  (void)p;`);
   } else {
     for (const f of spec.fields) {
-      const ops = ownedOpsFor(f.ty);
+      const ops = ownedHelpersFor(f.ty);
       if (ops !== null) {
         lines.push(`  ${ops.free}(&p->${f.name});`);
       }
@@ -192,7 +132,7 @@ export function emitNamedTypedef(
     lines.push(`  out._placeholder = v._placeholder;`);
   } else {
     for (const f of spec.fields) {
-      const ops = ownedOpsFor(f.ty);
+      const ops = ownedHelpersFor(f.ty);
       if (ops !== null) {
         lines.push(`  out.${f.name} = ${ops.copy}(v.${f.name});`);
       } else {
