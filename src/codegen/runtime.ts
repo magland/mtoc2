@@ -322,6 +322,18 @@ const REGISTRY: ReadonlyMap<string, RuntimeSnippet> = new Map<
       "mtoc2_tensor_assign",
     ]),
   ],
+  // `meshgrid(x, y)` — single-output (returns X) plus multi-output
+  // `[X, Y] = meshgrid(x, y)` / `[X, Y] = meshgrid(x)`. One snippet
+  // defines all three entry points (the 1-arg multi-output thunks
+  // through the 2-arg version).
+  [
+    "mtoc2_meshgrid",
+    loadSnippet("tensor_meshgrid.h", [
+      "mtoc2_tensor_t",
+      "mtoc2_tensor_alloc",
+      "mtoc2_tensor_assign",
+    ]),
+  ],
   // `assert(cond, msg)` runtime check (scalar cond). The truthy fast
   // path returns immediately; failure writes the message to stderr
   // and aborts.

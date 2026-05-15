@@ -11,6 +11,10 @@ test_sum_unknown_shape_row_vector_field();
 test_exact_finite_discipline();
 test_eye_basics();
 test_eye_runtime();
+test_meshgrid_two_arg();
+test_meshgrid_one_arg();
+test_meshgrid_single_output();
+test_meshgrid_opaque_inputs();
 
 function test_construct_trim_trailing()
   A = zeros(3, 2, 1);
@@ -113,4 +117,38 @@ function test_eye_runtime()
   m = 2;
   %!numbl:opaque m
   disp(eye(m, n));
+end
+
+function test_meshgrid_two_arg()
+  [X, Y] = meshgrid([1 2 3], [10 20]);
+  disp(X);
+  disp(Y);
+  disp(size(X));
+end
+
+function test_meshgrid_one_arg()
+  [X, Y] = meshgrid([1 2 3]);
+  disp(X);
+  disp(Y);
+end
+
+function test_meshgrid_single_output()
+  X = meshgrid([1 2], [10 20 30]);
+  disp(X);
+  Z = meshgrid([5 6 7]);
+  disp(Z);
+end
+
+function test_meshgrid_opaque_inputs()
+  % Force the runtime path by hiding the exact data behind an opaque
+  % marker; both single-output and multi-output cases should still
+  % produce the same grids as the type-folded path above.
+  x = [1 2 3 4];
+  y = [10 20 30];
+  %!numbl:opaque x y
+  [X, Y] = meshgrid(x, y);
+  disp(X);
+  disp(Y);
+  Z = meshgrid(x, y);
+  disp(Z);
 end

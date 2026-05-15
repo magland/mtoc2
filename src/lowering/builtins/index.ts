@@ -50,6 +50,7 @@ import { transpose } from "./shape/transpose.js";
 import { size } from "./shape/size.js";
 import { flipud, fliplr, flip } from "./shape/flip.js";
 import { sort } from "./shape/sort.js";
+import { meshgrid } from "./shape/meshgrid.js";
 import { assert as assertBuiltin } from "./diag/assert.js";
 import { tic } from "./system/tic.js";
 import { toc } from "./system/toc.js";
@@ -123,6 +124,7 @@ for (const b of [
   fliplr,
   flip,
   sort,
+  meshgrid,
   assertBuiltin,
   tic,
   toc,
