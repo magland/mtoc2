@@ -1,11 +1,16 @@
-function chnkr = chunkerfunc(fcurve)
+function chnkr = chunkerfunc(fcurve, maxchunklen)
 %CHUNKERFUNC simplified chunker construction for a closed 2D curve.
 %
 % Targets the chunkie example:
-%   chnkr = chunkerfunc(@(t) ctr + rad*[cos(t(:).'); sin(t(:).')]);
+%   chnkr = chunkerfunc(@(t) ctr + rad*[cos(t(:).'); sin(t(:).')], 0);
+%
+% Second arg is the maximum chunk arclength. Pass 0 for "no constraint"
+% (the spectral resolution test alone decides chunking). The original
+% chunkie API passes a struct (`struct('maxchunklen', ...)`); mtoc2 is
+% fixed-arity so we take the scalar directly.
 %
 % Compared to chunkie/chunkerfunc.m this version drops:
-%   - cparams / pref arguments (defaults inlined)
+%   - cparams / pref arguments (most defaults inlined)
 %   - try/catch on the curve's output count (single-output assumed:
 %     fcurve(t) returns a dim x length(t) array of positions; first
 %     and second derivatives are obtained from the spectral
@@ -106,7 +111,13 @@ for ijk = 1:maxiter_res
         total_curve = (b - a) / 2 * (abs(dkappa) * ws2(:));
         total_curve_test = total_curve >= (2*pi) / 3;
 
-        if resol_speed_test || resol_curve_test || total_curve_test
+        % maxchunklen test: chunk arclength must stay below maxchunklen
+        % when maxchunklen > 0. We approximate arclength as the
+        % Gauss-Legendre quadrature of |r'(t)| on the (k2-node) panel.
+        chunk_len = (b - a) / 2 * (vd * ws2(:));
+        max_len_test = (maxchunklen > 0) && (chunk_len > maxchunklen);
+
+        if resol_speed_test || resol_curve_test || total_curve_test || max_len_test
             % subdivide
             if nch + 1 > nchmax
                 error('chunkerfunc:nchmax', ...
