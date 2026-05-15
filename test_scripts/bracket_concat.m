@@ -21,6 +21,9 @@ test_concat_after_transpose();
 test_singleton_tensor();
 test_singleton_scalar();
 test_exact_fold_small();
+test_concat_dynamic_vert_close_loop();
+test_concat_dynamic_vert_two_tensors();
+test_concat_dynamic_horz_with_scalar();
 
 function test_vertcat_scalar_rows()
   disp([1 2 3; 4 5 6]);
@@ -170,4 +173,43 @@ end
 
 function s = row_sum(m)
   s = sum(m(:));
+end
+
+% -------- runtime-shape (TensorConcatDynamic) cells --------
+
+function test_concat_dynamic_vert_close_loop()
+  % Chunkie pattern: take a column vector of runtime length, append
+  % its first element to close the loop. The cell shapes are
+  % `[?,1]` and `[1,1]`, both with statically-known cols=1 but the
+  % first cell's rows is unknown.
+  n = 4;
+  %!numbl:opaque n
+  v = zeros(n, 1);
+  v(1) = 10;
+  v(2) = 20;
+  v(3) = 30;
+  v(4) = 40;
+  disp([v; v(1)]);
+end
+
+function test_concat_dynamic_vert_two_tensors()
+  % Two runtime-length column vectors vertcat'd together.
+  n = 3;
+  m = 2;
+  %!numbl:opaque n m
+  a = zeros(n, 1);
+  b = zeros(m, 1);
+  a(1) = 1; a(2) = 2; a(3) = 3;
+  b(1) = 100; b(2) = 200;
+  disp([a; b]);
+end
+
+function test_concat_dynamic_horz_with_scalar()
+  % Horizontal concat where the tensor cell has runtime cols.
+  n = 4;
+  %!numbl:opaque n
+  row = zeros(1, n);
+  row(1) = 5; row(2) = 6; row(3) = 7; row(4) = 8;
+  disp([row, 99]);
+  disp([99, row]);
 end

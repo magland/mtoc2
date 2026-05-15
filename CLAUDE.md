@@ -78,6 +78,12 @@ mtoc2 is a _static_ translator. Anything outside the supported subset raises
   single-arg square form `zeros(n)` / `ones(n)` with a runtime `n`
   routes through `mtoc2_tensor_<kind>_square` so the source
   expression is evaluated exactly once. Bracket syntax stays 2-D-only.
+  Bracket concat `[a, b; c, d]` accepts cells with runtime-only dims
+  (e.g. `[v; v(1)]` where `v` is a column vector of unknown length).
+  The IR's `TensorConcat` carries per-row heights and per-cell cols as
+  `number | null`; codegen takes a static fast path when everything is
+  known and a dynamic path (running `long` row/col accumulators, with
+  `.dims[k]` queried per cell) otherwise.
 - **Reshape**: `reshape(A, d1, …, dN)` (Form A) and
   `reshape(A, [d1, …, dN])` (Form B). 1..`MTOC2_MAX_NDIM` axes total,
   trailing exact singletons stripped down to a 2-axis minimum. Form
