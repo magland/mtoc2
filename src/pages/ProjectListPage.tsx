@@ -26,7 +26,7 @@ import AddIcon from "@mui/icons-material/Add";
 import DeleteIcon from "@mui/icons-material/Delete";
 import EditIcon from "@mui/icons-material/Edit";
 import GitHubIcon from "@mui/icons-material/GitHub";
-import { useNavigate, Link as RouterLink } from "react-router-dom";
+import { Link as RouterLink } from "react-router-dom";
 import { CreateProjectDialog } from "../components/CreateProjectDialog";
 import { listProjects, deleteProject, renameProject } from "../db/operations";
 import { validateProjectName } from "../utils/validation";
@@ -47,7 +47,6 @@ function formatDate(timestamp: number): string {
 }
 
 export function ProjectListPage() {
-  const navigate = useNavigate();
   const [projects, setProjects] = useState<Project[] | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<Project | null>(null);
@@ -163,10 +162,6 @@ export function ProjectListPage() {
                         color: "inherit",
                         textDecoration: "none",
                         fontFamily: "monospace",
-                      }}
-                      onClick={e => {
-                        e.preventDefault();
-                        navigate(`/project/${p.name}`);
                       }}
                     >
                       {p.displayName || p.name}

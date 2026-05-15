@@ -1305,11 +1305,9 @@ function emitSliceSlotSetup(
   state: RuntimeState,
   lines: string[],
   indent: string,
-  slots: ReadonlyArray<IRExpr extends never ? never : { kind: string }>,
   slotsTyped: ReadonlyArray<import("../lowering/ir.js").IndexSliceArg>,
   baseCName: string
 ): string[] {
-  void slots;
   const slotSrc: string[] = [];
   for (let i = 0; i < slotsTyped.length; i++) {
     const slot = slotsTyped[i];
@@ -1696,7 +1694,7 @@ function emitIndexSliceProducer(
 
   // Multi-slot per-axis form.
   const ndim = e.index.length;
-  const slotSrc = emitSliceSlotSetup(state, lines, "", [], e.index, baseCName);
+  const slotSrc = emitSliceSlotSetup(state, lines, "", e.index, baseCName);
   const resultRank =
     e.ty.kind === "Numeric" ? Math.max(2, e.ty.dims.length) : 2;
   const dimsList: string[] = [];
@@ -1843,7 +1841,6 @@ function emitIndexSliceStore(
     state,
     lines,
     `${indent}  `,
-    [],
     s.index,
     baseCName
   );

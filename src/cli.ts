@@ -24,7 +24,7 @@ import {
   mkdtempSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve, basename } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { createInterface } from "node:readline";
 
@@ -317,7 +317,6 @@ async function main(): Promise<void> {
     return;
   }
   usage();
-  void basename;
 }
 
 main().catch(err => {

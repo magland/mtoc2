@@ -61,7 +61,7 @@ interface TouchCtx {
 
 /** Owned C-names read by an IR expression. Only owned `Var` nodes
  *  contribute; scalars and literals do not. */
-export function collectOwnedVarsInExpr(e: IRExpr, out: Set<string>): void {
+function collectOwnedVarsInExpr(e: IRExpr, out: Set<string>): void {
   forEachSubExpr(e, sub => {
     if (sub.kind === "Var" && isOwned(sub.ty)) out.add(sub.cName);
   });
@@ -70,7 +70,7 @@ export function collectOwnedVarsInExpr(e: IRExpr, out: Set<string>): void {
 /** Top-level owned uses for a statement — owned vars read at this
  *  statement's level (NOT recursing into control-flow bodies; nested
  *  uses are accounted for in the body's per-stmt future-touch results). */
-export function topLevelOwnedUses(s: IRStmt): Set<string> {
+function topLevelOwnedUses(s: IRStmt): Set<string> {
   const out = new Set<string>();
   forEachTopLevelExpr(s, e => collectOwnedVarsInExpr(e, out));
   return out;
@@ -80,7 +80,7 @@ export function topLevelOwnedUses(s: IRStmt): Set<string> {
  *  LHS contributes. `MultiAssignCall` slots with an owned binding also
  *  contribute (each named slot is effectively an Assign of the call's
  *  i-th output). */
-export function topLevelOwnedDefs(s: IRStmt): Set<string> {
+function topLevelOwnedDefs(s: IRStmt): Set<string> {
   const out = new Set<string>();
   if (s.kind === "Assign" && isOwned(s.ty)) {
     out.add(s.cName);

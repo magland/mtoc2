@@ -49,18 +49,6 @@ function generateUniqueName(files: WorkspaceFile[]): string {
   }
 }
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-function debounce<T extends (...args: any[]) => any>(
-  fn: T,
-  delay: number
-): (...args: Parameters<T>) => void {
-  let timeoutId: ReturnType<typeof setTimeout>;
-  return (...args: Parameters<T>) => {
-    clearTimeout(timeoutId);
-    timeoutId = setTimeout(() => fn(...args), delay);
-  };
-}
-
 export function useShareProjectFiles(): UseProjectFilesResult & {
   urlSizeTooLarge: boolean;
 } {
@@ -69,6 +57,7 @@ export function useShareProjectFiles(): UseProjectFilesResult & {
   const [loading, setLoading] = useState(true);
   const [urlSizeTooLarge, setUrlSizeTooLarge] = useState(false);
   const contentMapRef = useRef(new Map<string, Uint8Array>());
+  const updateUrlTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     try {
@@ -102,9 +91,12 @@ export function useShareProjectFiles(): UseProjectFilesResult & {
     }
   }, []);
 
-  const debouncedUpdateUrl = useMemo(
-    () =>
-      debounce((currentFiles: WorkspaceFile[], currentActiveId: string) => {
+  const debouncedUpdateUrl = useCallback(
+    (currentFiles: WorkspaceFile[], currentActiveId: string) => {
+      if (updateUrlTimerRef.current !== null) {
+        clearTimeout(updateUrlTimerRef.current);
+      }
+      updateUrlTimerRef.current = setTimeout(() => {
         try {
           const encoded = encodeShareData(
             currentFiles,
@@ -117,7 +109,8 @@ export function useShareProjectFiles(): UseProjectFilesResult & {
         } catch (e) {
           console.error("Failed to update share URL:", e);
         }
-      }, 500),
+      }, 500);
+    },
     []
   );
 

@@ -1248,7 +1248,7 @@ export class Lowerer {
 
   private lowerIf(s: Extract<Stmt, { type: "If" }>): IRStmt | IRStmt[] {
     const cond = this.lowerExpr(s.cond);
-    this.requireScalarCond(cond.ty, "if condition", s.span);
+    this.requireScalarReal(cond.ty, "if condition", s.span);
 
     // If-fold: when the top cond is exact, take/drop the then-arm and
     // recurse on the remaining elseif chain. The cond's COMPUTATION is
@@ -1333,7 +1333,7 @@ export class Lowerer {
     const [first, ...rest] = elseifs;
     this.env = new Map(envBefore);
     const ec = this.lowerExpr(first.cond);
-    this.requireScalarCond(ec.ty, "elseif condition", first.cond.span);
+    this.requireScalarReal(ec.ty, "elseif condition", first.cond.span);
     const beforeBody = new Map(this.env);
 
     this.env = beforeBody;
@@ -1366,7 +1366,7 @@ export class Lowerer {
     // post-loop values.
     stripExactFromEnv(this.env, collectAssignedNames(s.body));
     const cond = this.lowerExpr(s.cond);
-    this.requireScalarCond(cond.ty, "while condition", s.span);
+    this.requireScalarReal(cond.ty, "while condition", s.span);
     const body = this.lowerStmts(s.body);
     this.env = this.mergeBranchEnvs([envBefore, this.env]);
     return { kind: "While", cond, body, span: s.span };
@@ -3328,19 +3328,16 @@ export class Lowerer {
 
   // ── Helpers ───────────────────────────────────────────────────────────
 
-  private requireScalarCond(t: Type, what: string, span: Span): void {
+  private requireScalarReal(
+    t: Type,
+    what: string,
+    span: Span,
+    detail?: string
+  ): void {
     if (!isScalarRealNumeric(t)) {
+      const suffix = detail ? ` ${detail}` : "";
       throw new UnsupportedConstruct(
-        `${what} must be a scalar real numeric for MVP (got non-scalar/non-real)`,
-        span
-      );
-    }
-  }
-
-  private requireScalarReal(t: Type, what: string, span: Span): void {
-    if (!isScalarRealNumeric(t)) {
-      throw new UnsupportedConstruct(
-        `${what} must be a scalar real numeric for MVP`,
+        `${what} must be a scalar real numeric${suffix}`,
         span
       );
     }

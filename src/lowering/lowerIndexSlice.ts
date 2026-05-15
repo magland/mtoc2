@@ -311,5 +311,3 @@ function isColVecTy(t: NumericType): boolean {
     isDimOne(t.dims[1])
   );
 }
-
-void isNumeric;

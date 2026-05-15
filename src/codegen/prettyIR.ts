@@ -82,7 +82,7 @@ function numLitText(v: number): string {
   return v.toString();
 }
 
-export function irExprToString(e: IRExpr): string {
+function irExprToString(e: IRExpr): string {
   switch (e.kind) {
     case "NumLit":
       return numLitText(e.value);
