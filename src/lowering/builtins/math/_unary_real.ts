@@ -43,6 +43,35 @@ export interface UnaryRealMathOpts {
   requireDomain?: (t: NumericType, span: Span) => void;
 }
 
+/** Sign rule for rounding-toward-zero builtins (`fix`, `round`, `ceil`,
+ *  `floor`). Captures the "may collapse to zero" pattern: if a side of
+ *  the number line can land on 0, its strict-sign input weakens to the
+ *  corresponding non-strict sign. The flags say whether the operation's
+ *  rounding direction can reach 0 from that side.
+ *
+ *  - `positive` weakens to `nonneg` when `positiveCanLand` is true.
+ *  - `negative` weakens to `nonpositive` when `negativeCanLand` is true.
+ *  - `nonzero` weakens to `unknown` whenever EITHER flag is true (a
+ *    nonzero input could now be a zero output).
+ *  - every other sign passes through.
+ *
+ *  `fix` / `round` set both flags; `floor` sets only positive; `ceil`
+ *  sets only negative.
+ */
+export function roundingSignRule(
+  positiveCanLand: boolean,
+  negativeCanLand: boolean
+): (t: NumericType) => Sign {
+  return t => {
+    if (t.sign === "positive" && positiveCanLand) return "nonneg";
+    if (t.sign === "negative" && negativeCanLand) return "nonpositive";
+    if (t.sign === "nonzero" && (positiveCanLand || negativeCanLand)) {
+      return "unknown";
+    }
+    return t.sign;
+  };
+}
+
 export function defineUnaryRealMath(opts: UnaryRealMathOpts): Builtin {
   const { name, cFnReal, jsFn, signRule, requireDomain } = opts;
   return {

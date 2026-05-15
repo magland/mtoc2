@@ -1,18 +1,10 @@
-import { defineUnaryRealMath } from "./_unary_real.js";
+import { defineUnaryRealMath, roundingSignRule } from "./_unary_real.js";
 
-/** `ceil(x)` rounds toward +Inf. Sign rule mirrors `floor`:
- *   - `negative` input may land on 0 (e.g. `ceil(-0.5) = 0`), so the
- *     output is `nonpositive` (not `negative`).
- *   - `positive` / `nonneg` / `nonpositive` / `zero` all pass through.
- *   - `nonzero` / `unknown` → `unknown`.
- */
+/** `ceil(x)` rounds toward +Inf. Only `negative` inputs may land on 0
+ *  (e.g. `ceil(-0.5) = 0`); `positive` inputs are bounded away. */
 export const ceil = defineUnaryRealMath({
   name: "ceil",
   cFnReal: "ceil",
   jsFn: Math.ceil,
-  signRule: t => {
-    if (t.sign === "negative") return "nonpositive";
-    if (t.sign === "nonzero") return "unknown";
-    return t.sign;
-  },
+  signRule: roundingSignRule(false, true),
 });
