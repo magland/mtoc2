@@ -100,6 +100,16 @@ class __rt_Ptr {
 
 function __rt_reinterpretPtr(p, kind) { return p; }
 
+// Monomorphic fast-path indexers used by codegen for pointer-to-numeric
+// element types (double, float, int, bool — i.e. anything where the
+// backing storage is a TypedArray and string literals can't flow in).
+// Assumes \`p\` is a \`__rt_Ptr\`; bypasses the null/string/raw-array
+// branching of \`__rt_Ptr.at\` so V8 can inline the indexed load. The
+// polymorphic \`__rt_Ptr.at\` / \`setAt\` remain for char* and other
+// callers that need the slow path.
+function __rt_at(p, i) { return p.b[p.o + (i | 0)]; }
+function __rt_setAt(p, i, v) { p.b[p.o + (i | 0)] = v; return v; }
+
 function __rt_sizeofArr(p) {
   if (p == null) return 0;
   if (p instanceof __rt_Ptr) return (p.b.length || 0) - p.o;

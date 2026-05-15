@@ -90,6 +90,23 @@
     r.imag = NULL;                                                          \
     r.ndim = rnd;                                                           \
     for (int i = 0; i < rnd; i++) r.dims[i] = rdim[i];                      \
+    /* 2-D fast path: avoids the per-element ndim-D index update and the   \
+     * per-element stride-vector dot product. Most MATLAB bcast uses are   \
+     * 2-D (row-vector OP column-vector style), and on the JS target this  \
+     * specialization removes the dominant tensor-binop cost. */           \
+    if (rnd == 2) {                                                         \
+      long d0 = rdim[0], d1 = rdim[1];                                      \
+      long as0 = astride[0], as1 = astride[1];                              \
+      long bs0 = bstride[0], bs1 = bstride[1];                              \
+      long k = 0;                                                           \
+      for (long i1 = 0; i1 < d1; i1++) {                                    \
+        long aoff1 = i1 * as1, boff1 = i1 * bs1;                            \
+        for (long i0 = 0; i0 < d0; i0++) {                                  \
+          r.real[k++] = a.real[aoff1 + i0 * as0] OP b.real[boff1 + i0 * bs0]; \
+        }                                                                   \
+      }                                                                     \
+      return r;                                                             \
+    }                                                                       \
     long ix[MTOC2_MAX_NDIM] = {0};                                          \
     for (long k = 0; k < n; k++) {                                          \
       long ai = 0, bi = 0;                                                  \

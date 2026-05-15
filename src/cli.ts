@@ -38,10 +38,10 @@ import type { PlotInstruction } from "../../numbl/src/graphics/types.js";
 
 function usage(): never {
   console.error(
-    "usage: mtoc2 run [--js] [--plot] [--check-leaks] [--path <dir>...] <script.m>"
+    "usage: mtoc2 run [--js] [--plot] [--check-leaks] [--dump-c <path>] [--dump-js <path>] [--path <dir>...] <script.m>"
   );
   console.error(
-    '       mtoc2 eval [--js] [--plot] [--check-leaks] [--path <dir>...] "<code>"'
+    '       mtoc2 eval [--js] [--plot] [--check-leaks] [--dump-c <path>] [--dump-js <path>] [--path <dir>...] "<code>"'
   );
   console.error("       mtoc2 translate <script.m> [-o out.c]");
   process.exit(2);
@@ -171,6 +171,13 @@ interface RunOptions {
    *  are intercepted the same way as the native path — the JS runtime
    *  writes the same `\x1emtoc2:plot\t...` lines via `process.stdout`. */
   js?: boolean;
+  /** If set, write the translated C source to this path before
+   *  compiling / translating to JS. Useful for inspecting what mtoc2
+   *  produced without re-running `translate`. */
+  dumpC?: string;
+  /** If set, write the c2js-translated JavaScript source to this path
+   *  before running it. Only meaningful with `--js`. */
+  dumpJs?: string;
 }
 
 /** Compile and execute a translated C source. Shared by `run` and
@@ -178,6 +185,7 @@ interface RunOptions {
  *  pipeline (compile via `cc`, spawn the binary, intercept plot
  *  records, wait for exit + plot server close). */
 async function runCSource(cSrc: string, opts: RunOptions = {}): Promise<void> {
+  if (opts.dumpC) writeFileSync(opts.dumpC, cSrc);
   const dir = mkdtempSync(join(tmpdir(), "mtoc2-"));
   const cFile = join(dir, "out.c");
   const exeFile = join(dir, "out");
@@ -252,7 +260,9 @@ async function runCSource(cSrc: string, opts: RunOptions = {}): Promise<void> {
  *  runtime writes `printf` output to `process.stdout`, so the plot
  *  prefix is byte-for-byte identical to the C path. */
 async function runJsSource(cSrc: string, opts: RunOptions = {}): Promise<void> {
+  if (opts.dumpC) writeFileSync(opts.dumpC, cSrc);
   const jsSrc = translateCToJs(cSrc);
+  if (opts.dumpJs) writeFileSync(opts.dumpJs, jsSrc);
   const dir = mkdtempSync(join(tmpdir(), "mtoc2-"));
   const jsFile = join(dir, "out.js");
   writeFileSync(jsFile, jsSrc);
@@ -304,6 +314,8 @@ function parseRunEvalArgs(argv: string[]): {
   let checkLeaks = false;
   let plot = false;
   let js = false;
+  let dumpC: string | undefined;
+  let dumpJs: string | undefined;
   const extraPaths: string[] = [];
   let positional: string | null = null;
   for (let i = 0; i < argv.length; i++) {
@@ -317,6 +329,18 @@ function parseRunEvalArgs(argv: string[]): {
         process.exit(2);
       }
       extraPaths.push(argv[++i]);
+    } else if (a === "--dump-c") {
+      if (i + 1 >= argv.length) {
+        console.error("Error: --dump-c requires a path argument");
+        process.exit(2);
+      }
+      dumpC = argv[++i];
+    } else if (a === "--dump-js") {
+      if (i + 1 >= argv.length) {
+        console.error("Error: --dump-js requires a path argument");
+        process.exit(2);
+      }
+      dumpJs = argv[++i];
     } else if (a.startsWith("--")) {
       console.error(`Error: unknown option '${a}'`);
       usage();
@@ -327,7 +351,11 @@ function parseRunEvalArgs(argv: string[]): {
     }
   }
   if (positional === null) usage();
-  return { positional, extraPaths, opts: { checkLeaks, plot, js } };
+  return {
+    positional,
+    extraPaths,
+    opts: { checkLeaks, plot, js, dumpC, dumpJs },
+  };
 }
 
 async function main(): Promise<void> {

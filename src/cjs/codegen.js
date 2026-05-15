@@ -114,6 +114,17 @@ function typedArrayCtor(elemT) {
   return 'Array';
 }
 
+// Element-type predicate for the monomorphic `__rt_at` / `__rt_setAt`
+// fast path. True for pointers/arrays whose element is a pure numeric
+// scalar — double, float, int (covers short/long via parser collapse),
+// bool. Excludes char* (string literals may flow through), void*, and
+// pointer-to-anything-else (struct fields, function pointers).
+function isNumericElem(elemT) {
+  if (!elemT || elemT.kind !== 'base') return false;
+  return elemT.name === 'double' || elemT.name === 'float'
+      || elemT.name === 'int' || elemT.name === 'bool';
+}
+
 // ============================================================
 // Top-level emission
 // ============================================================
@@ -155,7 +166,11 @@ function emitStructCloneFn(typedefName, fields, ctx) {
   let s = `function ${fnName}(s) { return {\n`;
   for (const f of fields) {
     if (isArray(f.type)) {
-      s += `  ${f.name}: s.${f.name} == null ? null : Array.from(s.${f.name}),\n`;
+      // Struct array fields are stored as `__rt_Ptr.wrap(new TypedArray(...))`
+      // so the monomorphic `__rt_at` fast path can index them. Clone by
+      // copying the underlying buffer and rewrapping; preserves both
+      // representation and value semantics.
+      s += `  ${f.name}: s.${f.name} == null ? null : __rt_Ptr.wrap(s.${f.name}.b.slice()),\n`;
     } else {
       s += `  ${f.name}: s.${f.name},\n`;
     }
@@ -422,6 +437,16 @@ function genVarInit(d, scope, ctx) {
   return '0';
 }
 
+function newArrayJs(ctor, sz) {
+  // Allocate a default-filled array of the given JS constructor. Returns
+  // a `__rt_Ptr`-wrapped buffer in all cases so that downstream code can
+  // use the monomorphic `__rt_at` / `__rt_setAt` fast path. (If we left
+  // typed-array fields bare, the fast path would have to branch on
+  // `instanceof __rt_Ptr` and V8 would deoptimize to the slow path.)
+  if (ctor === 'Array') return `__rt_Ptr.wrap(new Array(${sz}).fill(0))`;
+  return `__rt_Ptr.wrap(new ${ctor}(${sz}))`;
+}
+
 function emitStructDefault(t, ctx) {
   const fields = getStructFields(t, ctx);
   if (!fields) return '{}';
@@ -430,8 +455,7 @@ function emitStructDefault(t, ctx) {
     if (isArray(f.type)) {
       const sz = f.arraySize ? evalConstSize(f.arraySize) : 0;
       const ctor = typedArrayCtor(f.type.element);
-      if (ctor === 'Array') parts.push(`${f.name}: new Array(${sz}).fill(0)`);
-      else parts.push(`${f.name}: new ${ctor}(${sz})`);
+      parts.push(`${f.name}: ${newArrayJs(ctor, sz)}`);
     } else if (isPtr(f.type)) {
       parts.push(`${f.name}: null`);
     } else if (isStruct(f.type, ctx)) {
@@ -493,8 +517,8 @@ function emitInitValueForField(e, f, scope, ctx) {
     const sz = evalConstSize(f.arraySize);
     const items = e.elems.map(x => emitExpr(x, scope, ctx).js);
     while (items.length < sz) items.push('0');
-    if (ctor === 'Array') return `[${items.join(', ')}]`;
-    return `new ${ctor}([${items.join(', ')}])`;
+    const body = ctor === 'Array' ? `[${items.join(', ')}]` : `new ${ctor}([${items.join(', ')}])`;
+    return `__rt_Ptr.wrap(${body})`;
   }
   if (isStruct(f.type, ctx) && e.kind === 'InitList') {
     return emitStructInitList(e, getStructFields(f.type, ctx), scope, ctx);
@@ -506,8 +530,7 @@ function defaultJsForField(f, ctx) {
   if (isArray(f.type)) {
     const sz = evalConstSize(f.arraySize);
     const ctor = typedArrayCtor(f.type.element);
-    if (ctor === 'Array') return `new Array(${sz}).fill(0)`;
-    return `new ${ctor}(${sz})`;
+    return newArrayJs(ctor, sz);
   }
   if (isPtr(f.type)) return 'null';
   if (isStruct(f.type, ctx)) return emitStructDefault(f.type, ctx);
@@ -878,11 +901,15 @@ function emitAssign(e, scope, ctx) {
     const objInfo = emitExpr(e.target.object, scope, ctx);
     const idx = emitExpr(e.target.index, scope, ctx);
     if (isPtr(objInfo.type) || isArrayPtr(objInfo.type)) {
+      const et = elemType(objInfo.type);
+      const fast = isNumericElem(et);
+      const setFn = fast ? '__rt_setAt' : '__rt_Ptr.setAt';
+      const atFn = fast ? '__rt_at' : '__rt_Ptr.at';
       if (e.op === '=') {
-        return { js: `__rt_Ptr.setAt(${objInfo.js}, ${idx.js}, ${value.js})`, type: target.type };
+        return { js: `${setFn}(${objInfo.js}, ${idx.js}, ${value.js})`, type: target.type };
       }
       const rhsOp = e.op.slice(0, -1);
-      return { js: `__rt_Ptr.setAt(${objInfo.js}, ${idx.js}, __rt_Ptr.at(${objInfo.js}, ${idx.js}) ${rhsOp} (${value.js}))`, type: target.type };
+      return { js: `${setFn}(${objInfo.js}, ${idx.js}, ${atFn}(${objInfo.js}, ${idx.js}) ${rhsOp} (${value.js}))`, type: target.type };
     }
     // plain JS array/object indexing
     return { js: `(${objInfo.js})[${idx.js}] ${e.op} (${value.js})`, type: target.type };
@@ -965,6 +992,9 @@ function emitIndex(e, scope, ctx) {
   const idx = emitExpr(e.index, scope, ctx);
   if (isPtr(objInfo.type) || isArray(objInfo.type)) {
     const et = elemType(objInfo.type);
+    if (isNumericElem(et)) {
+      return { js: `__rt_at(${objInfo.js}, ${idx.js})`, type: et };
+    }
     return { js: `__rt_Ptr.at(${objInfo.js}, ${idx.js})`, type: et };
   }
   return { js: `(${objInfo.js})[${idx.js}]`, type: null };
@@ -1007,11 +1037,58 @@ function emitCast(e, scope, ctx) {
     }
     const tac = typedArrayCtor(inner);
     if (tac && tac !== 'Array') {
+      // If the source is a fresh `__rt_malloc(N)` or `__rt_calloc(N, S)`,
+      // allocate the right typed array directly — much faster than a
+      // boxed JS `Array` and lets the monomorphic `__rt_at` fast path
+      // specialize on a single hidden class for `p.b`.
+      const m = src.js.match(/^__rt_(malloc|calloc)\(([\s\S]*)\)$/);
+      if (m) {
+        let n;
+        if (m[1] === 'malloc') {
+          n = m[2];
+        } else {
+          // calloc(n, size) → element count is n*size. The arg list
+          // came from `emitStdCall` which already joined `n, size` with
+          // a comma at the top level, so a regex split is safe.
+          const comma = splitTopLevelComma(m[2]);
+          if (comma) n = `(${comma[0]})*(${comma[1]})`;
+          else n = m[2];
+        }
+        return { js: `__rt_Ptr.wrap(new ${tac}(${n}))`, type: target };
+      }
       return { js: `__rt_reinterpretPtr(${src.js}, ${JSON.stringify(tac)})`, type: target };
     }
     return { js: src.js, type: target };
   }
   return { js: src.js, type: target };
+}
+
+// Split a comma-separated argument list at top-level commas only
+// (ignoring commas nested inside parens / brackets / braces). Returns
+// the two-element split for the two-arg case, or null if there isn't
+// exactly one top-level comma. Used by the calloc-cast emitter to
+// recover the original (n, size) args from the joined string.
+function splitTopLevelComma(s) {
+  let depth = 0;
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (c === '(' || c === '[' || c === '{') depth++;
+    else if (c === ')' || c === ']' || c === '}') depth--;
+    else if (c === ',' && depth === 0) {
+      const a = s.slice(0, i).trim();
+      const b = s.slice(i + 1).trim();
+      if (!a || !b) return null;
+      // Ensure no second top-level comma.
+      for (let j = i + 1; j < s.length; j++) {
+        const c2 = s[j];
+        if (c2 === '(' || c2 === '[' || c2 === '{') depth++;
+        else if (c2 === ')' || c2 === ']' || c2 === '}') depth--;
+        else if (c2 === ',' && depth === 0) return null;
+      }
+      return [a, b];
+    }
+  }
+  return null;
 }
 
 function emitSizeof(e, scope, ctx) {
