@@ -350,6 +350,7 @@ const REGISTRY: ReadonlyMap<string, RuntimeSnippet> = new Map<
     loadSnippet("disp_tensor_complex.h", [
       "mtoc2_tensor_t",
       "mtoc2_format_complex",
+      "mtoc2_cscalar",
     ]),
   ],
 

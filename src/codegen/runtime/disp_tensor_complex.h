@@ -5,9 +5,14 @@
  * numbl's `formatComplex`). Padding is computed against the
  * formatted-string lengths so a column with `1 - 2i` cells still
  * lines up with sibling cells of differing widths.
+ *
+ * Builds each `double _Complex` cell via `mtoc2_cmake` rather than
+ * the `I` macro so the c2js backend can translate the body. The
+ * actual format helper (`mtoc2_format_complex`) is on c2js's skip
+ * list and substituted with a JS implementation that walks
+ * `{re, im}` objects.
  */
 
-#include <complex.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -31,7 +36,7 @@ static void mtoc2__disp_complex_slice(
     for (long r = 0; r < rows; r++) {
       long idx = r + c * rows;
       char *cell = cells + idx * CELL_CAP;
-      double _Complex z = re[idx] + im[idx] * I;
+      double _Complex z = mtoc2_cmake(re[idx], im[idx]);
       mtoc2_format_complex(cell, CELL_CAP, z);
       long len = (long)strlen(cell);
       if (len > col_widths[c]) col_widths[c] = len;

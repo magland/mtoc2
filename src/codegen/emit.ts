@@ -963,6 +963,36 @@ function emitExpr(e: IRExpr, state: RuntimeState): string {
       // is already in column-major order). 1×N picks `from_row` for
       // a marginally tighter helper.
       const [rows, cols] = e.shape;
+      const isComplex = isNumeric(e.ty) && e.ty.isComplex;
+      if (isComplex) {
+        // Two parallel `double[]` arrays — real parts and imag parts.
+        // Real-typed cells project to `(re, 0.0)`; complex cells
+        // split via `mtoc2_creal` / `mtoc2_cimag`. This avoids ever
+        // passing `double _Complex *` arrays around (which c2js
+        // can't translate), and keeps each compound literal a plain
+        // real-double array.
+        const reParts: string[] = [];
+        const imParts: string[] = [];
+        for (const el of e.elements) {
+          const c = emitExpr(el, state);
+          if (isNumeric(el.ty) && el.ty.isComplex) {
+            useRuntimeByName(state, "mtoc2_cscalar");
+            reParts.push(`mtoc2_creal(${c})`);
+            imParts.push(`mtoc2_cimag(${c})`);
+          } else {
+            reParts.push(c);
+            imParts.push("0.0");
+          }
+        }
+        const reFlat = reParts.join(", ");
+        const imFlat = imParts.join(", ");
+        if (rows === 1) {
+          useRuntimeByName(state, "mtoc2_tensor_from_row_complex");
+          return `mtoc2_tensor_from_row_complex((double[]){${reFlat}}, (double[]){${imFlat}}, ${cols})`;
+        }
+        useRuntimeByName(state, "mtoc2_tensor_from_matrix_complex");
+        return `mtoc2_tensor_from_matrix_complex((double[]){${reFlat}}, (double[]){${imFlat}}, ${rows}, ${cols})`;
+      }
       const flat = e.elements.map(el => emitExpr(el, state)).join(", ");
       if (rows === 1) {
         useRuntimeByName(state, "mtoc2_tensor_from_row");

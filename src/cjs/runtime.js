@@ -586,6 +586,68 @@ function mtoc2_disp_complex(z) {
   mtoc2_format_complex(buf, 128, z);
   __rt_printf('%s\\n', buf);
 }
+
+// Complex multi-element tensor disp. Mirrors the C
+// \`mtoc2_disp_tensor_complex\` (which loops slices, formats each cell
+// via \`mtoc2_format_complex\`, pads columns to the widest cell). The
+// C body holds a bare \`double _Complex\` local per cell which c2js
+// can't translate, so this JS impl is the substitute.
+function mtoc2__disp_complex_slice(re, im, rows, cols) {
+  const ncells = rows * cols;
+  const cells = new Array(ncells);
+  const colWidths = new Int32Array(cols);
+  const buf = __rt_Ptr.wrap(new Uint8Array(80));
+  for (let c = 0; c < cols; c++) {
+    for (let r = 0; r < rows; r++) {
+      const idx = r + c * rows;
+      const z = { re: __rt_Ptr.at(re, idx), im: __rt_Ptr.at(im, idx) };
+      mtoc2_format_complex(buf, 80, z);
+      const s = __rt_toString(buf);
+      cells[idx] = s;
+      if (s.length > colWidths[c]) colWidths[c] = s.length;
+    }
+  }
+  for (let r = 0; r < rows; r++) {
+    let line = '   ';
+    for (let c = 0; c < cols; c++) {
+      const idx = r + c * rows;
+      const s = cells[idx];
+      const pad = colWidths[c] - s.length;
+      line += ' '.repeat(pad > 0 ? pad : 0) + s;
+      if (c < cols - 1) line += '   ';
+    }
+    __rt_printf('%s\\n', line);
+  }
+}
+function mtoc2_disp_tensor_complex(t) {
+  if (t.ndim === 0 || t.real === null) return;
+  const rows = t.ndim >= 1 ? __rt_Ptr.at(t.dims, 0) : 1;
+  const cols = t.ndim >= 2 ? __rt_Ptr.at(t.dims, 1) : 1;
+  let total = 1;
+  for (let i = 0; i < t.ndim; i++) total *= __rt_Ptr.at(t.dims, i);
+  if (total <= 0) return;
+  const pageSize = rows * cols;
+  let numPages = 1;
+  for (let i = 2; i < t.ndim; i++) numPages *= __rt_Ptr.at(t.dims, i);
+  for (let p = 0; p < numPages; p++) {
+    if (t.ndim > 2) {
+      if (p > 0) __rt_printf('\\n');
+      let rem = p;
+      let header = '(:,:';
+      for (let i = 2; i < t.ndim; i++) {
+        const d = __rt_Ptr.at(t.dims, i);
+        const s = rem % d;
+        rem = Math.trunc(rem / d);
+        header += ',' + (s + 1);
+      }
+      header += ') =\\n\\n';
+      __rt_printf('%s', header);
+    }
+    const reSlice = __rt_Ptr.add(t.real, p * pageSize);
+    const imSlice = __rt_Ptr.add(t.imag, p * pageSize);
+    mtoc2__disp_complex_slice(reSlice, imSlice, rows, cols);
+  }
+}
 `;
 
 export { RUNTIME };

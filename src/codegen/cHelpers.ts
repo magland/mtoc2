@@ -48,10 +48,15 @@ export interface OwnedHelpers {
  *  (POD) types — those get plain assignment / no copy / no free. */
 export function ownedHelpersFor(t: Type): OwnedHelpers | null {
   if (isMultiElement(t)) {
+    // `_empty` / `_assign` / `_free` are shape-agnostic — they touch
+    // both lanes unconditionally with `free(NULL)` no-ops covering the
+    // real case. `_copy` must dispatch on `isComplex` because it has
+    // to know how many lanes to memcpy.
+    const isComplex = t.kind === "Numeric" && t.isComplex;
     return {
       empty: "mtoc2_tensor_empty",
       assign: "mtoc2_tensor_assign",
-      copy: "mtoc2_tensor_copy",
+      copy: isComplex ? "mtoc2_tensor_copy_complex" : "mtoc2_tensor_copy",
       free: "mtoc2_tensor_free",
       isRuntime: true,
     };

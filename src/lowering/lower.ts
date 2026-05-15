@@ -55,6 +55,7 @@ import {
   scalarDouble,
   scalarComplex,
   tensorDouble,
+  tensorComplex,
   tensorDoubleFromDims,
   classType,
   signFromExactArray,
@@ -83,7 +84,7 @@ import {
   classMethodSpecSource,
   sanitizeCIdent,
 } from "./types.js";
-import { exactDouble } from "./builtins/_shared.js";
+import { exactDouble, exactScalarAsComplex } from "./builtins/_shared.js";
 import type { ClassRegistration } from "./classDefs.js";
 import type { Workspace } from "../workspace/workspace.js";
 import type { CallSite } from "../../../numbl/src/numbl-core/runtime/runtimeHelpers.js";
@@ -2126,14 +2127,15 @@ export class Lowerer {
       | { kind: "empty"; ty: NumericType };
     const grid: Cell[][] = [];
     let anyTensor = false;
+    let anyComplex = false;
     for (const row of e.rows) {
       const out: Cell[] = [];
       for (const cell of row) {
         const lowered = this.lowerExpr(cell);
         const ty = lowered.ty;
-        if (!isNumeric(ty) || ty.isComplex) {
+        if (!isNumeric(ty)) {
           throw new UnsupportedConstruct(
-            `bracket literal cell must be a real numeric scalar or tensor (got ${typeToString(ty)})`,
+            `bracket literal cell must be a numeric scalar or tensor (got ${typeToString(ty)})`,
             cell.span
           );
         }
@@ -2149,7 +2151,21 @@ export class Lowerer {
             cell.span
           );
         }
-        if (isScalarRealNumeric(ty)) {
+        if (ty.isComplex) {
+          if (isMultiElement(ty)) {
+            // Phase 2 lands scalar-complex bracket cells and the
+            // straight assembly into a complex tensor; a tensor-typed
+            // complex cell would need Phase 3's complex tensor concat
+            // machinery (lane-copy paths).
+            throw new UnsupportedConstruct(
+              `bracket literal with a complex tensor cell is not yet supported`,
+              cell.span
+            );
+          }
+          anyComplex = true;
+        }
+        if (ty.dims.every(d => d.kind === "exact" && d.value === 1)) {
+          // Both scalar real and scalar complex land here.
           out.push({ kind: "scalar", expr: lowered, ty });
           continue;
         }
@@ -2206,6 +2222,35 @@ export class Lowerer {
       if (rows === 1 && cols === 1) {
         return loweredFlat[0];
       }
+      if (anyComplex) {
+        // Complex tensor literal — propagate isComplex on the result
+        // type. Exact-fold via the split-buffer `{re, im}` carrier when
+        // every element is exact (numeric or imaginary literals).
+        let exactData: { re: Float64Array; im: Float64Array } | undefined;
+        if (total <= EXACT_ARRAY_MAX_ELEMENTS) {
+          const re = new Float64Array(total);
+          const im = new Float64Array(total);
+          let allExact = true;
+          for (let i = 0; i < total; i++) {
+            const cx = exactScalarAsComplex(loweredFlat[i].ty);
+            if (cx === undefined) {
+              allExact = false;
+              break;
+            }
+            re[i] = cx.re;
+            im[i] = cx.im;
+          }
+          if (allExact) exactData = { re, im };
+        }
+        const ty = tensorComplex([rows, cols], exactData);
+        return {
+          kind: "TensorBuild",
+          elements: loweredFlat,
+          shape: [rows, cols],
+          ty,
+          span: e.span,
+        };
+      }
       let exactData: Float64Array | undefined;
       if (total <= EXACT_ARRAY_MAX_ELEMENTS) {
         const data = new Float64Array(total);
@@ -2228,6 +2273,17 @@ export class Lowerer {
         ty,
         span: e.span,
       };
+    }
+
+    // Phase 2 stops at scalar-complex cells composed via the all-
+    // scalar fast path above. Mixing complex cells with a multi-
+    // element cell (tensor concat) would need the lane-copy variant
+    // of the concat helper, which Phase 3 covers.
+    if (anyComplex) {
+      throw new UnsupportedConstruct(
+        `bracket literal mixing complex cells with multi-element tensor cells is not yet supported`,
+        e.span
+      );
     }
 
     // Concat path. Compute per-row horzcat shapes, then vertcat.

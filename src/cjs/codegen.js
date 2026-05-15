@@ -226,16 +226,17 @@ const COMPLEX_SKIP_FUNCS = new Set([
   'mtoc2_cabs', 'mtoc2_cangle', 'mtoc2_cnonzero', 'mtoc2_ceq', 'mtoc2_cne', 'mtoc2_cpow',
   'mtoc2_cdiv',
   'mtoc2_format_complex', 'mtoc2_disp_complex',
-  // The tensor-complex helpers below aren't reachable from user code
-  // in mtoc2's current scope (phase 2+ work), but the runtime activator
-  // bundles their definitions transitively. Skip-translate them too —
-  // their C bodies use `_Complex` types and the `I` macro, which c2js
-  // can't lower without typed-expression awareness.
+  // The disp-tensor-complex pair holds onto bare `_Complex` locals
+  // (it materializes a `double _Complex z = mtoc2_cmake(re[i], im[i])`
+  // per cell before handing off to mtoc2_format_complex). The JS
+  // runtime ships a hand-written implementation; c2js skip-
+  // translates the C body. Every OTHER complex-tensor helper
+  // (`_alloc`/`_alloc_nd`/`_copy`/`_from_row`/`_from_matrix`) was
+  // rewritten in Phase 2 to take `double[]` lanes and use
+  // `mtoc2_creal`/`mtoc2_cimag` for any necessary projections, so
+  // c2js can translate them straight from C.
   'mtoc2_disp_tensor_complex',
   'mtoc2__disp_complex_slice',
-  'mtoc2_tensor_alloc_complex', 'mtoc2_tensor_alloc_nd_complex',
-  'mtoc2_tensor_copy_complex',
-  'mtoc2_tensor_from_row_complex', 'mtoc2_tensor_from_matrix_complex',
 ]);
 
 // C99 `<complex.h>` function names. If a non-skip-listed function
