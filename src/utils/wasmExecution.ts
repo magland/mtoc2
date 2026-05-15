@@ -98,6 +98,12 @@ export interface WasmBuildOpts {
   fastMath?: boolean;
   simd?: boolean;
   optLevel?: WasmOptLevel;
+  /** Run the IR-level `--inline-temps` pass before emitting C. See
+   *  `TranslateOptions.enableTempInlining`. The wasm-service request
+   *  doesn't see this flag — inlining happens locally on the
+   *  translated C — but it IS folded into the cache key so two
+   *  inline-temps settings get distinct cached binaries. */
+  enableTempInlining?: boolean;
 }
 
 export interface WasmBuildArtifact {
@@ -151,7 +157,9 @@ export async function buildWasm(
 ): Promise<BuildWasmResult> {
   // Step 1: translate in-browser. Any UnsupportedConstruct / TypeError
   // raised by the lowerer surfaces here, before we touch the network.
-  const translateResult = translateProject(files, activeName);
+  const translateResult = translateProject(files, activeName, {
+    enableTempInlining: opts.enableTempInlining,
+  });
   if (translateResult.error) {
     return { ok: false, kind: "translate", error: translateResult.error };
   }

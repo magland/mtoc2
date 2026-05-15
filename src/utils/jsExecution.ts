@@ -36,11 +36,18 @@ export type BuildJsResult =
   | { ok: true; jsSource: string }
   | { ok: false; kind: "translate"; error: TranslateError };
 
+export interface BuildJsOpts {
+  enableTempInlining?: boolean;
+}
+
 export function buildJs(
   files: SourceFile[],
-  activeName: string
+  activeName: string,
+  opts: BuildJsOpts = {}
 ): BuildJsResult {
-  const result = translateProject(files, activeName);
+  const result = translateProject(files, activeName, {
+    enableTempInlining: opts.enableTempInlining,
+  });
   if (result.error)
     return { ok: false, kind: "translate", error: result.error };
   const jsSource = translateCToJs(result.c ?? "");

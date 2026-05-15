@@ -45,6 +45,7 @@ import {
 } from "../monaco/numblLanguage";
 import type { SourceFile } from "../translate";
 import type { WasmOptLevel } from "../utils/wasmExecution";
+import { DEFAULT_OPT_PROFILE, profileSettings } from "../optProfile";
 import { textEncoder } from "../utils/textCodec";
 
 const WASM_OPT_LEVELS: ReadonlyArray<WasmOptLevel> = ["O0", "O2", "O3"];
@@ -132,6 +133,13 @@ export function IDEWorkspace({ filesApi, header }: IDEWorkspaceProps) {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [includeRuntime, setIncludeRuntime] = useState(false);
   const [fastMath, setFastMath] = useState(false);
+  // Default trio matches mtoc's `default` profile. `enableTempInlining`
+  // is the IR-level temp-substitution pass; affects both JS and WASM
+  // since it shapes the C source itself before codegen. On by default
+  // so the IDE matches `mtoc2 run`'s default behavior.
+  const [enableTempInlining, setEnableTempInlining] = useState(
+    profileSettings(DEFAULT_OPT_PROFILE).enableTempInlining
+  );
   const [wasmOptLevel, setWasmOptLevel] = useState<WasmOptLevel>(() =>
     readWasmOptLevel()
   );
@@ -252,7 +260,8 @@ export function IDEWorkspace({ filesApi, header }: IDEWorkspaceProps) {
     sourceFiles,
     active ?? "",
     editorModel,
-    includeRuntime
+    includeRuntime,
+    enableTempInlining
   );
 
   // Derive the JS that the JS-mode worker would actually run. We
@@ -271,6 +280,7 @@ export function IDEWorkspace({ filesApi, header }: IDEWorkspaceProps) {
     if (!c || error) return { js: "", jsError: null };
     const result = translateProject(sourceFiles, active ?? "", {
       includeRuntime: true,
+      enableTempInlining,
     });
     if (result.error || !result.c) return { js: "", jsError: null };
     try {
@@ -279,7 +289,7 @@ export function IDEWorkspace({ filesApi, header }: IDEWorkspaceProps) {
       const message = e instanceof Error ? e.message : String(e);
       return { js: "", jsError: `c2js: ${message}` };
     }
-  }, [c, error, sourceFiles, active]);
+  }, [c, error, sourceFiles, active, enableTempInlining]);
 
   // When JS mode is gone (mode flipped to wasm), keep the user on a
   // sub-tab they can actually see — prefer C over JS when only one is
@@ -323,6 +333,7 @@ export function IDEWorkspace({ filesApi, header }: IDEWorkspaceProps) {
       fastMath,
       simd: wasmSimd,
       optLevel: wasmOptLevel,
+      enableTempInlining,
     });
   };
 
@@ -367,6 +378,8 @@ export function IDEWorkspace({ filesApi, header }: IDEWorkspaceProps) {
         onModeChange={handleExecModeChange}
         fastMath={fastMath}
         onFastMathChange={setFastMath}
+        enableTempInlining={enableTempInlining}
+        onEnableTempInliningChange={setEnableTempInlining}
         wasmOptLevel={wasmOptLevel}
         onWasmOptLevelChange={handleWasmOptLevelChange}
         wasmSimd={wasmSimd}
@@ -589,6 +602,10 @@ interface EditorToolbarProps {
   /** `-ffast-math`. WASM-only. */
   fastMath: boolean;
   onFastMathChange: (value: boolean) => void;
+  /** IR-level temp-substitution pass (`--inline-temps`). Affects both
+   *  JS and WASM since it shapes the C source itself. */
+  enableTempInlining: boolean;
+  onEnableTempInliningChange: (value: boolean) => void;
   /** `-O{0,2,3}` for emcc. WASM-only. */
   wasmOptLevel: WasmOptLevel;
   onWasmOptLevelChange: (value: WasmOptLevel) => void;
@@ -609,6 +626,8 @@ function EditorToolbar({
   onModeChange,
   fastMath,
   onFastMathChange,
+  enableTempInlining,
+  onEnableTempInliningChange,
   wasmOptLevel,
   onWasmOptLevelChange,
   wasmSimd,
@@ -714,6 +733,30 @@ function EditorToolbar({
             ))}
           </Select>
         </FormControl>
+      </Tooltip>
+      <Tooltip
+        title={
+          isRunning
+            ? "Temp-inlining only takes effect on the next translation; toggle when idle."
+            : "IR-level --inline-temps pass: substitute single-use tensor temps into their consumers so chained elementwise ops fuse into one inline loop. Applies to both JS and WASM."
+        }
+      >
+        <FormControlLabel
+          sx={{ m: 0 }}
+          control={
+            <Switch
+              size="small"
+              checked={enableTempInlining}
+              onChange={e => onEnableTempInliningChange(e.target.checked)}
+              disabled={isRunning}
+            />
+          }
+          label={
+            <Typography variant="caption" color="text.secondary">
+              inline temps
+            </Typography>
+          }
+        />
       </Tooltip>
       <Tooltip
         title={

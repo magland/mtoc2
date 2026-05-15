@@ -46,6 +46,9 @@ export interface RunOptions {
   fastMath?: boolean;
   simd?: boolean;
   optLevel?: WasmOptLevel;
+  /** Run the IR-level `--inline-temps` pass before emitting C. Affects
+   *  both JS and WASM modes (it's a pre-codegen transform). */
+  enableTempInlining?: boolean;
 }
 
 /** Format a translate-side error for the console: `<kind> (<file>): <msg>\n`,
@@ -136,7 +139,9 @@ export function useWasmExecution(): UseWasmExecutionResult {
       // remote service, no compile pill — c2js is fast enough that
       // the user sees the run immediately.
       if (opts.mode === "js") {
-        const built = buildJs(files, activeName);
+        const built = buildJs(files, activeName, {
+          enableTempInlining: opts.enableTempInlining,
+        });
         if (!built.ok) {
           append({
             channel: "translate_error",
@@ -175,6 +180,7 @@ export function useWasmExecution(): UseWasmExecutionResult {
           fastMath: opts.fastMath ?? false,
           simd: opts.simd ?? false,
           optLevel: opts.optLevel ?? "O3",
+          enableTempInlining: opts.enableTempInlining,
         },
         wasmUrl,
         abort.signal,
