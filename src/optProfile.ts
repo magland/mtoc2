@@ -59,8 +59,7 @@ export function resolveOptSettings(
   return {
     fastMath: overrides.fastMath ?? base.fastMath,
     threads: overrides.threads ?? base.threads,
-    enableTempInlining:
-      overrides.enableTempInlining ?? base.enableTempInlining,
+    enableTempInlining: overrides.enableTempInlining ?? base.enableTempInlining,
   };
 }
 

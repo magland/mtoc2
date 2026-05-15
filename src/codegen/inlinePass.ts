@@ -268,7 +268,8 @@ function countVarRefsInExpr(e: IRExpr, bump: (cName: string) => void): void {
       for (const el of e.elements) countVarRefsInExpr(el, bump);
       return;
     case "TensorConcat":
-      for (const row of e.cells) for (const c of row) countVarRefsInExpr(c, bump);
+      for (const row of e.cells)
+        for (const c of row) countVarRefsInExpr(c, bump);
       return;
     case "HandleLit":
       for (const c of e.captures) countVarRefsInExpr(c.value, bump);
@@ -534,11 +535,7 @@ function appearsInNonSlotPosition(e: IRExpr, cName: string): boolean {
  *  are already filtered by `appearsInNonSlotPosition` before this
  *  function is called. Preserves identity for unchanged subtrees so
  *  the substitution is cheap when nothing matches. */
-function substituteVar(
-  e: IRExpr,
-  target: string,
-  replacement: IRExpr
-): IRExpr {
+function substituteVar(e: IRExpr, target: string, replacement: IRExpr): IRExpr {
   switch (e.kind) {
     case "Var":
       return e.cName === target ? replacement : e;

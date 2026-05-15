@@ -117,11 +117,7 @@ function sameStaticShape(a: NumericType, b: NumericType): boolean {
     const da = a.dims[i];
     const db = b.dims[i];
     if (da.kind !== db.kind) return false;
-    if (
-      da.kind === "exact" &&
-      db.kind === "exact" &&
-      da.value !== db.value
-    ) {
+    if (da.kind === "exact" && db.kind === "exact" && da.value !== db.value) {
       return false;
     }
   }
@@ -182,10 +178,7 @@ function emitPerSlotExpr(e: IRExpr, state: RuntimeState): string {
         );
       }
       activate(b.runtimeDeps, state);
-      return b.perSlotC(
-        [emitPerSlotExpr(e.operand, state)],
-        [e.operand.ty]
-      );
+      return b.perSlotC([emitPerSlotExpr(e.operand, state)], [e.operand.ty]);
     }
     case "Call": {
       const b = getBuiltin(e.name);

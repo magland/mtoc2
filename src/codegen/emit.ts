@@ -68,10 +68,7 @@ import {
   specForHandle,
   specForStruct,
 } from "./emitNamedTypedef.js";
-import {
-  emitTensorAssignFused,
-  isFusableAssign,
-} from "./emitTensorFused.js";
+import { emitTensorAssignFused, isFusableAssign } from "./emitTensorFused.js";
 
 export interface EmitOptions {
   /** Include the activated runtime helper bodies in the output.

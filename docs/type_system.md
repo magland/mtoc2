@@ -78,7 +78,7 @@ type Type =
   as a plain `number[]` when every axis is exact, for convenience.
   Both cap at `MTOC2_MAX_NDIM = 8` axes.
 - `sign` ∈ `{ positive, nonneg, negative, nonpositive, zero,
-  nonzero, unknown }` — coarser than exact but stays useful after
+nonzero, unknown }` — coarser than exact but stays useful after
   ops that lose `exact`. Tensor sign is derived from the exact data
   when present (so `sqrt(zeros(N, N))` passes the domain check
   without needing a runtime branch); the `%!numbl:opaque` directive
