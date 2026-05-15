@@ -16,6 +16,8 @@ test_length_numel_after_opaque();
 test_arith_exact_fold();
 test_arith_runtime_tt();
 test_arith_runtime_scalar_broadcast();
+test_arith_implicit_expansion();
+test_arith_implicit_expansion_runtime();
 test_arith_nested();
 test_sum_runtime();
 test_arith_in_loop();
@@ -192,6 +194,48 @@ function test_arith_runtime_scalar_broadcast()
   disp(a ./ 2);
   disp(12 ./ a);
   disp(-a);
+end
+
+function test_arith_implicit_expansion()
+  % Static-shape broadcast: every dim is exact at translate time, so
+  % the result folds during the exact pass.
+  col = [1; 2; 3];
+  row = [10 20 30 40];
+  disp(col + row);       % 3x1 + 1x4 -> 3x4
+  disp(row - col);       % 1x4 - 3x1 -> 3x4
+  disp(col .* row);      % 3x1 .* 1x4 -> 3x4
+  disp(col ./ [1 2 4 8]);% 3x1 ./ 1x4 -> 3x4
+
+  mat = [1 2; 3 4; 5 6];
+  cv  = [10; 20; 30];
+  rv  = [100 200];
+  disp(mat + cv);        % 3x2 + 3x1 -> 3x2 (column broadcast)
+  disp(mat + rv);        % 3x2 + 1x2 -> 3x2 (row broadcast)
+
+  % Trailing-singleton implicit expansion: 2x1 + 2x4 (the chunkie
+  % example's `ctr + rad*[cos(t); sin(t)]` pattern).
+  ctr = [1.0; -0.5];
+  trig = [0.1 0.2 0.3 0.4; 0.9 0.8 0.7 0.6];
+  disp(ctr + trig);
+end
+
+function test_arith_implicit_expansion_runtime()
+  % Same broadcast pattern but with at least one runtime-opaque arg so
+  % the codegen path actually exercises `*_bcast_tt`.
+  col = [1; 2; 3];
+  row = [10 20 30 40];
+  %!numbl:opaque col row
+  disp(col + row);
+  disp(row - col);
+  disp(col .* row);
+  disp(col ./ [1 2 4 8]);
+
+  mat = [1 2; 3 4; 5 6];
+  cv  = [10; 20; 30];
+  rv  = [100 200];
+  %!numbl:opaque mat cv rv
+  disp(mat + cv);
+  disp(mat + rv);
 end
 
 function test_arith_nested()

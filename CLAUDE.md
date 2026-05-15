@@ -54,8 +54,11 @@ mtoc2 is a _static_ translator. Anything outside the supported subset raises
   the return-by-value C ABI; an N≥2-output call uses `void` + one
   `T *_mtoc2_o<i>` out-pointer per output and is invoked only via
   `[a, b, ...] = foo(x)` or as a bare statement `foo(x);` (drop-all).
-  v1 restricts N≥2-output slots to scalar real numeric. Multi-output
-  class methods and handle dispatch are not yet supported.
+  N≥2-output slots accept any type for which `isMultiOutputSlotType`
+  returns true — scalar real numeric plus every owned kind (tensor,
+  struct, class instance, function handle, Char/String). Void /
+  Unknown stay rejected. Multi-output class methods and handle
+  dispatch are not yet supported.
 - **Real tensors** — mtoc-style "always-copy" model: `mtoc2_tensor_t`
   struct with `mtoc2_tensor_assign` / `mtoc2_tensor_copy` /
   `mtoc2_tensor_free`; no refcount, no COW. Every tensor source-literal
@@ -89,9 +92,15 @@ mtoc2 is a _static_ translator. Anything outside the supported subset raises
   The `[]` auto-infer slot (`reshape(A, [], 3)`) is not yet
   supported — specify all dims explicitly.
 - **Tensor arithmetic** — elementwise `+` `-` `.*` `./` `-` (unary)
-  on same-shape tensors and tensor-with-scalar-broadcast. Each op
-  emits a per-op runtime helper call
-  (`mtoc2_tensor_<op>_tt` / `_ts` / `_st`). Matrix `*` (`mtimes` on
+  on same-shape tensors, tensor-with-scalar-broadcast, and
+  MATLAB-style implicit expansion between tensors of different
+  (but compatible) shapes. Each op emits a per-op runtime helper
+  call (`mtoc2_tensor_<op>_tt` / `_ts` / `_st` / `_bcast_tt`). The
+  `_bcast_tt` path activates when at least one axis is statically
+  1 on one side but not the other, or when ndims differ and the
+  shorter shape needs trailing-1 padding; otherwise codegen takes
+  the faster `_tt` path. The transfer folds when every input is
+  exact and the output fits the cap. Matrix `*` (`mtimes` on
   two tensors) is supported for real 2-D operands via
   `mtoc2_tensor_mtimes_real`; the 1×k \* k×1 inner-product case
   routes through a scalar-returning variant so the type system's
@@ -231,12 +240,11 @@ Not yet supported: matrix division (`mrdivide` between two tensors),
 logical / vector-of-indices indexing (`a(mask)`, `a(idx_vec)`),
 member-rooted indexing (`obj.r(1, :, :)`, `obj.f(i) = rhs`),
 indexed-delete (`a(2:5) = []`), unknown-shape constructors
-(`zeros(n)` where `n` is a runtime-only scalar), general broadcast
-(non-scalar mismatched shapes), complex, text concat (`[a, b]` of
-two chars), char arithmetic (`'A' + 1`), `strcmp`, builtin handles,
-`private/` directories, `import` statements,
-`.numbl.js` user functions. Expanding scope is gated by the
-cross-runner.
+(`zeros(n)` where `n` is a runtime-only scalar), complex, text
+concat (`[a, b]` of two chars), char arithmetic (`'A' + 1`),
+`strcmp`, builtin handles, `private/` directories, `import`
+statements, `.numbl.js` user functions. Expanding scope is gated by
+the cross-runner.
 
 ## Docs are part of the change
 

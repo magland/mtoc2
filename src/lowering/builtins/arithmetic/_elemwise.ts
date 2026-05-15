@@ -6,50 +6,96 @@
 import type { Span } from "../../../parser/index.js";
 import { UnsupportedConstruct } from "../../errors.js";
 import {
+  type DimInfo,
+  DIM_ONE,
   type NumericType,
   type Sign,
   scalarDouble,
   tensorDouble,
+  tensorDoubleFromDims,
   signFromNumber,
   flipSign,
+  isDimOne,
   isMultiElement,
   EXACT_ARRAY_MAX_ELEMENTS,
 } from "../../types.js";
 import type { Builtin } from "../registry.js";
 import { requireRealDouble, exactDouble, exactRealArray } from "../_shared.js";
 
-/** Shape-compat check for elementwise binary. Same-shape only — broadcast
- *  beyond scalar-on-one-side stays a future slope. Returns the result
- *  shape (or `null` if both args are scalar — caller handles). Throws
- *  on incompatible shapes. */
+/** Result of broadcast shape resolution for the elementwise binary path.
+ *  `outDims` is the output's per-axis dim info (MATLAB-style implicit
+ *  expansion: align on axis 1, pad with 1s on the right, axis-wise
+ *  `da == db || da == 1 || db == 1`). `bcast` is true when the C runtime
+ *  needs the broadcasting helper rather than the fast `_tt` path —
+ *  either the ndims differ or at least one statically-singleton axis
+ *  needs to be replicated against a non-singleton sibling. */
+type ResolvedShape = {
+  outDims: DimInfo[];
+  /** True when broadcast (any axis where one side is statically 1 but
+   *  the other is not, OR ndims differ). False when the two arg shapes
+   *  match dim-for-dim (modulo unknowns the runtime trusts). */
+  bcast: boolean;
+};
+
+/** Shape resolution for elementwise binary. Returns `null` for scalar+
+ *  scalar; otherwise computes the broadcast output shape and whether
+ *  broadcasting is required. Throws on statically incompatible axes. */
 function elemwiseResultShape(
   a: NumericType,
   b: NumericType,
   name: string,
   span: Span
-): number[] | null {
+): ResolvedShape | null {
   const aMulti = isMultiElement(a);
   const bMulti = isMultiElement(b);
   if (!aMulti && !bMulti) return null; // scalar OP scalar
-  if (!aMulti) return b.shape ? b.shape.slice() : null;
-  if (!bMulti) return a.shape ? a.shape.slice() : null;
-  // both tensor — require identical statically-known shape
-  if (!a.shape || !b.shape) {
-    throw new UnsupportedConstruct(
-      `'${name}' on tensors of unknown shape not yet supported`,
-      span
-    );
+  if (!aMulti) return { outDims: b.dims.slice(), bcast: false };
+  if (!bMulti) return { outDims: a.dims.slice(), bcast: false };
+  // Both tensor. Pad to common ndim (trailing 1s) and check axis-wise.
+  const rnd = Math.max(a.dims.length, b.dims.length);
+  const outDims: DimInfo[] = new Array(rnd);
+  let bcast = a.dims.length !== b.dims.length;
+  for (let i = 0; i < rnd; i++) {
+    const da: DimInfo = i < a.dims.length ? a.dims[i] : DIM_ONE;
+    const db: DimInfo = i < b.dims.length ? b.dims[i] : DIM_ONE;
+    const aOne = isDimOne(da);
+    const bOne = isDimOne(db);
+    if (aOne && bOne) {
+      outDims[i] = DIM_ONE;
+      continue;
+    }
+    if (aOne) {
+      outDims[i] = db;
+      bcast = true;
+      continue;
+    }
+    if (bOne) {
+      outDims[i] = da;
+      bcast = true;
+      continue;
+    }
+    // Neither statically 1. If both exact, must match.
+    if (da.kind === "exact" && db.kind === "exact") {
+      if (da.value !== db.value) {
+        throw new UnsupportedConstruct(
+          `'${name}' shape mismatch (${dimsToStr(a.dims)} vs ${dimsToStr(b.dims)}); axis ${i + 1} is ${da.value} vs ${db.value} — incompatible for implicit expansion`,
+          span
+        );
+      }
+      outDims[i] = da;
+    } else if (da.kind === "exact") {
+      outDims[i] = da;
+    } else if (db.kind === "exact") {
+      outDims[i] = db;
+    } else {
+      outDims[i] = { kind: "unknown" };
+    }
   }
-  if (
-    a.shape.length !== b.shape.length ||
-    !a.shape.every((s, i) => s === b.shape![i])
-  ) {
-    throw new UnsupportedConstruct(
-      `'${name}' shape mismatch (${a.shape.join("×")} vs ${b.shape.join("×")}); broadcast beyond scalar-on-one-side is not yet supported`,
-      span
-    );
-  }
-  return a.shape.slice();
+  return { outDims, bcast };
+}
+
+function dimsToStr(dims: ReadonlyArray<DimInfo>): string {
+  return dims.map(d => (d.kind === "exact" ? `${d.value}` : "?")).join("×");
 }
 
 /** Build a real elementwise binary builtin: scalar, scalar+tensor,
@@ -141,9 +187,9 @@ function buildElemwiseRealBinary(opts: {
       requireRealDouble(b, `'${name}' arg 2`, span);
       const aN = a as NumericType;
       const bN = b as NumericType;
-      const outShape = elemwiseResultShape(aN, bN, name, span);
+      const resolved = elemwiseResultShape(aN, bN, name, span);
 
-      if (outShape === null) {
+      if (resolved === null) {
         // Pure scalar op — fold if exact.
         const ax = exactDouble(aN);
         const bx = exactDouble(bN);
@@ -154,7 +200,12 @@ function buildElemwiseRealBinary(opts: {
         return scalarDouble(signRule(aN, bN));
       }
 
-      // Tensor result. Try to fold when every input is exact.
+      // Build the result NumericType (carries `shape` automatically when
+      // every output dim is exact).
+      const outTy = tensorDoubleFromDims(resolved.outDims);
+
+      // Try to fold when every input is exact AND every output dim is
+      // known (so the result fits the exact-array cap).
       const aArr = exactRealArray(aN);
       const bArr = exactRealArray(bN);
       const ax = exactDouble(aN);
@@ -164,28 +215,91 @@ function buildElemwiseRealBinary(opts: {
       if (
         aIsExact &&
         bIsExact &&
-        outShape.reduce((p, q) => p * q, 1) <= EXACT_ARRAY_MAX_ELEMENTS
+        outTy.shape !== undefined &&
+        outTy.shape.reduce((p, q) => p * q, 1) <= EXACT_ARRAY_MAX_ELEMENTS
       ) {
+        const outShape = outTy.shape;
         const n = outShape.reduce((p, q) => p * q, 1);
         const data = new Float64Array(n);
-        for (let i = 0; i < n; i++) {
-          const av = aArr ? aArr[i] : (ax as number);
-          const bv = bArr ? bArr[i] : (bx as number);
-          data[i] = fold(av, bv);
+        // Per-axis broadcast strides for a and b (column-major). Stride
+        // is 0 on any axis where the side has a singleton against a
+        // non-singleton output axis (including ndim-pad axes).
+        const rnd = outShape.length;
+        const aShape: number[] = new Array(rnd);
+        const bShape: number[] = new Array(rnd);
+        for (let i = 0; i < rnd; i++) {
+          const da = i < aN.dims.length ? aN.dims[i] : DIM_ONE;
+          const db = i < bN.dims.length ? bN.dims[i] : DIM_ONE;
+          aShape[i] = da.kind === "exact" ? da.value : 1;
+          bShape[i] = db.kind === "exact" ? db.value : 1;
         }
+        // If a was a bare scalar (aArr undefined, ax defined), treat its
+        // shape as all-1 for the strider; the scalar value below is used
+        // directly. Same for b.
+        const aStride: number[] = new Array(rnd);
+        const bStride: number[] = new Array(rnd);
+        let aAcc = 1;
+        let bAcc = 1;
+        for (let i = 0; i < rnd; i++) {
+          aStride[i] = aShape[i] === 1 ? 0 : aAcc;
+          bStride[i] = bShape[i] === 1 ? 0 : bAcc;
+          aAcc *= aShape[i];
+          bAcc *= bShape[i];
+        }
+        const ix = new Array(rnd).fill(0);
+        for (let k = 0; k < n; k++) {
+          let ai = 0;
+          let bi = 0;
+          for (let i = 0; i < rnd; i++) {
+            ai += ix[i] * aStride[i];
+            bi += ix[i] * bStride[i];
+          }
+          const av = aArr ? aArr[ai] : (ax as number);
+          const bv = bArr ? bArr[bi] : (bx as number);
+          data[k] = fold(av, bv);
+          // column-major increment
+          for (let i = 0; i < rnd; i++) {
+            ix[i]++;
+            if (ix[i] < outShape[i]) break;
+            ix[i] = 0;
+          }
+        }
+        // Reuse the constructor so shape/exact get validated and sign
+        // is derived from the actual values.
         return tensorDouble(outShape, data);
       }
-      const out = tensorDouble(outShape);
-      out.sign = signRule(aN, bN);
-      return out;
+      outTy.sign = signRule(aN, bN);
+      return outTy;
     },
     codegenC(argsC, argTypes) {
-      const aMulti = isMultiElement(argTypes[0]);
-      const bMulti = isMultiElement(argTypes[1]);
+      const aN = argTypes[0] as NumericType;
+      const bN = argTypes[1] as NumericType;
+      const aMulti = isMultiElement(aN);
+      const bMulti = isMultiElement(bN);
       if (!aMulti && !bMulti) {
         return scalarExpr(argsC[0], argsC[1]);
       }
       if (aMulti && bMulti) {
+        // Re-derive broadcast vs same-shape from the arg types. Identical
+        // logic to `elemwiseResultShape`, but kept inline so codegen
+        // can decide without threading state from `transfer`.
+        const rnd = Math.max(aN.dims.length, bN.dims.length);
+        let needsBcast = aN.dims.length !== bN.dims.length;
+        if (!needsBcast) {
+          for (let i = 0; i < rnd; i++) {
+            const da = aN.dims[i];
+            const db = bN.dims[i];
+            const aOne = isDimOne(da);
+            const bOne = isDimOne(db);
+            if (aOne !== bOne) {
+              needsBcast = true;
+              break;
+            }
+          }
+        }
+        if (needsBcast) {
+          return `mtoc2_tensor_${helperBase}_bcast_tt(${argsC[0]}, ${argsC[1]})`;
+        }
         return `mtoc2_tensor_${helperBase}_tt(${argsC[0]}, ${argsC[1]})`;
       }
       if (aMulti) {

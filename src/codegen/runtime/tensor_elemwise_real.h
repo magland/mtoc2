@@ -1,17 +1,24 @@
 /* mtoc2 runtime helpers: elementwise binary + unary ops on real
- * tensors. Same-shape only (slope-3 first slice) — general broadcast
- * comes later.
+ * tensors.
  *
  * Convention in the function names:
- *   `_tt` — both args are tensors of the same shape
- *   `_ts` — tensor + scalar (broadcast scalar across all elements)
- *   `_st` — scalar + tensor (only emitted for non-commutative ops)
+ *   `_tt`       — both args are tensors of the same statically-known
+ *                 shape (the codegen fast path)
+ *   `_ts`       — tensor + scalar (broadcast scalar across all elements)
+ *   `_st`       — scalar + tensor (only emitted for non-commutative ops)
+ *   `_bcast_tt` — both args are tensors but at least one axis needs
+ *                 MATLAB-style implicit expansion. Pads the shorter
+ *                 shape with trailing 1s and uses stride=0 on any
+ *                 singleton axis. Allocates a result tensor of the
+ *                 broadcast output shape and walks it column-major.
  *
  * Every helper returns a freshly-owned tensor — the codegen
  * invariant. The caller hands the result to `mtoc2_tensor_assign`
  * (or to a hoisted temp Assign for in-line uses). No shape check
- * here: same-shape requirement is enforced statically at lowering
- * time, so the runtime trusts its inputs.
+ * in the same-shape paths: that requirement is enforced statically
+ * at lowering time, so the runtime trusts its inputs. The bcast
+ * helper similarly trusts that each axis pair is either equal or
+ * has 1 on at least one side.
  */
 
 #include <stdlib.h>
@@ -55,6 +62,51 @@
     return r;                                                               \
   }
 
+/* Broadcasting tensor-tensor helper. MATLAB-style implicit expansion:
+ * pad the shorter shape with trailing 1s, then for each axis either
+ * the dims match or one of them is 1 (replicated to the other's size).
+ * The codegen path emits this only when at least one axis statically
+ * needs broadcasting; same-shape calls still go through `_tt`. */
+#define MTOC2_DEFINE_ELEMWISE_BCAST_TT(name, OP)                            \
+  static mtoc2_tensor_t name(mtoc2_tensor_t a, mtoc2_tensor_t b) {          \
+    int rnd = a.ndim > b.ndim ? a.ndim : b.ndim;                            \
+    long adim[MTOC2_MAX_NDIM], bdim[MTOC2_MAX_NDIM];                        \
+    long rdim[MTOC2_MAX_NDIM];                                              \
+    long astride[MTOC2_MAX_NDIM], bstride[MTOC2_MAX_NDIM];                  \
+    long aacc = 1, bacc = 1;                                                \
+    long n = 1;                                                             \
+    for (int i = 0; i < rnd; i++) {                                         \
+      adim[i] = (i < a.ndim) ? a.dims[i] : 1;                               \
+      bdim[i] = (i < b.ndim) ? b.dims[i] : 1;                               \
+      rdim[i] = (adim[i] == 1) ? bdim[i] : adim[i];                         \
+      astride[i] = (adim[i] == 1) ? 0 : aacc;                               \
+      bstride[i] = (bdim[i] == 1) ? 0 : bacc;                               \
+      aacc *= adim[i];                                                      \
+      bacc *= bdim[i];                                                      \
+      n *= rdim[i];                                                         \
+    }                                                                       \
+    mtoc2_tensor_t r;                                                       \
+    r.real = mtoc2_alloc((size_t)n * sizeof(double));                       \
+    r.imag = NULL;                                                          \
+    r.ndim = rnd;                                                           \
+    for (int i = 0; i < rnd; i++) r.dims[i] = rdim[i];                      \
+    long ix[MTOC2_MAX_NDIM] = {0};                                          \
+    for (long k = 0; k < n; k++) {                                          \
+      long ai = 0, bi = 0;                                                  \
+      for (int i = 0; i < rnd; i++) {                                       \
+        ai += ix[i] * astride[i];                                           \
+        bi += ix[i] * bstride[i];                                           \
+      }                                                                     \
+      r.real[k] = a.real[ai] OP b.real[bi];                                 \
+      for (int i = 0; i < rnd; i++) {                                       \
+        ix[i]++;                                                            \
+        if (ix[i] < rdim[i]) break;                                         \
+        ix[i] = 0;                                                          \
+      }                                                                     \
+    }                                                                       \
+    return r;                                                               \
+  }
+
 MTOC2_DEFINE_ELEMWISE_TT(mtoc2_tensor_plus_tt, +)
 MTOC2_DEFINE_ELEMWISE_TT(mtoc2_tensor_minus_tt, -)
 MTOC2_DEFINE_ELEMWISE_TT(mtoc2_tensor_times_tt, *)
@@ -69,6 +121,11 @@ MTOC2_DEFINE_ELEMWISE_TS(mtoc2_tensor_rdivide_ts, /)
  * Non-commutative ops need their own scalar-first flavor. */
 MTOC2_DEFINE_ELEMWISE_ST(mtoc2_tensor_minus_st, -)
 MTOC2_DEFINE_ELEMWISE_ST(mtoc2_tensor_rdivide_st, /)
+
+MTOC2_DEFINE_ELEMWISE_BCAST_TT(mtoc2_tensor_plus_bcast_tt, +)
+MTOC2_DEFINE_ELEMWISE_BCAST_TT(mtoc2_tensor_minus_bcast_tt, -)
+MTOC2_DEFINE_ELEMWISE_BCAST_TT(mtoc2_tensor_times_bcast_tt, *)
+MTOC2_DEFINE_ELEMWISE_BCAST_TT(mtoc2_tensor_rdivide_bcast_tt, /)
 
 /* Unary minus — negate every element. */
 static mtoc2_tensor_t mtoc2_tensor_uminus(mtoc2_tensor_t a) {

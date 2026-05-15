@@ -210,11 +210,19 @@ Today's builtins:
   - scalar OP scalar → inline `(a cOp b)` in C
   - tensor OP scalar / scalar OP tensor → `mtoc2_tensor_<op>_ts` (or
     `_st` for non-commutative ops)
-  - tensor OP tensor (same statically-known shape) →
+  - tensor OP tensor, same statically-known shape →
     `mtoc2_tensor_<op>_tt`
-
-  General broadcast for mismatched non-scalar shapes is not yet
-  supported.
+  - tensor OP tensor with MATLAB-style implicit expansion (any axis
+    where one side is statically 1 against a non-singleton sibling,
+    or where ndims differ and the shorter shape needs trailing-1
+    padding) → `mtoc2_tensor_<op>_bcast_tt`. The transfer pads both
+    operands to the common ndim, validates each axis pair as
+    `equal || one of them is 1`, and folds when every input is exact
+    and the output fits the exact-array cap. The C helper uses
+    stride=0 on each singleton axis and walks the result column-major.
+    Same broadcast rule for the FN-kernel ops (`mod`, `rem`, `atan2`,
+    `hypot`, `power`) — `mtoc2_tensor_<op>_bcast_tt` lives in the
+    `tensor_elemwise_real_fn.h` snippet.
 
 - **Matrix `*` / `/`** — `mtimes`, `mrdivide`. Fall through to the
   elementwise siblings when at least one arg is scalar; throw
