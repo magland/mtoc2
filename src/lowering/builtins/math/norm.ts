@@ -19,8 +19,6 @@ import {
   type NumericType,
   isMultiElement,
   isNumeric,
-  isRowVecTy,
-  isColVecTy,
   isScalar,
   scalarDouble,
   signFromNumber,
@@ -63,7 +61,17 @@ export const norm: Builtin = {
       }
       return scalarDouble("nonneg");
     }
-    if (!isRowVecTy(a) && !isColVecTy(a)) {
+    // Accept anything statically vector-shaped: at least one dim must
+    // be statically singleton. (`isRowVecTy` / `isColVecTy` additionally
+    // require the OTHER dim to be exact, which excludes the common
+    // runtime-length-column case — we relax that here.)
+    const isVecShape =
+      a.dims.length === 2 &&
+      (a.dims[0].kind === "exact" && a.dims[0].value === 1) ||
+      (a.dims.length === 2 &&
+        a.dims[1].kind === "exact" &&
+        a.dims[1].value === 1);
+    if (!isVecShape) {
       throw new TypeError(
         `'norm' input must be a vector (got ${typeToString(a)}); ` +
           `matrix-norm forms are not yet supported`,

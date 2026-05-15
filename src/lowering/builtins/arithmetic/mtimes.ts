@@ -104,10 +104,13 @@ export const mtimes: Builtin = {
         span
       );
     }
-    const aRows = a.shape?.[0];
-    const aCols = a.shape?.[1];
-    const bRows = b.shape?.[0];
-    const bCols = b.shape?.[1];
+    // Read dims directly (not `shape`) so partially-known cases —
+    // e.g. `[?, 1] * [1, ?]` — preserve their known axes in the
+    // result type. `shape` is only set when every axis is exact.
+    const aRows = a.dims[0].kind === "exact" ? a.dims[0].value : undefined;
+    const aCols = a.dims[1].kind === "exact" ? a.dims[1].value : undefined;
+    const bRows = b.dims[0].kind === "exact" ? b.dims[0].value : undefined;
+    const bCols = b.dims[1].kind === "exact" ? b.dims[1].value : undefined;
     if (aCols !== undefined && bRows !== undefined && aCols !== bRows) {
       throw new TypeError(
         `'mtimes' inner-dim mismatch: ${aRows ?? "?"}×${aCols} * ${bRows}×${bCols ?? "?"}`,

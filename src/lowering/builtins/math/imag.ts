@@ -4,10 +4,10 @@
  * input the result is `cimag(z)`.
  */
 
-import { UnsupportedConstruct } from "../../errors.js";
 import {
   type NumericType,
   scalarDouble,
+  tensorDoubleFromDims,
   isMultiElement,
   signFromNumber,
 } from "../../types.js";
@@ -21,10 +21,10 @@ export const imag: Builtin = {
     requireRealOrComplex(argTypes[0], `'imag' arg`, span);
     const a = argTypes[0] as NumericType;
     if (isMultiElement(a)) {
-      throw new UnsupportedConstruct(
-        `'imag' on a tensor is not yet supported`,
-        span
-      );
+      // Real or complex tensor → real tensor of the same shape.
+      const out = tensorDoubleFromDims(a.dims.slice());
+      if (!a.isComplex) out.sign = "zero";
+      return out;
     }
     if (a.isComplex) {
       const cx = exactComplex(a);
@@ -33,13 +33,22 @@ export const imag: Builtin = {
       }
       return scalarDouble();
     }
-    // Real input — always 0.
     return scalarDouble("zero", 0);
   },
   codegenC(argsC, argTypes) {
     const a = argTypes[0] as NumericType;
+    if (isMultiElement(a)) {
+      if (a.isComplex) return `mtoc2_tensor_imag_complex(${argsC[0]})`;
+      // Real tensor — imag is all zeros. Build via 0 * the input so
+      // the codegen produces an owned freshly-allocated tensor.
+      return `mtoc2_tensor_times_ts(${argsC[0]}, 0.0)`;
+    }
     if (a.isComplex) return `mtoc2_cimag(${argsC[0]})`;
     return `0.0`;
   },
-  runtimeDeps: ["mtoc2_cscalar"],
+  runtimeDeps: [
+    "mtoc2_cscalar",
+    "mtoc2_tensor_unary_complex_math",
+    "mtoc2_tensor_elemwise_real",
+  ],
 };

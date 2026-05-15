@@ -41,9 +41,12 @@ g(1) = beta;
 iters = 0;
 for k = 1:maxit
     % Arnoldi step: w = A * V(:, k), orthogonalize against V(:, 1:k).
+    % Inner product via `sum(conj(V(:,j)) .* w)` rather than
+    % `V(:,j)' * w` — `'` on a column of statically-unknown length
+    % isn't yet supported in mtoc2.
     w = A * V(:, k);
     for j = 1:k
-        H(j, k) = V(:, j)' * w;
+        H(j, k) = sum(conj(V(:, j)) .* w, 'all');
         w = w - H(j, k) * V(:, j);
     end
     H(k + 1, k) = norm(w);
