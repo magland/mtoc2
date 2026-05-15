@@ -71,8 +71,12 @@ type Type =
 }
 ```
 
-- `elem` and `isComplex` are independent axes (complex isn't yet
-  wired through codegen).
+- `elem` and `isComplex` are independent axes. When `isComplex`
+  is set, every factory enforces `sign === "unknown"` at the
+  construction site — complex values have no order on the real
+  line, so the sign lattice doesn't apply. There is no
+  post-observation normalize pass; honoring the invariant is the
+  factory's responsibility.
 - `dims` is a per-axis lattice — each axis is either `{kind:
 "exact", value: n}` or `{kind: "unknown"}`. `shape` mirrors `dims`
   as a plain `number[]` when every axis is exact, for convenience.
@@ -219,18 +223,21 @@ rejected at lowering.
 ```ts
 type NumericExact =
   | number // scalar real
-  | { re: number; im: number } // scalar complex (reserved, not yet wired)
-  | Float64Array; // dense real array, column-major
+  | { re: number; im: number } // scalar complex
+  | Float64Array // dense real array, column-major
+  | { re: Float64Array; im: Float64Array }; // dense complex array, split-buffer
 ```
 
 Arrays are capped by `EXACT_ARRAY_MAX_ELEMENTS` (256 today). A tensor
-literal larger than the cap throws `UnsupportedConstruct` at lowering
-time. The cap exists so canonical-type strings (used for function
+literal larger than the cap drops `exact` (the runtime helper takes
+over). The cap exists so canonical-type strings (used for function
 specialization keys) stay bounded.
 
 Tensor `exact` storage is **column-major** — same layout as numbl's
 `RuntimeTensor.data`. For shape `[rows, cols]`, the flat index is
-`c * rows + r`.
+`c * rows + r`. The complex-tensor carrier mirrors the runtime's
+split-buffer storage (`re` and `im` are parallel `Float64Array`s of
+length `prod(shape)`); same column-major rule on each lane.
 
 ### Strict equality
 
@@ -319,11 +326,28 @@ circuits codegen, the practical effect of a per-exact-value spec is
 that branches guarded on the input value disappear from the emitted
 body. Arithmetic still emits as runtime C.
 
+### Complex contamination
+
+Any complex operand of a binary op contaminates the result to
+complex. The rule lives in each elemwise builtin's `transfer`
+(plus / minus / times / rdivide; same for mtimes scalar path) plus
+the unary-math factory's complex-input branch — there is no central
+`arithResult` join. Real-tensor + complex-tensor mixing works at
+the runtime helper layer: the complex kernels read each operand's
+imag lane via `(a.imag != NULL) ? a.imag[i] : 0.0`, so a static-real
+tensor (whose `imag` is the NULL marker) flows into `_complex_tt`
+helpers without an explicit promote step. Scalar operands of mixed
+real/complex tensor ops are promoted at emit time via
+`mtoc2_cmake(re, 0.0)` so the runtime helper always sees a
+`double _Complex` in its scalar slot.
+
+`'` (conjugate transpose) on a complex operand lowers to
+`transpose(conj(z))` at the IR level (per the plan's "no native
+ctranspose runtime" decision). For real operands `'` and `.'` are
+identical (both call the real transpose helper).
+
 ## What's not in the lattice yet
 
-- **Complex** — `isComplex` is reserved on `NumericType` but no
-  codegen path wires it through. Builtins with no real-only result
-  (e.g. `sqrt` of a negative) currently reject at translate.
 - **Logical as a distinct kind** — comparisons carry `elem:
 "logical"` but emit as `double` in C. Splitting it off would only
   matter once codegen cares (bit ops, packed storage, etc.).

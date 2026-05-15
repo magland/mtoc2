@@ -187,3 +187,12 @@ is genuinely new or the script needs its own
 contaminate unrelated scripts. Per-script overhead is substantial
 (numbl spawn + mtoc2 spawn + `cc` + run), so keeping the count low
 matters.
+
+Complex tests follow the same rule: a complex regression on
+indexing goes into `indexing.m`, a complex reduction into
+`reducers.m`, a complex unary-math case into `math_builtins.m`,
+etc. The one new topic file is `complex_basics.m`, which collects
+patterns that don't fit any existing topic (scalar literals + arith
+
+- compare + logical + control-flow conds, complex tensor literals,
+  pass-to-func round-trips).

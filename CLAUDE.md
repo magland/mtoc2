@@ -130,13 +130,17 @@ mtoc2 is a _static_ translator. Anything outside the supported subset raises
   defining one `mtoc2_<name>_all` (scalar return) and one
   `mtoc2_<name>_dim` (tensor return) per op. The transfer folds
   exact tensors up to `EXACT_ARRAY_MAX_ELEMENTS`; above the cap (or
-  on opaque input) codegen routes to the runtime. Deferred: the
+  on opaque input) codegen routes to the runtime. Complex input
+  routes through `mtoc2_tensor_reduce_complex` (the parallel
+  `_complex` snippet) — `sum`/`prod`/`mean` use a lane-pair
+  accumulator, `min`/`max` compare on magnitude with `atan2`
+  tiebreak (matching numbl's `complexIsBetter`), `any`/`all`
+  toBool each element as `re != 0 || im != 0`. Deferred: the
   elementwise 2-arg form `min(A, B)` / `max(A, B)`, the multi-
   output `[v, i] = min(x)` index-returning form, the
-  `'omitnan'` / `'includenan'` flag, complex input, runtime
-  (non-exact) integer `dim`, and reducers on a genuinely
-  ambiguous lattice (`[notOne, unknown]` without an explicit
-  `dim`). `length` / `numel` are not reducers and stay routed
+  `'omitnan'` / `'includenan'` flag, runtime (non-exact) integer
+  `dim`, and reducers on a genuinely ambiguous lattice
+  (`[notOne, unknown]` without an explicit `dim`). `length` / `numel` are not reducers and stay routed
   through `mtoc2_length` / `mtoc2_numel` (codegen emits the
   literal `1.0` for scalar args since the C arg is a bare
   `double`).
@@ -316,11 +320,26 @@ reads (`a(idx_vec)` in a single-slot context), vector-of-indices
 _write_ (`a(idx_vec) = rhs`),
 member-rooted index _write_ (`obj.f(i) = rhs`),
 indexed-delete (`a(2:5) = []`), unknown-shape constructors
-(`zeros(n)` where `n` is a runtime-only scalar), complex, text
+(`zeros(n)` where `n` is a runtime-only scalar), text
 concat (`[a, b]` of two chars), char arithmetic (`'A' + 1`),
 `strcmp`, builtin handles, `private/` directories, `import`
 statements, `.numbl.js` user functions. Expanding scope is gated by
 the cross-runner.
+
+**Complex numbers** are supported end-to-end (scalar + tensor) —
+literals `1i`/`2.5i`, scalar arithmetic + compare + logical,
+`real`/`imag`/`conj`/`angle`/`abs`, tensor literals + arithmetic
+(elemwise + broadcast + uminus), unary math (`sqrt`/`exp`/`log`/
+`log2`/`log10`/`sin`/`cos`/`tan`/`atan`/`floor`/`ceil`/`round`/
+`fix`/`sign`/`conj`), indexing (scalar + slice; reject complex RHS
+into real base with a clear message), reductions
+(`sum`/`prod`/`mean`/`min`/`max`/`any`/`all`), reshape, `.'`
+transpose, and `'` conjugate transpose (lowered to
+`transpose(conj(z))`). Real ↔ complex mixing works in tensor
+arithmetic because the runtime helpers branch on `imag != NULL`
+inside the elemwise / unary-math kernels. Deferred: tensor `mtimes`
+on two complex operands, complex args to `fprintf` / `error` /
+`sprintf` / plot dispatch, and the `complex(a, b)` constructor.
 
 ## Docs are part of the change
 

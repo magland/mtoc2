@@ -184,6 +184,21 @@ into a single `.h` (`tensor_elemwise_real.h`,
 `tensor_unary_real_math.h`, `tensor_reduce_real.h`, …) so the
 runtime side scales without per-op duplication.
 
+**Parallel `_real.h` / `_complex.h` runtime helpers.** Each per-
+family `.h` ships a `_complex` sibling (`tensor_elemwise_complex.h`,
+`tensor_unary_complex_math.h`, `tensor_reduce_complex.h`,
+`tensor_reshape_nd_complex.h`, `tensor_transpose_complex.h`). The
+codegen dispatches on the input's `isComplex` flag and routes to
+the matching helper. The complex kernels build per-element
+`double _Complex` values via `mtoc2_cmake` and route arithmetic
+through the `mtoc2_c*` wrappers in `cscalar.h` — never through
+bare C99 `<complex.h>` operators. That keeps the body translatable
+by the c2js backend (which substitutes `{re, im}`-object JS
+implementations for those wrappers at link time). The complex
+helpers tolerate `imag == NULL` on either operand by treating its
+imag lane as zero, so a real tensor flowing into a complex op
+needs no explicit promote step.
+
 For the current set of names and their per-call behavior, read
 `src/lowering/builtins/` and the `Builtin` registrations — the
 source is short and the scope list in [CLAUDE.md](../CLAUDE.md)
