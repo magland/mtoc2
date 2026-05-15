@@ -7,6 +7,7 @@ test_sqrt_log_positive();
 test_round_matlab_style();
 test_constants();
 test_constants_in_arith();
+test_nan_inf_shape_constructors();
 test_binary_scalar();
 test_binary_tensor();
 test_binary_runtime();
@@ -190,6 +191,34 @@ function test_constants_in_arith()
   disp(sin(pi));
   disp(cos(2 * pi));
   disp(exp(1));
+end
+
+function test_nan_inf_shape_constructors()
+  % 0-arg form still returns the scalar constant.
+  disp(nan);
+  disp(Inf);
+  % Empty 0×0 (single-arg square form) — disp prints nothing.
+  disp(nan(0));
+  disp('---');
+  % Single-arg square forms.
+  disp(nan(3));
+  disp(Inf(3));
+  % Multi-arg forms.
+  disp(nan(2, 3));
+  disp(inf(2, 2));
+  disp(NaN(1, 4));
+  % Runtime (opaque) dim — exercises the `_square` single-eval path
+  % and the dynamic `_nd` path.
+  n = 2;
+  %!numbl:opaque n
+  disp(nan(n));
+  m = 3;
+  %!numbl:opaque m
+  disp(Inf(2, m));
+  % 1×1 collapse: the result is a scalar (every axis 1), so the
+  % literal value flows through scalar arithmetic.
+  disp(nan(1, 1) + 0);
+  disp(Inf(1, 1) - 1);
 end
 
 function test_binary_scalar()

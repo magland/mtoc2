@@ -220,19 +220,47 @@ function dimC(axis: ResolvedAxis, argsC: string[]): string {
   return `(long)(${argsC[axis.argIndex]})`;
 }
 
-/** Build a `zeros` / `ones` builtin. `fillValue` is the constant the
- *  output is filled with at both type-level (Float64Array) and C
- *  level (the matching `_zeros_nd` / `_ones_nd` helper). The
- *  `squareHelper` covers the single-eval n×n form. */
+/** Options for `defineShapeConstructor`. When `cFillValue` is set, the
+ *  factory builds a "parameterized fill" constructor: the runtime
+ *  helpers are invoked with `cFillValue` as their first arg
+ *  (`mtoc2_tensor_fill_nd(v, ndim, dims)` style) and the scalar-
+ *  collapse emit uses `cFillValue` verbatim. This is the path used by
+ *  the non-finite constants (`nan`/`NaN`/`Inf`/`inf`), where the JS
+ *  number's `toString` ("NaN" / "Infinity") doesn't round-trip to
+ *  valid C. When `cFillValue` is undefined, the factory keeps the
+ *  original zeros/ones contract: helpers take `(ndim, dims)` only
+ *  and scalar collapse emits a JS-derived literal. */
+interface ShapeConstructorOpts {
+  /** Inclusive lower bound on argument count. Defaults to 1 (zeros /
+   *  ones don't accept the 0-arg form). Set to 0 by callers that
+   *  combine a scalar-constant 0-arg branch with the shape
+   *  constructor (the constants in `math/constants.ts`); the
+   *  combined builtin's transfer/codegen pre-dispatches 0 args
+   *  before delegating to this factory's transfer/codegen. */
+  minArgs?: number;
+  /** When set, prepend this C expression as the first arg of every
+   *  helper call and emit it directly for the scalar-collapse case.
+   *  Required when `fillValue` is non-finite (NaN/Infinity). */
+  cFillValue?: string;
+}
+
+/** Build a `zeros` / `ones` / fill-style shape-constructor builtin.
+ *  `fillValue` is the constant the output is filled with at the
+ *  type level (Float64Array). See `ShapeConstructorOpts.cFillValue`
+ *  for the per-helper invocation contract. */
 export function defineShapeConstructor(
   name: string,
   fillValue: number,
   ndHelper: string,
-  squareHelper: string
+  squareHelper: string,
+  opts: ShapeConstructorOpts = {}
 ): Builtin {
+  const minArgs = opts.minArgs ?? 1;
+  const cFillValue = opts.cFillValue;
+  const helperPrefix = cFillValue !== undefined ? `${cFillValue}, ` : "";
   return {
     name,
-    arity: { min: 1, max: MTOC2_MAX_NDIM },
+    arity: { min: minArgs, max: MTOC2_MAX_NDIM },
     transfer(argTypes, span) {
       const resolved = resolveShape(name, argTypes, span);
       const shape = exactShapeOf(resolved);
@@ -292,12 +320,13 @@ export function defineShapeConstructor(
         // surrounding code expects a `double`-valued expression
         // matching the scalar result type. Emit the literal directly.
         if (shape.every(s => s === 1)) {
+          if (cFillValue !== undefined) return cFillValue;
           return Number.isInteger(fillValue)
             ? `${fillValue}.0`
             : `${fillValue}`;
         }
         const dimList = shape.map(d => `${d}L`).join(", ");
-        return `${ndHelper}(${resolved.ndim}, (long[]){${dimList}})`;
+        return `${ndHelper}(${helperPrefix}${resolved.ndim}, (long[]){${dimList}})`;
       }
       // Dynamic single-arg square form — evaluate the source arg once.
       // (`isSquare` triggers regardless of whether the source value is
@@ -305,10 +334,10 @@ export function defineShapeConstructor(
       // undefined` branch above; only dynamic single-arg lands here.)
       if (resolved.isSquare) {
         const src = resolved.axes[0];
-        return `${squareHelper}((long)(${argsC[src.argIndex]}))`;
+        return `${squareHelper}(${helperPrefix}(long)(${argsC[src.argIndex]}))`;
       }
       const dimList = resolved.axes.map(a => dimC(a, argsC)).join(", ");
-      return `${ndHelper}(${resolved.ndim}, (long[]){${dimList}})`;
+      return `${ndHelper}(${helperPrefix}${resolved.ndim}, (long[]){${dimList}})`;
     },
     runtimeDeps: [ndHelper, squareHelper],
   };
