@@ -252,6 +252,18 @@ const REGISTRY: ReadonlyMap<string, RuntimeSnippet> = new Map<
     "mtoc2_tensor_ones_square",
     loadSnippet("tensor_ones_square.h", ["mtoc2_tensor_ones_nd"]),
   ],
+  // Parameterized fill (used by the `nan` / `NaN` / `Inf` / `inf`
+  // shape-constructor branch). The `_nd` helper takes the fill value
+  // as a leading `double`; `_square` is the single-eval companion for
+  // MATLAB's `nan(n)` n×n shorthand.
+  [
+    "mtoc2_tensor_fill_nd",
+    loadSnippet("tensor_fill_nd.h", ["mtoc2_tensor_alloc_nd"]),
+  ],
+  [
+    "mtoc2_tensor_fill_square",
+    loadSnippet("tensor_fill_square.h", ["mtoc2_tensor_fill_nd"]),
+  ],
   [
     "mtoc2_reshape_nd",
     loadSnippet("tensor_reshape_nd.h", [

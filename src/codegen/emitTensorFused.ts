@@ -76,6 +76,14 @@ export function isPureElementwiseExpr(e: IRExpr): boolean {
     case "Call": {
       const b = getBuiltin(e.name);
       if (!b || !b.perSlotC) return false;
+      // perSlotC only makes sense for Calls whose result is a scalar
+      // value the per-slot loop can stamp into each output slot. A
+      // tensor-producing Call (e.g. the shape-constructor form of
+      // `nan(2,3)`) defines perSlotC for its 0-arg scalar branch but
+      // returns a fresh tensor when invoked with shape args — that
+      // doesn't fit the fused-loop contract, so route through the
+      // standard runtime-helper path instead.
+      if (isNumeric(e.ty) && isMultiElement(e.ty)) return false;
       return e.args.every(isPureElementwiseExpr);
     }
     default:
