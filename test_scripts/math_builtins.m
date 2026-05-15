@@ -17,6 +17,9 @@ test_minmax_two_arg();
 test_sign_propagation_chain();
 test_complex_part_builtins();
 test_complex_abs_angle();
+test_complex_unary_scalar();
+test_complex_unary_tensor();
+test_complex_unary_runtime();
 
 function test_scalar_exact_unary()
   % Trig
@@ -343,4 +346,60 @@ function test_complex_abs_angle()
   z = 3 + 4i;
   %!numbl:opaque z
   disp(abs(z));
+end
+
+% Scalar complex unary math — exact-fold path for the 14 ops the
+% unary-real factory grew complex support for in Phase 4.
+function test_complex_unary_scalar()
+  z = 3 + 4i;
+  disp(sqrt(z));
+  disp(exp(1i));
+  disp(log(-1 + 0i));
+  disp(sin(1i));
+  disp(cos(0 + 1i));
+  disp(tan(1 + 1i));
+  disp(atan(1 + 1i));
+  disp(floor(1.5 + 2.7i));
+  disp(ceil(1.2 - 2.7i));
+  disp(round(1.5 + 2.4i));
+  disp(fix(1.7 - 2.7i));
+  disp(sign(3 + 4i));
+  disp(sign(0i));
+end
+
+% Same ops on a complex tensor — exercises the per-op
+% `_complex` runtime tensor helper.
+function test_complex_unary_tensor()
+  a = [1+1i, 2+2i, 3+3i];
+  disp(exp(a));
+  disp(sqrt(a));
+  disp(log(a));
+  disp(sin(a));
+  disp(cos(a));
+  disp(tan(a));
+  disp(atan(a));
+  disp(floor(a));
+  disp(ceil(a));
+  disp(round(a));
+  disp(fix(a));
+  disp(sign(a));
+  disp(abs(a));
+end
+
+% Opaque (no-fold) path on a scalar; force the runtime call.
+function test_complex_unary_runtime()
+  z = 2 + 3i;
+  %!numbl:opaque z
+  disp(sqrt(z));
+  disp(exp(z));
+  disp(log(z));
+  disp(sin(z));
+  disp(cos(z));
+  disp(tan(z));
+  disp(atan(z));
+  disp(floor(z));
+  disp(ceil(z));
+  disp(round(z));
+  disp(fix(z));
+  disp(sign(z));
 end

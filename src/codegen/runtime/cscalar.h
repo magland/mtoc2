@@ -49,3 +49,49 @@ static inline int mtoc2_cne(double _Complex a, double _Complex b) {
 static inline double _Complex mtoc2_cpow(double _Complex a, double _Complex b) {
   return cpow(a, b);
 }
+
+/* Unary complex math — `<complex.h>` wrappers + a handful of
+ * derived helpers C99 doesn't ship (log2/log10, MATLAB-style
+ * componentwise rounding, signum). Same `mtoc2_c*` shape as the
+ * core scalar helpers above so the c2js backend can substitute
+ * its own `{re, im}` JS implementations.
+ *
+ * The rounding helpers (floor/ceil/round/fix) match MATLAB by
+ * applying the rounding mode to each component independently and
+ * returning a complex result; the magnitude is NOT preserved
+ * (MATLAB's `floor([1.5 + 1.5i])` returns `1 + 1i`, not the
+ * floor of the magnitude).
+ *
+ * `mtoc2_csign(z)` matches MATLAB: `z/|z|` for nonzero, exactly
+ * `0 + 0i` for the zero scalar. */
+static inline double _Complex mtoc2_csqrt(double _Complex z) { return csqrt(z); }
+static inline double _Complex mtoc2_cexp(double _Complex z) { return cexp(z); }
+static inline double _Complex mtoc2_clog(double _Complex z) { return clog(z); }
+static inline double _Complex mtoc2_clog2(double _Complex z) {
+  return clog(z) / log(2.0);
+}
+static inline double _Complex mtoc2_clog10(double _Complex z) {
+  return clog(z) / log(10.0);
+}
+static inline double _Complex mtoc2_csin(double _Complex z) { return csin(z); }
+static inline double _Complex mtoc2_ccos(double _Complex z) { return ccos(z); }
+static inline double _Complex mtoc2_ctan(double _Complex z) { return ctan(z); }
+static inline double _Complex mtoc2_catan(double _Complex z) { return catan(z); }
+static inline double _Complex mtoc2_cfloor(double _Complex z) {
+  return floor(creal(z)) + floor(cimag(z)) * I;
+}
+static inline double _Complex mtoc2_cceil(double _Complex z) {
+  return ceil(creal(z)) + ceil(cimag(z)) * I;
+}
+static inline double _Complex mtoc2_cround(double _Complex z) {
+  return round(creal(z)) + round(cimag(z)) * I;
+}
+static inline double _Complex mtoc2_cfix(double _Complex z) {
+  return trunc(creal(z)) + trunc(cimag(z)) * I;
+}
+static inline double _Complex mtoc2_csign(double _Complex z) {
+  double re = creal(z), im = cimag(z);
+  if (re == 0.0 && im == 0.0) return 0.0;
+  double m = hypot(re, im);
+  return (re / m) + (im / m) * I;
+}

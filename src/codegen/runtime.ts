@@ -370,6 +370,23 @@ const REGISTRY: ReadonlyMap<string, RuntimeSnippet> = new Map<
       "mtoc2_cdiv",
     ]),
   ],
+  // Elementwise unary math on complex tensors. Mirrors
+  // `tensor_unary_real_math.h` but the per-op kernel routes through
+  // `mtoc2_c*` wrappers in `cscalar.h` (rather than bare libm
+  // `c*` calls) so c2js can substitute its `{re, im}` JS impls.
+  // Activated by the per-builtin unary math files (sqrt, exp, log,
+  // sin/cos/tan, atan, floor/ceil/round/fix, sign, abs) when the
+  // input type carries `isComplex`.
+  [
+    "mtoc2_tensor_unary_complex_math",
+    loadSnippet("tensor_unary_complex_math.h", [
+      "mtoc2_tensor_t",
+      "mtoc2_alloc",
+      "mtoc2_tensor_alloc_nd",
+      "mtoc2_tensor_alloc_nd_complex",
+      "mtoc2_cscalar",
+    ]),
+  ],
 
   // ── Elementwise binary/unary on real tensors ──────────────────────
   // One snippet covers all 11 funcs (4×_tt, 4×_ts, 2×_st, 1×uminus).

@@ -570,6 +570,83 @@ function mtoc2_cpow(a, b) {
   return { re: m * Math.cos(ei), im: m * Math.sin(ei) };
 }
 
+// Unary complex math. JS implementations of the cscalar.h wrappers
+// for \`<complex.h>\` functions (which c2js can't translate directly).
+// Each computes the same value the libm \`c*\` function would.
+function __rt_cMakeFromExpPhase(mag, phase) {
+  return { re: mag * Math.cos(phase), im: mag * Math.sin(phase) };
+}
+function mtoc2_csqrt(z) {
+  const re = __rt_cre(z), im = __rt_cim(z);
+  const mag = Math.sqrt(Math.hypot(re, im));
+  const phase = 0.5 * Math.atan2(im, re);
+  return __rt_cMakeFromExpPhase(mag, phase);
+}
+function mtoc2_cexp(z) {
+  const re = __rt_cre(z), im = __rt_cim(z);
+  const m = Math.exp(re);
+  return { re: m * Math.cos(im), im: m * Math.sin(im) };
+}
+function mtoc2_clog(z) {
+  const re = __rt_cre(z), im = __rt_cim(z);
+  return { re: 0.5 * Math.log(re * re + im * im), im: Math.atan2(im, re) };
+}
+function mtoc2_clog2(z) {
+  const w = mtoc2_clog(z);
+  const k = Math.log(2);
+  return { re: w.re / k, im: w.im / k };
+}
+function mtoc2_clog10(z) {
+  const w = mtoc2_clog(z);
+  const k = Math.log(10);
+  return { re: w.re / k, im: w.im / k };
+}
+function mtoc2_csin(z) {
+  // sin(a + bi) = sin(a)cosh(b) + i*cos(a)sinh(b)
+  const a = __rt_cre(z), b = __rt_cim(z);
+  return { re: Math.sin(a) * Math.cosh(b), im: Math.cos(a) * Math.sinh(b) };
+}
+function mtoc2_ccos(z) {
+  // cos(a + bi) = cos(a)cosh(b) - i*sin(a)sinh(b)
+  const a = __rt_cre(z), b = __rt_cim(z);
+  return { re: Math.cos(a) * Math.cosh(b), im: -Math.sin(a) * Math.sinh(b) };
+}
+function mtoc2_ctan(z) {
+  // tan(z) = sin(z)/cos(z) via the helpers above; mtoc2_cdiv matches numbl.
+  return mtoc2_cdiv(mtoc2_csin(z), mtoc2_ccos(z));
+}
+function mtoc2_catan(z) {
+  // atan(z) = (i/2) * (log(1 - i*z) - log(1 + i*z))
+  // = (i/2) * log((1 - i*z)/(1 + i*z))
+  const iz = { re: -__rt_cim(z), im: __rt_cre(z) };
+  const num = { re: 1 - iz.re, im: -iz.im };
+  const den = { re: 1 + iz.re, im: iz.im };
+  const q = mtoc2_cdiv(num, den);
+  const l = mtoc2_clog(q);
+  // multiply by i/2:  (a + bi) * (i/2) = -b/2 + (a/2)i
+  return { re: -l.im / 2, im: l.re / 2 };
+}
+function mtoc2_cfloor(z) {
+  return { re: Math.floor(__rt_cre(z)), im: Math.floor(__rt_cim(z)) };
+}
+function mtoc2_cceil(z) {
+  return { re: Math.ceil(__rt_cre(z)), im: Math.ceil(__rt_cim(z)) };
+}
+function mtoc2_cround(z) {
+  // Half-away-from-zero on each component (matches C99 \`round\`).
+  const r = (x) => (x >= 0 ? Math.floor(x + 0.5) : -Math.floor(-x + 0.5));
+  return { re: r(__rt_cre(z)), im: r(__rt_cim(z)) };
+}
+function mtoc2_cfix(z) {
+  return { re: Math.trunc(__rt_cre(z)), im: Math.trunc(__rt_cim(z)) };
+}
+function mtoc2_csign(z) {
+  const re = __rt_cre(z), im = __rt_cim(z);
+  if (re === 0 && im === 0) return { re: 0, im: 0 };
+  const m = Math.hypot(re, im);
+  return { re: re / m, im: im / m };
+}
+
 // disp/format helpers for scalar complex. \`mtoc2_format_complex\`
 // mirrors numbl's \`formatComplex\` and \`disp_complex.h\` so cross-
 // runner stdout aligns byte-for-byte with the native run.

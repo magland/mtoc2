@@ -1,10 +1,11 @@
 import { defineUnaryRealMath } from "./_unary_real.js";
 import { TypeError } from "../../errors.js";
 import { signIsPositive } from "../../types.js";
+import { cLog2 } from "./_complex_fold.js";
 
-/** Base-2 log. Same positive-domain restriction as `log`.
- *  Single-output form only; two-output frexp form `[f,e] = log2(x)`
- *  is deferred.
+/** Base-2 log. Same positive-domain restriction as `log` on the real
+ *  path; complex inputs fold/emit through `mtoc2_clog2`. Single-output
+ *  form only; two-output frexp form `[f,e] = log2(x)` is deferred.
  */
 export const log2 = defineUnaryRealMath({
   name: "log2",
@@ -15,10 +16,11 @@ export const log2 = defineUnaryRealMath({
     if (!signIsPositive(t.sign)) {
       throw new TypeError(
         `'log2' of input that is not statically positive is not yet supported ` +
-          `(produces -Inf or complex; mtoc2 has no complex type). ` +
-          `Pass a statically-positive input or guard upstream.`,
+          `for real-typed input (produces -Inf or complex). Guard upstream ` +
+          `or make the input complex (e.g. 'log2(x + 0i)').`,
         span
       );
     }
   },
+  complex: { cFnComplex: "mtoc2_clog2", jsFnComplex: cLog2 },
 });

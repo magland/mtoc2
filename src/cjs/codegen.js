@@ -240,6 +240,14 @@ const COMPLEX_SKIP_FUNCS = new Set([
   'mtoc2_cadd', 'mtoc2_csub', 'mtoc2_cmul', 'mtoc2_cneg', 'mtoc2_cconj',
   'mtoc2_cabs', 'mtoc2_cangle', 'mtoc2_cnonzero', 'mtoc2_ceq', 'mtoc2_cne', 'mtoc2_cpow',
   'mtoc2_cdiv',
+  // Unary complex math (Phase 4). All wrap a libm `c*` call or
+  // synthesize one from `log` / `exp` / `hypot`. The C bodies use
+  // bare `<complex.h>` returns that c2js can't translate; JS impls
+  // operate on `{re, im}` objects.
+  'mtoc2_csqrt', 'mtoc2_cexp',
+  'mtoc2_clog', 'mtoc2_clog2', 'mtoc2_clog10',
+  'mtoc2_csin', 'mtoc2_ccos', 'mtoc2_ctan', 'mtoc2_catan',
+  'mtoc2_cfloor', 'mtoc2_cceil', 'mtoc2_cround', 'mtoc2_cfix', 'mtoc2_csign',
   'mtoc2_format_complex', 'mtoc2_disp_complex',
   // The disp-tensor-complex pair holds onto bare `_Complex` locals
   // (it materializes a `double _Complex z = mtoc2_cmake(re[i], im[i])`

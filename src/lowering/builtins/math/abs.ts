@@ -1,10 +1,12 @@
-import { UnsupportedConstruct } from "../../errors.js";
 import {
   type NumericType,
   scalarDouble,
+  tensorDouble,
+  tensorDoubleFromDims,
   isMultiElement,
   isScalar,
   signFromNumber,
+  EXACT_ARRAY_MAX_ELEMENTS,
 } from "../../types.js";
 import type { Builtin } from "../registry.js";
 import { requireRealOrComplex, exactComplex } from "../_shared.js";
@@ -24,8 +26,10 @@ const absReal = defineUnaryRealMath({
 });
 
 /** Complex-aware `abs`. Real inputs route through the existing real
- *  builtin (preserving its sign refinement and tensor path); scalar
- *  complex inputs return `hypot(creal, cimag)` as a real double. */
+ *  builtin (preserving its sign refinement and tensor path); complex
+ *  inputs return `hypot(creal, cimag)` per-element, with a REAL result
+ *  type (different shape contract from the rest of the unary-math
+ *  family). */
 export const abs: Builtin = {
   name: "abs",
   arity: 1,
@@ -33,31 +37,56 @@ export const abs: Builtin = {
     requireRealOrComplex(argTypes[0], `'abs' arg`, span);
     const a = argTypes[0] as NumericType;
     if (a.isComplex) {
-      if (isMultiElement(a)) {
-        throw new UnsupportedConstruct(
-          `'abs' on a complex tensor is not yet supported`,
-          span
-        );
+      if (isScalar(a)) {
+        const cx = exactComplex(a);
+        if (cx !== undefined) {
+          const v = Math.hypot(cx.re, cx.im);
+          if (Number.isFinite(v)) return scalarDouble(signFromNumber(v), v);
+        }
+        return scalarDouble("nonneg");
       }
-      if (!isScalar(a)) {
-        throw new UnsupportedConstruct(
-          `'abs' on a complex tensor is not yet supported`,
-          span
-        );
+      // Complex tensor → real tensor (magnitude per element). Fold
+      // via the split-buffer `{re, im}` exact carrier when present
+      // and small enough.
+      if (
+        a.shape !== undefined &&
+        a.exact !== undefined &&
+        typeof a.exact === "object" &&
+        !(a.exact instanceof Float64Array) &&
+        (a.exact as { re?: unknown }).re instanceof Float64Array
+      ) {
+        const cx = a.exact as { re: Float64Array; im: Float64Array };
+        const total = a.shape.reduce((p, q) => p * q, 1);
+        if (total <= EXACT_ARRAY_MAX_ELEMENTS) {
+          const out = new Float64Array(total);
+          for (let i = 0; i < total; i++) {
+            out[i] = Math.hypot(cx.re[i], cx.im[i]);
+          }
+          return tensorDouble(a.shape, out);
+        }
       }
-      const cx = exactComplex(a);
-      if (cx !== undefined) {
-        const v = Math.hypot(cx.re, cx.im);
-        if (Number.isFinite(v)) return scalarDouble(signFromNumber(v), v);
-      }
-      return scalarDouble("nonneg");
+      const out = tensorDoubleFromDims(a.dims.slice());
+      out.sign = "nonneg";
+      return out;
     }
     return absReal.transfer(argTypes, span);
   },
   codegenC(argsC, argTypes) {
     const a = argTypes[0] as NumericType;
-    if (a.isComplex) return `mtoc2_cabs(${argsC[0]})`;
+    if (a.isComplex) {
+      if (isMultiElement(a)) return `mtoc2_tensor_abs_complex(${argsC[0]})`;
+      return `mtoc2_cabs(${argsC[0]})`;
+    }
     return absReal.codegenC(argsC, argTypes);
   },
-  runtimeDeps: [...(absReal.runtimeDeps ?? []), "mtoc2_cscalar"],
+  perSlotC(argsC, argTypes) {
+    const a = argTypes[0] as NumericType;
+    if (a.isComplex) return `mtoc2_cabs(${argsC[0]})`;
+    return absReal.perSlotC!(argsC, argTypes);
+  },
+  runtimeDeps: [
+    ...(absReal.runtimeDeps ?? []),
+    "mtoc2_cscalar",
+    "mtoc2_tensor_unary_complex_math",
+  ],
 };

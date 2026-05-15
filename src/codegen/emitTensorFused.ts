@@ -87,13 +87,27 @@ export function isPureElementwiseExpr(e: IRExpr): boolean {
  *    - target is a real-double multi-element tensor
  *    - RHS is pure elementwise (see `isPureElementwiseExpr`)
  *    - every multi-element Var in the RHS shares the target's static
- *      shape (no broadcasting in this phase) */
+ *      shape (no broadcasting in this phase)
+ *    - no complex tensor anywhere in the RHS — the per-slot renderer
+ *      addresses tensors as `<cName>.real[i]` and drops the imag lane.
+ *      Complex sites take the runtime-helper path. */
 export function isFusableAssign(s: Assign): boolean {
   if (!isNumeric(s.ty)) return false;
   if (s.ty.isComplex) return false;
   if (!isMultiElement(s.ty)) return false;
   if (!isPureElementwiseExpr(s.expr)) return false;
-  return everyTensorVarMatchesShape(s.expr, s.ty);
+  if (!everyTensorVarMatchesShape(s.expr, s.ty)) return false;
+  return !rhsTouchesComplexTensor(s.expr);
+}
+
+function rhsTouchesComplexTensor(e: IRExpr): boolean {
+  let touched = false;
+  walkExpr(e, sub => {
+    if (isNumeric(sub.ty) && isMultiElement(sub.ty) && sub.ty.isComplex) {
+      touched = true;
+    }
+  });
+  return touched;
 }
 
 function everyTensorVarMatchesShape(e: IRExpr, target: NumericType): boolean {
