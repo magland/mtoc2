@@ -28,13 +28,21 @@ export const DEFAULT_OPT_PROFILE: OptProfile = "default";
 export interface OptSettings {
   fastMath: boolean;
   threads: number | "auto";
+  /** Run the tensor-expression inlining pass before codegen.
+   *  Substitutes every single-use multi-element Assign's RHS into
+   *  its unique consumer, eliminating intermediate tensors that the
+   *  un-inlined ANF form materializes. Numerically equivalent to
+   *  the un-inlined build (substitution preserves the IR's `.ty`
+   *  field, so type-directed codegen sees the same values).
+   *  See `src/codegen/inlinePass.ts`. */
+  enableTempInlining: boolean;
 }
 
 const PROFILES: Readonly<Record<OptProfile, OptSettings>> = {
-  none: { fastMath: false, threads: 1 },
-  safe: { fastMath: false, threads: "auto" },
-  default: { fastMath: false, threads: "auto" },
-  aggressive: { fastMath: true, threads: "auto" },
+  none: { fastMath: false, threads: 1, enableTempInlining: false },
+  safe: { fastMath: false, threads: "auto", enableTempInlining: true },
+  default: { fastMath: false, threads: "auto", enableTempInlining: true },
+  aggressive: { fastMath: true, threads: "auto", enableTempInlining: true },
 };
 
 export function profileSettings(profile: OptProfile): OptSettings {
@@ -51,6 +59,8 @@ export function resolveOptSettings(
   return {
     fastMath: overrides.fastMath ?? base.fastMath,
     threads: overrides.threads ?? base.threads,
+    enableTempInlining:
+      overrides.enableTempInlining ?? base.enableTempInlining,
   };
 }
 

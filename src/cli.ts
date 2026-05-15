@@ -50,19 +50,21 @@ function usage(): never {
       "usage:",
       "  mtoc2 run [--js] [--plot] [--check-leaks] [--dump-c <path>] [--dump-js <path>]",
       "    [--opt PROFILE] [--fast-math|--no-fast-math] [--threads N|auto]",
-      "    [--path <dir>...] <script.m>",
+      "    [--inline-temps|--no-inline-temps] [--path <dir>...] <script.m>",
       "  mtoc2 eval [--js] [--plot] [--check-leaks] [--dump-c <path>] [--dump-js <path>]",
-      '    [--opt PROFILE] [--fast-math|--no-fast-math] [--threads N|auto]',
-      '    [--path <dir>...] "<code>"',
+      "    [--opt PROFILE] [--fast-math|--no-fast-math] [--threads N|auto]",
+      '    [--inline-temps|--no-inline-temps] [--path <dir>...] "<code>"',
       "  mtoc2 translate <script.m> [-o out.c]",
       "",
       `--opt PROFILE: one of ${OPT_PROFILES.join(", ")}.`,
-      "    none       — fast-math off, threads 1 (single-threaded baseline)",
-      "    safe       — fast-math off, threads auto (the default)",
+      "    none       — fast-math off, threads 1, inline-temps off (single-threaded baseline)",
+      "    safe       — fast-math off, threads auto, inline-temps on (the default)",
       "    default    — same as safe",
-      "    aggressive — fast-math on, threads auto (numerics may drift in the last few ulps)",
-      "    `-O3 -march=native` is unconditional. `--fast-math`/`--no-fast-math` and",
-      "    `--threads` override individual profile settings.",
+      "    aggressive — fast-math on, threads auto, inline-temps on",
+      "                 (numerics may drift in the last few ulps under -ffast-math)",
+      "    `-O3 -march=native` is unconditional. `--fast-math`/`--no-fast-math`,",
+      "    `--threads`, and `--inline-temps`/`--no-inline-temps` override individual",
+      "    profile settings.",
     ].join("\n")
   );
   process.exit(2);
@@ -120,9 +122,14 @@ function translateFiles(
   files: SourceFile[],
   mainName: string,
   searchPaths: string[],
-  threads?: number | "auto"
+  threads?: number | "auto",
+  enableTempInlining?: boolean
 ): string {
-  const result = translateProject(files, mainName, { searchPaths, threads });
+  const result = translateProject(files, mainName, {
+    searchPaths,
+    threads,
+    enableTempInlining,
+  });
   if (result.error) {
     const e = result.error;
     const file = e.fileName ?? mainName;
@@ -137,7 +144,8 @@ function translateFiles(
 function translateFile(
   scriptPath: string,
   extraPaths: string[] = [],
-  threads?: number | "auto"
+  threads?: number | "auto",
+  enableTempInlining?: boolean
 ): string {
   const absScript = resolve(scriptPath);
   const source = readFileSync(absScript, "utf8");
@@ -154,13 +162,20 @@ function translateFile(
       files.push(...scanSiblings(abs, absScript));
     }
   }
-  return translateFiles(files, absScript, searchPaths, threads);
+  return translateFiles(
+    files,
+    absScript,
+    searchPaths,
+    threads,
+    enableTempInlining
+  );
 }
 
 function translateInline(
   code: string,
   extraPaths: string[] = [],
-  threads?: number | "auto"
+  threads?: number | "auto",
+  enableTempInlining?: boolean
 ): string {
   // "eval.m" is the same synthetic name numbl uses (`cmdEval` in
   // numbl/src/cli.ts) so diagnostics from the cross-runner reference
@@ -175,7 +190,13 @@ function translateInline(
       files.push(...scanSiblings(abs, evalName));
     }
   }
-  return translateFiles(files, evalName, searchPaths, threads);
+  return translateFiles(
+    files,
+    evalName,
+    searchPaths,
+    threads,
+    enableTempInlining
+  );
 }
 
 interface RunOptions {
@@ -411,11 +432,10 @@ function parseRunEvalArgs(argv: string[]): {
         }
         overrides.threads = n;
       }
-    } else if (a === "--inline-temps" || a === "--no-inline-temps") {
-      console.error(
-        `Error: ${a} is not supported by mtoc2 (no temp-inlining pass yet)`
-      );
-      process.exit(2);
+    } else if (a === "--inline-temps") {
+      overrides.enableTempInlining = true;
+    } else if (a === "--no-inline-temps") {
+      overrides.enableTempInlining = false;
     } else if (a.startsWith("--")) {
       console.error(`Error: unknown option '${a}'`);
       usage();
@@ -446,13 +466,23 @@ async function main(): Promise<void> {
   const cmd = argv[0];
   if (cmd === "run") {
     const { positional, extraPaths, opts } = parseRunEvalArgs(argv.slice(1));
-    const cSrc = translateFile(positional, extraPaths, opts.opt.threads);
+    const cSrc = translateFile(
+      positional,
+      extraPaths,
+      opts.opt.threads,
+      opts.opt.enableTempInlining
+    );
     await (opts.js ? runJsSource(cSrc, opts) : runCSource(cSrc, opts));
     return;
   }
   if (cmd === "eval") {
     const { positional, extraPaths, opts } = parseRunEvalArgs(argv.slice(1));
-    const cSrc = translateInline(positional, extraPaths, opts.opt.threads);
+    const cSrc = translateInline(
+      positional,
+      extraPaths,
+      opts.opt.threads,
+      opts.opt.enableTempInlining
+    );
     await (opts.js ? runJsSource(cSrc, opts) : runCSource(cSrc, opts));
     return;
   }

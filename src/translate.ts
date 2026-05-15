@@ -18,6 +18,7 @@ import { SyntaxError as ParseSyntaxError } from "./parser/index.js";
 import { UnsupportedConstruct, TypeError } from "./lowering/errors.js";
 import { Lowerer } from "./lowering/lower.js";
 import { emitProgram } from "./codegen/emit.js";
+import { inlinePass } from "./codegen/inlinePass.js";
 import { Workspace, parseFiles } from "./workspace/workspace.js";
 
 export interface SourceFile {
@@ -54,6 +55,11 @@ export interface TranslateOptions {
    *  `_Pragma("omp parallel for …")` lines in the elementwise runtime
    *  macros activate purely via `-fopenmp` defining `_OPENMP`. */
   threads?: number | "auto";
+  /** Run the IR-level temp-inlining pass before codegen. Substitutes
+   *  every single-use multi-element tensor Assign's RHS into its
+   *  unique consumer, eliminating intermediates that the un-inlined
+   *  ANF form materializes. See `src/codegen/inlinePass.ts`. */
+  enableTempInlining?: boolean;
 }
 
 export function translateProject(
@@ -104,6 +110,7 @@ export function translateProject(
   try {
     const lowerer = new Lowerer(workspace);
     const prog = lowerer.lowerProgram(activeWsFile.ast);
+    if (opts.enableTempInlining) inlinePass(prog);
     return {
       c: emitProgram(prog, { includeRuntime, threads: opts.threads }),
     };
