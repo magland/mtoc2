@@ -12,6 +12,11 @@ test_tensor_literals();
 test_tensor_disp();
 test_tensor_copy();
 test_tensor_pass_to_func();
+test_tensor_arith_tt();
+test_tensor_arith_ts();
+test_tensor_arith_st();
+test_tensor_arith_bcast();
+test_tensor_arith_mixed_real();
 
 function test_literals()
   disp(1i);
@@ -161,4 +166,51 @@ end
 
 function out = identity(t)
   out = t;
+end
+
+% complex_tensor + complex_tensor (and -, .*, ./) — same shape (_tt).
+function test_tensor_arith_tt()
+  a = [1+1i, 2+2i, 3+3i];
+  b = [10-1i, 20-2i, 30-3i];
+  disp(a + b);
+  disp(a - b);
+  disp(a .* b);
+  disp(b ./ a);
+end
+
+% complex_tensor + complex_scalar / + real_scalar (_ts path).
+function test_tensor_arith_ts()
+  a = [1+1i, 2+2i, 3+3i];
+  disp(a + (1+1i));
+  disp(a * 2i);
+  disp(a - 1);
+  disp(a ./ 2);
+end
+
+% complex_scalar OP complex_tensor (_st path for non-commutative ops).
+function test_tensor_arith_st()
+  a = [1+1i, 2+2i, 3+3i];
+  disp((10+0i) - a);
+  disp(10i ./ a);
+end
+
+% Broadcasting: complex column / complex row.
+function test_tensor_arith_bcast()
+  col = [1i; 2i; 3i];
+  row = [10, 20];
+  disp(col + row);
+end
+
+% Mixed real_tensor + complex_tensor (and vice versa). Skips
+% `disp(-complex_tensor)` here because numbl drops the imag lane on
+% unary minus of a complex tensor (numbl bug; mtoc2 keeps both).
+function test_tensor_arith_mixed_real()
+  c = [1+1i, 2+2i, 3+3i];
+  r = [10, 20, 30];
+  disp(c + r);
+  disp(r + c);
+  disp(c - r);
+  disp(r - c);
+  disp(c .* r);
+  disp(c ./ r);
 end

@@ -14,6 +14,7 @@ import {
   scalarComplex,
   tensorDouble,
   tensorDoubleFromDims,
+  tensorComplexFromDims,
   signFromNumber,
   flipSign,
   isDimOne,
@@ -290,32 +291,42 @@ function buildElemwiseRealBinary(opts: {
       const aN = a as NumericType;
       const bN = b as NumericType;
       // Complex contamination: any complex operand makes the result
-      // complex. Phase 1 supports scalar+scalar only — reject anything
-      // with a multi-element complex operand.
+      // complex. The complex elemwise helpers tolerate an `imag ==
+      // NULL` operand (treated as zero imag), so we can hand a real
+      // tensor straight into the complex_tt path — no promote step.
       const aCx = aN.isComplex;
       const bCx = bN.isComplex;
-      if (aCx || bCx) {
-        if (isMultiElement(aN) || isMultiElement(bN)) {
-          throw new UnsupportedConstruct(
-            `'${name}' on a complex tensor is not yet supported`,
-            span
-          );
-        }
+      const anyComplex = aCx || bCx;
+      if (anyComplex) {
         if (complexFold === undefined) {
           throw new UnsupportedConstruct(
             `'${name}' is not defined for complex scalars`,
             span
           );
         }
-        const ax = exactScalarAsComplex(aN);
-        const bx = exactScalarAsComplex(bN);
-        if (ax !== undefined && bx !== undefined) {
-          const v = complexFold(ax, bx);
-          if (Number.isFinite(v.re) && Number.isFinite(v.im)) {
-            return scalarComplex(v);
+        if (!isMultiElement(aN) && !isMultiElement(bN)) {
+          // Scalar+scalar (any mix) — fold or emit runtime.
+          const ax = exactScalarAsComplex(aN);
+          const bx = exactScalarAsComplex(bN);
+          if (ax !== undefined && bx !== undefined) {
+            const v = complexFold(ax, bx);
+            if (Number.isFinite(v.re) && Number.isFinite(v.im)) {
+              return scalarComplex(v);
+            }
           }
+          return scalarComplex();
         }
-        return scalarComplex();
+        // At least one is a complex tensor (the all-real-tensor +
+        // complex-scalar case is also here). Build the result shape
+        // via the same broadcast logic; the result is a complex
+        // tensor (or scalar if both are scalar — handled above).
+        const resolved = elemwiseResultShape(aN, bN, name, span);
+        if (resolved === null) {
+          // Unreachable: at least one is multi-element by the check
+          // above. Defensive.
+          return scalarComplex();
+        }
+        return tensorComplexFromDims(resolved.outDims);
       }
       const resolved = elemwiseResultShape(aN, bN, name, span);
 
@@ -406,8 +417,9 @@ function buildElemwiseRealBinary(opts: {
       const bN = argTypes[1] as NumericType;
       const aMulti = isMultiElement(aN);
       const bMulti = isMultiElement(bN);
+      const anyComplex = aN.isComplex || bN.isComplex;
       if (!aMulti && !bMulti) {
-        if (aN.isComplex || bN.isComplex) {
+        if (anyComplex) {
           if (complexScalarExpr === undefined) {
             throw new Error(
               `internal: '${name}' missing complexScalarExpr but reached complex codegen`
@@ -416,6 +428,41 @@ function buildElemwiseRealBinary(opts: {
           return complexScalarExpr(argsC[0], argsC[1]);
         }
         return scalarExpr(argsC[0], argsC[1]);
+      }
+      if (anyComplex) {
+        // Tensor + scalar / scalar + tensor with at least one
+        // complex operand. The runtime helpers take a `double _Complex`
+        // for the scalar slot; project a real scalar to that via
+        // `mtoc2_cmake(re, 0.0)` at emit. The receiver tensor is
+        // already complex (we reject mixed real-tensor + complex-
+        // tensor at the transfer layer).
+        const base = `mtoc2_tensor_${helperBase}_complex`;
+        const promote = (c: string, isComplexArg: boolean): string =>
+          isComplexArg ? c : `mtoc2_cmake(${c}, 0.0)`;
+        if (aMulti && bMulti) {
+          const rnd = Math.max(aN.dims.length, bN.dims.length);
+          let needsBcast = aN.dims.length !== bN.dims.length;
+          if (!needsBcast) {
+            for (let i = 0; i < rnd; i++) {
+              if (isDimOne(aN.dims[i]) !== isDimOne(bN.dims[i])) {
+                needsBcast = true;
+                break;
+              }
+            }
+          }
+          if (needsBcast) {
+            return `${base}_bcast_tt(${argsC[0]}, ${argsC[1]})`;
+          }
+          return `${base}_tt(${argsC[0]}, ${argsC[1]})`;
+        }
+        if (aMulti) {
+          return `${base}_ts(${argsC[0]}, ${promote(argsC[1], bN.isComplex)})`;
+        }
+        // scalar OP tensor
+        if (commutative) {
+          return `${base}_ts(${argsC[1]}, ${promote(argsC[0], aN.isComplex)})`;
+        }
+        return `${base}_st(${promote(argsC[0], aN.isComplex)}, ${argsC[1]})`;
       }
       if (aMulti && bMulti) {
         // Re-derive broadcast vs same-shape from the arg types. Identical
@@ -449,7 +496,7 @@ function buildElemwiseRealBinary(opts: {
       }
       return `mtoc2_tensor_${helperBase}_st(${argsC[0]}, ${argsC[1]})`;
     },
-    runtimeDeps: allDeps,
+    runtimeDeps: [...allDeps, "mtoc2_tensor_elemwise_complex", "mtoc2_cscalar"],
   };
 }
 

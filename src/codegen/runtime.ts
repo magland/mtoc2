@@ -353,6 +353,23 @@ const REGISTRY: ReadonlyMap<string, RuntimeSnippet> = new Map<
       "mtoc2_cscalar",
     ]),
   ],
+  // Elementwise binary + unary ops on complex tensors. Mirrors the
+  // real elemwise snippet's `_tt`/`_ts`/`_st`/`_bcast_tt` shape, per
+  // op (plus/minus/times/rdivide) plus a unary `uminus`. Activated
+  // when either operand of `+ - .* ./` has `isComplex` set; mixed
+  // real+complex sites at the type-system layer route through these
+  // helpers with the real operand wrapped in `mtoc2_cmake(x, 0)` at
+  // emit time.
+  [
+    "mtoc2_tensor_elemwise_complex",
+    loadSnippet("tensor_elemwise_complex.h", [
+      "mtoc2_tensor_t",
+      "mtoc2_alloc",
+      "mtoc2_tensor_alloc_nd_complex",
+      "mtoc2_cscalar",
+      "mtoc2_cdiv",
+    ]),
+  ],
 
   // ── Elementwise binary/unary on real tensors ──────────────────────
   // One snippet covers all 11 funcs (4×_tt, 4×_ts, 2×_st, 1×uminus).

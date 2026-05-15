@@ -2275,13 +2275,14 @@ export class Lowerer {
       };
     }
 
-    // Phase 2 stops at scalar-complex cells composed via the all-
-    // scalar fast path above. Mixing complex cells with a multi-
-    // element cell (tensor concat) would need the lane-copy variant
-    // of the concat helper, which Phase 3 covers.
+    // Phase 3 reserved for complex tensor concat lane-copies (the
+    // multi-element complex cell ↔ scalar mix variant of TensorConcat
+    // codegen). The Phase 2 scalar-cell fast path above covers
+    // pure-scalar complex literals; phase 3 elemwise arithmetic
+    // already runs without exercising this site.
     if (anyComplex) {
       throw new UnsupportedConstruct(
-        `bracket literal mixing complex cells with multi-element tensor cells is not yet supported`,
+        `bracket literal mixing complex cells with multi-element tensor cells is not yet supported (concat lane-copy is deferred)`,
         e.span
       );
     }

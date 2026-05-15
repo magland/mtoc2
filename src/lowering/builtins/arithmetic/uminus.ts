@@ -3,7 +3,9 @@ import {
   scalarDouble,
   scalarComplex,
   tensorDouble,
+  tensorComplex,
   tensorDoubleFromDims,
+  tensorComplexFromDims,
   signFromNumber,
   flipSign,
   isMultiElement,
@@ -11,7 +13,6 @@ import {
   isScalar,
 } from "../../types.js";
 import type { Builtin } from "../registry.js";
-import { UnsupportedConstruct } from "../../errors.js";
 import {
   requireRealOrComplex,
   exactDouble,
@@ -26,17 +27,31 @@ export const uminus: Builtin = {
     requireRealOrComplex(argTypes[0], `'uminus' arg`, span);
     const a = argTypes[0] as NumericType;
     if (a.isComplex) {
-      if (isMultiElement(a)) {
-        throw new UnsupportedConstruct(
-          `'uminus' on a complex tensor is not yet supported`,
-          span
-        );
+      if (!isMultiElement(a)) {
+        const cx = exactComplex(a);
+        if (cx !== undefined) {
+          return scalarComplex({ re: -cx.re, im: -cx.im });
+        }
+        return scalarComplex();
       }
-      const cx = exactComplex(a);
-      if (cx !== undefined) {
-        return scalarComplex({ re: -cx.re, im: -cx.im });
+      // Complex tensor: fold when both lanes are exact, else runtime.
+      if (
+        a.exact !== undefined &&
+        typeof a.exact === "object" &&
+        !(a.exact instanceof Float64Array) &&
+        a.exact.re instanceof Float64Array &&
+        a.shape !== undefined
+      ) {
+        const cx = a.exact as { re: Float64Array; im: Float64Array };
+        const re = new Float64Array(cx.re.length);
+        const im = new Float64Array(cx.im.length);
+        for (let i = 0; i < cx.re.length; i++) {
+          re[i] = -cx.re[i];
+          im[i] = -cx.im[i];
+        }
+        return tensorComplex(a.shape, { re, im });
       }
-      return scalarComplex();
+      return tensorComplexFromDims(a.dims.slice());
     }
     if (isScalar(a)) {
       const ax = exactDouble(a);
@@ -61,17 +76,21 @@ export const uminus: Builtin = {
     return out;
   },
   codegenC(argsC, argTypes) {
-    if (isMultiElement(argTypes[0])) {
+    const ty = argTypes[0] as NumericType;
+    if (isMultiElement(ty)) {
+      if (ty.isComplex) {
+        return `mtoc2_tensor_uminus_complex(${argsC[0]})`;
+      }
       return `mtoc2_tensor_uminus(${argsC[0]})`;
     }
-    if (isNumeric(argTypes[0]) && argTypes[0].isComplex) {
+    if (isNumeric(ty) && ty.isComplex) {
       return `mtoc2_cneg(${argsC[0]})`;
     }
     return `(-${argsC[0]})`;
   },
-  // Both `mtoc2_tensor_uminus` (tensor path) and `mtoc2_cneg` (scalar
-  // complex path) get pulled in unconditionally. The complex helper is
-  // a `static inline` with no native cost when unused; activating it
-  // here keeps the dispatch decision local to `codegenC` above.
-  runtimeDeps: ["mtoc2_tensor_elemwise_real", "mtoc2_cscalar"],
+  runtimeDeps: [
+    "mtoc2_tensor_elemwise_real",
+    "mtoc2_tensor_elemwise_complex",
+    "mtoc2_cscalar",
+  ],
 };
