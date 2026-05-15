@@ -2648,6 +2648,10 @@ export class Lowerer {
     if (envEntry === undefined && e.name === "struct") {
       return this.lowerStructConstructor(e);
     }
+    if (envEntry === undefined && e.name === "bsxfun") {
+      const rewritten = this.tryRewriteBsxfun(e);
+      if (rewritten !== null) return rewritten;
+    }
     if (envEntry !== undefined && isHandle(envEntry.ty)) {
       return this.dispatchHandleCall(e.name, envEntry, e.args, e.span);
     }
@@ -2863,6 +2867,61 @@ export class Lowerer {
    *  duplicated. Each value's storage type drives the field's
    *  recorded type — typedef shape is stable across writes because
    *  storage types are widened (no `exact`, no `sign`). */
+  /** `bsxfun(@fn, A, B)` — when `@fn` is a function-handle literal
+   *  whose name is one of the elementwise binary builtins, rewrite to
+   *  `fn(A, B)` and let the existing implicit-expansion path do the
+   *  work. Returns the lowered IR on success, or `null` to fall
+   *  through to the generic call path (which will surface a clearer
+   *  error for unsupported handle targets). Custom function-handle
+   *  bsxfun is deferred. */
+  private tryRewriteBsxfun(
+    e: Extract<Expr, { type: "FuncCall" }>
+  ): IRExpr | null {
+    if (e.args.length !== 3) return null;
+    const handleArg = e.args[0];
+    if (handleArg.type !== "FuncHandle") {
+      throw new UnsupportedConstruct(
+        `'bsxfun' first arg must be a function-handle literal (e.g. @times); ` +
+          `dynamic handle-value bsxfun is not yet supported`,
+        e.span
+      );
+    }
+    const handleName = handleArg.name;
+    const knownOps = new Set([
+      "plus",
+      "minus",
+      "times",
+      "rdivide",
+      "power",
+      "eq",
+      "ne",
+      "lt",
+      "le",
+      "gt",
+      "ge",
+      "mod",
+      "rem",
+      "atan2",
+      "hypot",
+      "max",
+      "min",
+    ]);
+    if (!knownOps.has(handleName)) {
+      throw new UnsupportedConstruct(
+        `'bsxfun' with handle target '@${handleName}' is not supported; ` +
+          `supported targets: ${[...knownOps].sort().join(", ")}`,
+        e.span
+      );
+    }
+    const synthCall: Extract<Expr, { type: "FuncCall" }> = {
+      type: "FuncCall",
+      name: handleName,
+      args: [e.args[1], e.args[2]],
+      span: e.span,
+    };
+    return this.lowerFuncCall(synthCall);
+  }
+
   private lowerStructConstructor(
     e: Extract<Expr, { type: "FuncCall" }>
   ): IRExpr {
