@@ -1,12 +1,17 @@
 /**
- * toc — read the elapsed wall-clock seconds since the most recent
- * `tic`. Returns a non-negative double (CLOCK_MONOTONIC never goes
- * backwards). Always emits a runtime call — the elapsed value is
- * never known at compile time.
+ * toc — read the elapsed wall-clock seconds since `tic`.
  *
- * v1 rejects the tic-handle form (`toc(t0)`) — passing the start
- * time as an argument is a numbl-supported variant that mtoc2
- * doesn't yet implement. Users should call `toc` with no args.
+ * Two forms:
+ *   - `toc` (no args): elapsed since the most recent `tic;`. Uses the
+ *     shared `mtoc2_tic_seconds` slot.
+ *   - `toc(t0)`: elapsed since the start time `t0` returned by an
+ *     earlier `t0 = tic;`. Does not touch the shared slot, so an outer
+ *     `tic; ...; toc` pair can wrap an inner handle measurement
+ *     without interference.
+ *
+ * Both forms return a non-negative double (CLOCK_MONOTONIC never goes
+ * backwards). Always emits a runtime call — the elapsed value is never
+ * known at compile time.
  *
  * The bare-`toc;` ExprStmt print form is NOT handled here — the
  * lowerer special-cases that position to synthesize a direct call to
@@ -15,23 +20,24 @@
  */
 
 import { TypeError } from "../../errors.js";
-import { scalarDouble } from "../../types.js";
+import { isScalarRealNumeric, scalarDouble } from "../../types.js";
 import type { Builtin } from "../registry.js";
 
 export const toc: Builtin = {
   name: "toc",
-  arity: 0,
+  arity: { min: 0, max: 1 },
   transfer(argTypes, span) {
-    if (argTypes.length !== 0) {
+    if (argTypes.length === 1 && !isScalarRealNumeric(argTypes[0])) {
       throw new TypeError(
-        `'toc' with a tic-handle argument is not yet supported; ` +
-          `use the no-argument form ('tic; ...; toc')`,
+        `'toc' tic-handle argument must be a scalar real numeric ` +
+          `(the value returned by 'tic'); got ${argTypes[0].kind}`,
         span
       );
     }
     return scalarDouble("nonneg");
   },
-  codegenC() {
+  codegenC(argsC) {
+    if (argsC.length === 1) return `mtoc2_toc_handle(${argsC[0]})`;
     return "mtoc2_toc()";
   },
   runtimeDeps: ["mtoc2_tic_toc"],

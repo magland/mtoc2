@@ -367,33 +367,66 @@ export class Lowerer {
   private lowerExprStmt(
     s: Extract<Stmt, { type: "ExprStmt" }>
   ): IRStmt | IRStmt[] | null {
-    // Special case: bare `toc;` (or `toc();`) ExprStmt routes to the
-    // printing form of toc. Numbl uses `nargout === 0` as the
+    // Special case: bare `toc;` / `toc();` / `toc(t0);` ExprStmt routes
+    // to the printing form of toc. Numbl uses `nargout === 0` as the
     // discriminator; mtoc2 uses "this Call is the sole expression of
     // an ExprStmt". The shadow checks ensure a user `toc = 5; toc;`
     // (reading a local) or a `classdef toc` (constructor call) doesn't
     // get hijacked. We synthesize a Void-typed Call to the runtime
     // helper directly so we don't go through builtin codegen at all.
-    if (
-      ((s.expr.type === "Ident" && s.expr.name === "toc") ||
-        (s.expr.type === "FuncCall" &&
-          s.expr.name === "toc" &&
-          s.expr.args.length === 0)) &&
-      this.env.get("toc") === undefined &&
-      !this.workspace.isClass("toc")
-    ) {
-      return {
-        kind: "ExprStmt",
-        expr: {
-          kind: "Call",
-          cName: "mtoc2_toc_print",
-          name: "toc_print",
-          args: [],
-          ty: VOID,
-          span: s.expr.span,
-        },
-        span: s.span,
-      };
+    if (this.env.get("toc") === undefined && !this.workspace.isClass("toc")) {
+      if (s.expr.type === "Ident" && s.expr.name === "toc") {
+        return {
+          kind: "ExprStmt",
+          expr: {
+            kind: "Call",
+            cName: "mtoc2_toc_print",
+            name: "toc_print",
+            args: [],
+            ty: VOID,
+            span: s.expr.span,
+          },
+          span: s.span,
+        };
+      }
+      if (s.expr.type === "FuncCall" && s.expr.name === "toc") {
+        if (s.expr.args.length === 0) {
+          return {
+            kind: "ExprStmt",
+            expr: {
+              kind: "Call",
+              cName: "mtoc2_toc_print",
+              name: "toc_print",
+              args: [],
+              ty: VOID,
+              span: s.expr.span,
+            },
+            span: s.span,
+          };
+        }
+        if (s.expr.args.length === 1) {
+          const arg = this.lowerExpr(s.expr.args[0]);
+          if (!isScalarRealNumeric(arg.ty)) {
+            throw new TypeError(
+              `'toc' tic-handle argument must be a scalar real numeric ` +
+                `(the value returned by 'tic'); got ${arg.ty.kind}`,
+              s.expr.args[0].span
+            );
+          }
+          return {
+            kind: "ExprStmt",
+            expr: {
+              kind: "Call",
+              cName: "mtoc2_toc_handle_print",
+              name: "toc_handle_print",
+              args: [arg],
+              ty: VOID,
+              span: s.expr.span,
+            },
+            span: s.span,
+          };
+        }
+      }
     }
     // Multi-output user-function bare-statement form: `foo(x);` where
     // `foo` returns N≥2 outputs. The expression-position lowering of

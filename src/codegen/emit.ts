@@ -1040,6 +1040,16 @@ function emitExpr(e: IRExpr, state: RuntimeState): string {
         useRuntimeByName(state, "mtoc2_tic_toc");
         return `mtoc2_toc_print()`;
       }
+      // Lowerer-synthesized bare-`toc(t0);` print form (1-arg handle
+      // variant). Same activation path as `toc_print`.
+      if (
+        e.name === "toc_handle_print" &&
+        e.cName === "mtoc2_toc_handle_print"
+      ) {
+        useRuntimeByName(state, "mtoc2_tic_toc");
+        const argC = emitExpr(e.args[0], state);
+        return `mtoc2_toc_handle_print(${argC})`;
+      }
       // User function call: owned args wrap in copy (callee owns).
       const args = e.args
         .map(a => (isOwned(a.ty) ? emitOwnedRhs(a, state) : emitExpr(a, state)))

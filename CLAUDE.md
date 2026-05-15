@@ -171,21 +171,24 @@ cName}` and `lowerMultiAssign` routes through the same
   C name returned by `multiOutput.cName(argTypes, nargout)`.
   Multi-dimensional sorts (`sort(M, dim)`), `'descend'`, and the
   matrix-default-axis path are not yet supported.
-- **Wall-clock stopwatch**: `tic` / `toc` (0-arg each) emit
-  `mtoc2_tic()` / `mtoc2_toc()` via the `mtoc2_tic_toc` runtime
-  snippet (POSIX `clock_gettime(CLOCK_MONOTONIC)`). The bare-`toc;`
-  ExprStmt is special-cased in `lowerExprStmt` to emit
-  `mtoc2_toc_print()`, which prints
-  `Elapsed time is %.6f seconds.\n` and matches numbl's
-  `nargout === 0` branch. Value-returning forms (`t = toc`,
-  `toc + 0`, etc.) take the standard builtin path. The cross-runner
-  honors a per-script `% mtoc2-test-mask: <regex>` comment block
-  so the elapsed-seconds line can be normalized before byte-for-
-  byte comparison (see [docs/testing.md](docs/testing.md)). The
-  tic-handle form `toc(t0)` is rejected with a span — use the
-  no-arg form. `lowerIdent` recognizes bare-name reads of 0-arity
-  builtins, so `tic`/`toc` work both as identifiers (`t = toc`)
-  and as zero-paren calls (`tic;`).
+- **Wall-clock stopwatch**: `tic` / `toc` emit `mtoc2_tic()` /
+  `mtoc2_toc()` via the `mtoc2_tic_toc` runtime snippet (POSIX
+  `clock_gettime(CLOCK_MONOTONIC)`). `tic` returns the start time
+  in seconds, so `t0 = tic;` captures a handle; the value-returning
+  tic-handle form `elapsed = toc(t0)` emits `mtoc2_toc_handle(t0)`
+  (`now - t0`) and does not touch the shared `mtoc2_tic_seconds`
+  slot — an outer `tic; ...; toc` pair can wrap an inner handle
+  measurement without interference. Bare-statement print forms
+  (`toc;`, `toc();`, `toc(t0);`) are special-cased in
+  `lowerExprStmt` to emit `mtoc2_toc_print()` /
+  `mtoc2_toc_handle_print(t0)`, which print
+  `Elapsed time is %.6f seconds.\n` and match numbl's
+  `nargout === 0` branch. The cross-runner honors a per-script
+  `% mtoc2-test-mask: <regex>` comment block so the elapsed-
+  seconds line can be normalized before byte-for-byte comparison
+  (see [docs/testing.md](docs/testing.md)). `lowerIdent` recognizes
+  bare-name reads of 0-arity builtins, so `tic`/`toc` work both as
+  identifiers (`t = toc`) and as zero-paren calls (`tic;`).
 - **Function handles** — `@user_func` (named) and `@(...) <body>`
   (anonymous). Dispatch is static: every `h(args)` call site reads
   the handle variable's `HandleType`, builds capture-args via
