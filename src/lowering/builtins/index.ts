@@ -44,6 +44,7 @@ import { any } from "./reduction/any.js";
 import { all } from "./reduction/all.js";
 import { zeros } from "./shape/zeros.js";
 import { ones } from "./shape/ones.js";
+import { eye } from "./shape/eye.js";
 import { reshape } from "./shape/reshape.js";
 import { transpose } from "./shape/transpose.js";
 import { size } from "./shape/size.js";
@@ -114,6 +115,7 @@ for (const b of [
   all,
   zeros,
   ones,
+  eye,
   reshape,
   transpose,
   size,
