@@ -525,6 +525,15 @@ const REGISTRY: ReadonlyMap<string, RuntimeSnippet> = new Map<
     "mtoc2_tensor_linspace",
     loadSnippet("tensor_linspace.h", ["mtoc2_tensor_t", "mtoc2_tensor_alloc"]),
   ],
+  // Logical-mask indexing — `a(mask)` linear read/write and per-axis
+  // `M(:, mask)` reads. The helper scans the mask column-major and
+  // writes 0-based source indices into a caller-allocated buffer;
+  // codegen-emitted setup blocks invoke it, then iterate the buffer
+  // just like an IndexVec slot. Aborts on out-of-range truthy entries.
+  [
+    "mtoc2_logical_mask_indices",
+    loadSnippet("tensor_logical_mask.h", ["mtoc2_tensor_t", "mtoc2_oob_abort"]),
+  ],
 
   // ── tic / toc (wall-clock stopwatch) ─────────────────────────────
   // One snippet covers `mtoc2_tic`, `mtoc2_toc`, and the bare-`toc;`
