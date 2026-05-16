@@ -100,7 +100,13 @@ export function setPrintTypeSink(sink: (line: string) => void): void {
 export function resetPrintTypeSink(): void {
   printTypeSink = line => console.error(line);
 }
-import { type IRExpr, type IRStmt, type IRFunc, type IRProgram } from "./ir.js";
+import {
+  type Assign,
+  type IRExpr,
+  type IRStmt,
+  type IRFunc,
+  type IRProgram,
+} from "./ir.js";
 import {
   getBuiltin,
   binaryOpBuiltin,
@@ -303,19 +309,19 @@ export class Lowerer {
             s.span
           );
         }
-        // Strip exact from the env. The variable's prior Assign
-        // already materialized in C (always-materialize), so the
-        // runtime path can read its current buffer contents — no
-        // synthetic re-assignment needed here.
-        if (entry.ty.kind === "Numeric" && entry.ty.exact !== undefined) {
-          const { exact: _e, ...rest } = entry.ty;
-          void _e;
-          this.env.set(name, { cName: entry.cName, ty: rest });
-        } else if (entry.ty.kind === "String" && entry.ty.exact !== undefined) {
-          this.env.set(name, {
-            cName: entry.cName,
-            ty: { kind: "String" },
-          });
+        // Strip exact from the env. Delegates to `withoutExact` so
+        // struct fields, class properties, and char/string scalars
+        // also get their exact stripped — otherwise an opaque'd
+        // struct would still let the if-cond folder see precise
+        // field values (e.g. `s = struct('x', 5); %!numbl:opaque s;
+        // if s.x == 5 …` would still take the branch). The
+        // variable's prior Assign already materialized in C
+        // (always-materialize), so the runtime path can read its
+        // current buffer contents — no synthetic re-assignment
+        // needed here.
+        const stripped = withoutExact(entry.ty);
+        if (stripped !== entry.ty) {
+          this.env.set(name, { cName: entry.cName, ty: stripped });
         }
       }
       return null;
@@ -702,8 +708,13 @@ export class Lowerer {
     // into its CHILDREN only (the top stays as the Assign's RHS).
     // Otherwise the RHS lands at a non-consume site (scalar Assign,
     // mismatched ownership) and the top-level itself may need hoisting.
+    // Uses `isOwned` (not just `isMultiElement`) so Struct/Class/Handle/
+    // String/Char RHSs reach the consume-site path — matches
+    // `lowerAssignLValue`'s `leafOwned` check and the documented
+    // ANF invariant ("owned-producing exprs appear only as direct
+    // Assign RHSs at owned consume sites").
     const hoists: IRStmt[] = [];
-    const lhsOwned = isMultiElement(expr.ty);
+    const lhsOwned = isOwned(expr.ty);
     const rhsOwnedDirectProducer = lhsOwned && expr.kind !== "Var";
     const newExpr = rhsOwnedDirectProducer
       ? this.anfChildren(expr, hoists)
@@ -1140,9 +1151,6 @@ export class Lowerer {
         span: s.span,
       };
       const rec = this.recordAssignment(lv.name, synthRhs, s.span);
-      if (rec.kind !== "Assign") {
-        throw new Error("internal: recordAssignment returned non-Assign");
-      }
       outputs.push({
         ty: slotTy,
         binding: { name: lv.name, cName: rec.cName },
@@ -1194,9 +1202,14 @@ export class Lowerer {
     }
     const outTys = multiOutput.transfer(argTypes, nargout, s.span);
     if (outTys.length !== nargout) {
-      throw new Error(
+      // Builtin author contract violation. Surfaces with the
+      // call-site span so the bad builtin name + invocation are
+      // easy to locate; the message text alone is enough to point
+      // a builtin author at the buggy `multiOutput.transfer`.
+      throw new UnsupportedConstruct(
         `internal: builtin '${callName}' multiOutput.transfer returned ` +
-          `${outTys.length} types for nargout=${nargout}`
+          `${outTys.length} type(s) for nargout=${nargout}`,
+        s.span
       );
     }
     const outputs: {
@@ -1226,9 +1239,6 @@ export class Lowerer {
         span: s.span,
       };
       const rec = this.recordAssignment(lv.name, synthRhs, s.span);
-      if (rec.kind !== "Assign") {
-        throw new Error("internal: recordAssignment returned non-Assign");
-      }
       outputs.push({
         ty: slotTy,
         binding: { name: lv.name, cName: rec.cName },
@@ -1246,7 +1256,7 @@ export class Lowerer {
     return argHoists.length === 0 ? mac : [...argHoists, mac];
   }
 
-  private recordAssignment(name: string, expr: IRExpr, span: Span): IRStmt {
+  private recordAssignment(name: string, expr: IRExpr, span: Span): Assign {
     const existing = this.env.get(name);
     // Type-compat check: catch reassignments that would invalidate the
     // C-side declaration. The function-top `collectOwnedLocals` walk

@@ -12,7 +12,7 @@
 import type { Span } from "../../parser/index.js";
 import { BinaryOperation, UnaryOperation } from "../../parser/index.js";
 import { UnsupportedConstruct } from "../errors.js";
-import { registerBuiltin, getBuiltin } from "./registry.js";
+import { registerBuiltin } from "./registry.js";
 
 import { plus } from "./arithmetic/plus.js";
 import { minus } from "./arithmetic/minus.js";
@@ -281,8 +281,3 @@ export function unaryOpBuiltin(op: UnaryOperation, span: Span): string {
   }
 }
 
-export function isOpBuiltinSupported(name: string, span: Span): void {
-  if (getBuiltin(name) === undefined) {
-    throw new UnsupportedConstruct(`builtin '${name}' not supported`, span);
-  }
-}

@@ -189,8 +189,8 @@ function touchStmt(
     case "ReturnFromFunction": {
       // The early-return path itself has no successors, but the
       // function's owned output C-names (if any) are "used" at this
-      // return — the codegen emits the sret writes (or `return cOut;`
-      // for a single owned output) after the `mtoc2_return:` label.
+      // return — emit.ts inlines the sret writes (or `return cOut;`
+      // for a single owned output) at each `ReturnFromFunction` site.
       // Mark them as touched so the dataflow doesn't decide an output
       // local is dead one stmt earlier and emit a stray early-free.
       const out = new Set(ctx.returnOut);

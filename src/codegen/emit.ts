@@ -30,7 +30,7 @@ import type {
   IndexSliceArg,
 } from "../lowering/ir.js";
 import { getBuiltin } from "../lowering/builtins/index.js";
-import { cTypeFor, requireOwnedHelpers } from "./cHelpers.js";
+import { cTypeFor, formatDouble, requireOwnedHelpers } from "./cHelpers.js";
 import {
   classTypedefName,
   handleTypedefName,
@@ -1190,23 +1190,19 @@ function emitExpr(e: IRExpr, state: RuntimeState): string {
     case "IndexSlice":
       return emitIndexSliceProducer(e, state);
     case "EndRef":
-      if (e.axis === "linear") {
-        if (e.baseTy.kind === "Numeric" && e.baseTy.shape !== undefined) {
-          const n = e.baseTy.shape.reduce((a, b) => a * b, 1);
-          return formatDouble(n);
-        }
-        if (e.baseTy.kind === "Numeric") {
-          const parts: string[] = [];
-          for (let i = 0; i < e.baseTy.dims.length; i++) {
-            parts.push(`${e.baseCName}.dims[${i}]`);
-          }
-          return `(double)(${parts.join(" * ")})`;
-        }
-        throw new Error("emit: EndRef with non-numeric baseTy");
+      // The lowerer (`lowerEndKeyword`) folds statically-known shapes
+      // to a `NumLit` before they ever land in an `EndRef`, so by the
+      // time we're here `baseTy.shape` is unset and we always emit a
+      // dynamic `.dims[]` read.
+      if (e.baseTy.kind !== "Numeric") {
+        throw new Error("emit internal: EndRef with non-numeric baseTy");
       }
-      // Per-axis form.
-      if (e.baseTy.kind === "Numeric" && e.baseTy.shape !== undefined) {
-        return formatDouble(e.baseTy.shape[e.axis]);
+      if (e.axis === "linear") {
+        const parts: string[] = [];
+        for (let i = 0; i < e.baseTy.dims.length; i++) {
+          parts.push(`${e.baseCName}.dims[${i}]`);
+        }
+        return `(double)(${parts.join(" * ")})`;
       }
       return `(double)${e.baseCName}.dims[${e.axis}]`;
     case "MakeRange":
@@ -1220,18 +1216,6 @@ function activateRuntimeDeps(
 ): void {
   if (!deps) return;
   for (const d of deps) useRuntimeByName(state, d);
-}
-
-/** Format a JS number as a C double literal that round-trips. */
-function formatDouble(v: number): string {
-  if (Number.isInteger(v) && Math.abs(v) < 1e15) {
-    return `${v}.0`;
-  }
-  const s = v.toString();
-  if (!s.includes(".") && !s.includes("e") && !s.includes("E")) {
-    return `${s}.0`;
-  }
-  return s;
 }
 
 /** Encode `s` as a C string literal `"..."` whose bytes are the UTF-8

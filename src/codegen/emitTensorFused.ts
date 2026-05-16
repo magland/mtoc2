@@ -33,6 +33,7 @@ import type { NumericType } from "../lowering/types.js";
 import { isMultiElement, isNumeric } from "../lowering/types.js";
 import { getBuiltin } from "../lowering/builtins/index.js";
 import { useRuntimeByName, type RuntimeState } from "./runtime.js";
+import { formatDouble } from "./cHelpers.js";
 
 /** True iff `e` is a pure-elementwise expression — only NumLit / Var /
  *  Binary / Unary / Call to a builtin that has a `perSlotC` hook. No
@@ -276,14 +277,3 @@ export function emitTensorAssignFused(
   return lines.join("\n");
 }
 
-/** Format a JS number as a C double literal that round-trips. Mirrors
- *  the formatter in `emit.ts` — duplicated here to keep this module
- *  free of churn-prone emit.ts internals. */
-function formatDouble(v: number): string {
-  if (Number.isNaN(v)) return "NAN";
-  if (!Number.isFinite(v)) return v > 0 ? "INFINITY" : "(-INFINITY)";
-  if (Number.isInteger(v) && Math.abs(v) < 1e16) {
-    return `${v}.0`;
-  }
-  return v.toString();
-}

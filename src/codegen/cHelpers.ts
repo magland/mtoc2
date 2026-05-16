@@ -123,3 +123,20 @@ export function requireOwnedHelpers(t: Type): OwnedHelpers {
   }
   return h;
 }
+
+/** Format a JS number as a C double literal that round-trips. Single
+ *  source of truth — both the per-expression emit path and the fused
+ *  per-element template emitter route through here so NaN / ±Infinity
+ *  format consistently as `NAN` / `INFINITY` / `(-INFINITY)`. */
+export function formatDouble(v: number): string {
+  if (Number.isNaN(v)) return "NAN";
+  if (!Number.isFinite(v)) return v > 0 ? "INFINITY" : "(-INFINITY)";
+  if (Number.isInteger(v) && Math.abs(v) < 1e16) {
+    return `${v}.0`;
+  }
+  const s = v.toString();
+  if (!s.includes(".") && !s.includes("e") && !s.includes("E")) {
+    return `${s}.0`;
+  }
+  return s;
+}
