@@ -62,6 +62,7 @@
  */
 
 import type { Assign, IRExpr, IRStmt, IRProgram } from "../lowering/ir.js";
+import { forEachSubExpr, forEachTopLevelExpr } from "../lowering/walk.js";
 import { isFusableAssign } from "./emitTensorFused.js";
 
 /** Top-level entry. Mutates `prog.topLevelStmts` and each function's
@@ -187,126 +188,34 @@ function computeUseCounts(
   return counts;
 }
 
+/** Bump every Var read in `s`'s top-level expressions, recursing
+ *  through nested If/While/For bodies. Reuses the shared walkers in
+ *  `walk.ts` so any new IR-expr kind (e.g. a new IndexSlice slot
+ *  variant) is picked up automatically. */
 function countVarRefsInStmt(s: IRStmt, bump: (cName: string) => void): void {
-  switch (s.kind) {
-    case "ExprStmt":
-      countVarRefsInExpr(s.expr, bump);
-      return;
-    case "Assign":
-      countVarRefsInExpr(s.expr, bump);
-      return;
-    case "If":
-      countVarRefsInExpr(s.cond, bump);
-      for (const sub of s.thenBody) countVarRefsInStmt(sub, bump);
-      for (const sub of s.elseBody) countVarRefsInStmt(sub, bump);
-      return;
-    case "While":
-      countVarRefsInExpr(s.cond, bump);
-      for (const sub of s.body) countVarRefsInStmt(sub, bump);
-      return;
-    case "For":
-      countVarRefsInExpr(s.start, bump);
-      countVarRefsInExpr(s.end, bump);
-      for (const sub of s.body) countVarRefsInStmt(sub, bump);
-      return;
-    case "ReturnFromFunction":
-    case "Break":
-    case "Continue":
-    case "TypeComment":
-      return;
-    case "MemberStore":
-      bump(s.base.cName);
-      countVarRefsInExpr(s.rhs, bump);
-      return;
-    case "MultiAssignCall":
-      for (const a of s.args) countVarRefsInExpr(a, bump);
-      return;
-    case "IndexStore":
-      bump(s.base.cName);
-      for (const i of s.indices) countVarRefsInExpr(i, bump);
-      countVarRefsInExpr(s.rhs, bump);
-      return;
-    case "IndexSliceStore":
-      bump(s.base.cName);
-      for (const slot of s.index) {
-        if (slot.kind === "Range") {
-          countVarRefsInExpr(slot.start, bump);
-          countVarRefsInExpr(slot.step, bump);
-          countVarRefsInExpr(slot.end, bump);
-        } else if (slot.kind === "Scalar") {
-          countVarRefsInExpr(slot.expr, bump);
-        } else if (slot.kind === "IndexVec") {
-          countVarRefsInExpr(slot.expr, bump);
-        }
-      }
-      countVarRefsInExpr(s.rhs, bump);
-      return;
+  const visitExpr = (e: IRExpr): void => {
+    forEachSubExpr(e, sub => {
+      if (sub.kind === "Var") bump(sub.cName);
+    });
+  };
+  if (s.kind === "If") {
+    visitExpr(s.cond);
+    for (const sub of s.thenBody) countVarRefsInStmt(sub, bump);
+    for (const sub of s.elseBody) countVarRefsInStmt(sub, bump);
+    return;
   }
-}
-
-function countVarRefsInExpr(e: IRExpr, bump: (cName: string) => void): void {
-  switch (e.kind) {
-    case "Var":
-      bump(e.cName);
-      return;
-    case "NumLit":
-    case "ImagLit":
-    case "StringLit":
-    case "EndRef":
-      return;
-    case "Binary":
-      countVarRefsInExpr(e.left, bump);
-      countVarRefsInExpr(e.right, bump);
-      return;
-    case "Unary":
-      countVarRefsInExpr(e.operand, bump);
-      return;
-    case "Call":
-      for (const a of e.args) countVarRefsInExpr(a, bump);
-      return;
-    case "TensorBuild":
-      for (const el of e.elements) countVarRefsInExpr(el, bump);
-      return;
-    case "TensorConcat":
-      for (const row of e.cells)
-        for (const c of row) countVarRefsInExpr(c, bump);
-      return;
-    case "HandleLit":
-      for (const c of e.captures) countVarRefsInExpr(c.value, bump);
-      return;
-    case "HandleCaptureLoad":
-      countVarRefsInExpr(e.base, bump);
-      return;
-    case "StructLit":
-      for (const f of e.fields) countVarRefsInExpr(f.value, bump);
-      return;
-    case "MemberLoad":
-      countVarRefsInExpr(e.base, bump);
-      return;
-    case "IndexLoad":
-      countVarRefsInExpr(e.base, bump);
-      for (const i of e.indices) countVarRefsInExpr(i, bump);
-      return;
-    case "IndexSlice":
-      countVarRefsInExpr(e.base, bump);
-      for (const slot of e.index) {
-        if (slot.kind === "Range") {
-          countVarRefsInExpr(slot.start, bump);
-          countVarRefsInExpr(slot.step, bump);
-          countVarRefsInExpr(slot.end, bump);
-        } else if (slot.kind === "Scalar") {
-          countVarRefsInExpr(slot.expr, bump);
-        } else if (slot.kind === "IndexVec") {
-          countVarRefsInExpr(slot.expr, bump);
-        }
-      }
-      return;
-    case "MakeRange":
-      countVarRefsInExpr(e.start, bump);
-      countVarRefsInExpr(e.step, bump);
-      countVarRefsInExpr(e.end, bump);
-      return;
+  if (s.kind === "While") {
+    visitExpr(s.cond);
+    for (const sub of s.body) countVarRefsInStmt(sub, bump);
+    return;
   }
+  if (s.kind === "For") {
+    visitExpr(s.start);
+    visitExpr(s.end);
+    for (const sub of s.body) countVarRefsInStmt(sub, bump);
+    return;
+  }
+  forEachTopLevelExpr(s, visitExpr);
 }
 
 /** Gate 1+2: producer is a multi-element real-double Assign whose
@@ -339,7 +248,9 @@ function isControlFlow(s: IRStmt): boolean {
  *  would invalidate inlining. */
 function collectFreeVarCNames(e: IRExpr): Set<string> {
   const out = new Set<string>();
-  countVarRefsInExpr(e, name => out.add(name));
+  forEachSubExpr(e, sub => {
+    if (sub.kind === "Var") out.add(sub.cName);
+  });
   return out;
 }
 
@@ -373,65 +284,20 @@ function stmtWrites(
   return false;
 }
 
-/** True iff `s` reads `cName` as a multi-element Var anywhere in its
- *  expressions. Used to find the unique consumer during the forward
- *  scan. */
+/** True iff `s` reads `cName` as a Var anywhere in its top-level
+ *  expressions, OR uses `cName` as the base of an IndexStore /
+ *  IndexSliceStore / MemberStore (a write to `cName`, conservatively
+ *  treated as "consumes" so the forward scan terminates without
+ *  inlining). The forward scan is bounded above by `isControlFlow`
+ *  so If/While/For/Break/Continue/ReturnFromFunction never reach
+ *  here. */
 function stmtReadsAsMultiElemVar(s: IRStmt, cName: string): boolean {
   let found = false;
-  const visit = (e: IRExpr): void => {
-    countVarRefsInExpr(e, sub => {
-      // `countVarRefsInExpr`'s callback only fires for Var subnodes,
-      // but it strips the original `Var` reference. We just need to
-      // know whether the cName matches; the multi-element check is
-      // baked into `isInlinableProducer` (only multi-element targets
-      // are tracked).
-      if (sub === cName) found = true;
+  forEachTopLevelExpr(s, e => {
+    forEachSubExpr(e, sub => {
+      if (sub.kind === "Var" && sub.cName === cName) found = true;
     });
-  };
-  switch (s.kind) {
-    case "ExprStmt":
-      visit(s.expr);
-      break;
-    case "Assign":
-      visit(s.expr);
-      break;
-    case "MemberStore":
-      if (s.base.cName === cName) found = true;
-      visit(s.rhs);
-      break;
-    case "MultiAssignCall":
-      for (const a of s.args) visit(a);
-      break;
-    case "IndexStore":
-      if (s.base.cName === cName) found = true;
-      for (const i of s.indices) visit(i);
-      visit(s.rhs);
-      break;
-    case "IndexSliceStore":
-      if (s.base.cName === cName) found = true;
-      for (const slot of s.index) {
-        if (slot.kind === "Range") {
-          visit(slot.start);
-          visit(slot.step);
-          visit(slot.end);
-        } else if (slot.kind === "Scalar") {
-          visit(slot.expr);
-        } else if (slot.kind === "IndexVec") {
-          visit(slot.expr);
-        }
-      }
-      visit(s.rhs);
-      break;
-    case "If":
-    case "While":
-    case "For":
-    case "Break":
-    case "Continue":
-    case "ReturnFromFunction":
-    case "TypeComment":
-      // Control flow ends the forward scan before reaching these.
-      break;
-  }
+  });
   return found;
 }
 
@@ -472,14 +338,14 @@ function appearsInNonSlotPosition(e: IRExpr, cName: string): boolean {
       if (e.base.kind === "Var" && e.base.cName === cName) return true;
       if (appearsInNonSlotPosition(e.base, cName)) return true;
       for (const slot of e.index) {
-        if (slot.kind === "Range") {
-          if (appearsInNonSlotPosition(slot.start, cName)) return true;
-          if (appearsInNonSlotPosition(slot.step, cName)) return true;
-          if (appearsInNonSlotPosition(slot.end, cName)) return true;
-        } else if (slot.kind === "Scalar") {
-          if (appearsInNonSlotPosition(slot.expr, cName)) return true;
-        } else if (slot.kind === "IndexVec") {
-          if (appearsInNonSlotPosition(slot.expr, cName)) return true;
+        if (slot.kind === "Colon") continue;
+        const slotExprs: IRExpr[] =
+          slot.kind === "Range"
+            ? [slot.start, slot.step, slot.end]
+            : [slot.expr];
+        for (const sub of slotExprs) {
+          if (sub.kind === "Var" && sub.cName === cName) return true;
+          if (appearsInNonSlotPosition(sub, cName)) return true;
         }
       }
       return false;

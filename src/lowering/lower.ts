@@ -3474,7 +3474,10 @@ export class Lowerer {
     };
     this.specializations.set(key, placeholder);
 
-    // Save outer state.
+    // Save outer state. The try/finally guarantees state is restored
+    // even if body lowering throws — otherwise a TypeError /
+    // UnsupportedConstruct from the body would leak this function's
+    // env / tempCounter / currentFile / callFrameStack to the caller.
     const savedEnv = this.env;
     const savedTempCounter = this.tempCounter;
     const savedCurrentFile = this.currentFile;
@@ -3486,61 +3489,72 @@ export class Lowerer {
       nargout: effectiveNargout,
     });
 
-    // Bind params. The C name goes through `cIdentForUserName` so a
-    // user-source `function r = f(struct)` doesn't reference the C
-    // keyword `struct` for reads of `struct` inside the body.
-    for (let i = 0; i < decl.params.length; i++) {
-      const pName = decl.params[i];
-      this.env.set(pName, { cName: cIdentForUserName(pName), ty: argTypes[i] });
-    }
-    // Class constructors pre-seed their output (the receiver) with the
-    // default-valued class instance via an injected first stmt, so the
-    // body can read `obj.x` / write `obj.x = ...` against an initialized
-    // slot from the very first source statement.
-    let initStmts: IRStmt[] = [];
-    if (preSeedOutput !== undefined) {
-      this.requireValueType(
-        preSeedOutput.initExpr,
-        `constructor init for '${preSeedOutput.name}'`
-      );
-      const initStmt = this.recordAssignment(
-        preSeedOutput.name,
-        preSeedOutput.initExpr,
-        decl.span
-      );
-      initStmts = [initStmt];
-    }
-
-    const body = [...initStmts, ...this.lowerStmts(decl.body)];
-
-    // Output types come from the final env value of each effective
-    // output name. Trailing outputs the caller dropped via nargout
-    // truncation aren't checked — they may legitimately be left
-    // unassigned by a `if nargout >= N` body branch.
-    const outputTypes: Type[] = effectiveOutputs.map(o => {
-      const e = this.env.get(o);
-      if (!e) {
-        throw new TypeError(
-          `function '${decl.name}': output '${o}' was never assigned`,
+    try {
+      // Bind params. The C name goes through `cIdentForUserName` so a
+      // user-source `function r = f(struct)` doesn't reference the C
+      // keyword `struct` for reads of `struct` inside the body.
+      for (let i = 0; i < decl.params.length; i++) {
+        const pName = decl.params[i];
+        this.env.set(pName, {
+          cName: cIdentForUserName(pName),
+          ty: argTypes[i],
+        });
+      }
+      // Class constructors pre-seed their output (the receiver) with
+      // the default-valued class instance via an injected first stmt,
+      // so the body can read `obj.x` / write `obj.x = ...` against an
+      // initialized slot from the very first source statement.
+      let initStmts: IRStmt[] = [];
+      if (preSeedOutput !== undefined) {
+        this.requireValueType(
+          preSeedOutput.initExpr,
+          `constructor init for '${preSeedOutput.name}'`
+        );
+        const initStmt = this.recordAssignment(
+          preSeedOutput.name,
+          preSeedOutput.initExpr,
           decl.span
         );
+        initStmts = [initStmt];
       }
-      return e.ty;
-    });
 
-    // Restore outer state.
-    this.env = savedEnv;
-    this.tempCounter = savedTempCounter;
-    this.currentFile = savedCurrentFile;
-    this.callFrameStack.pop();
+      const body = [...initStmts, ...this.lowerStmts(decl.body)];
 
-    const out: IRFunc = {
-      ...placeholder,
-      body,
-      outputTypes,
-    };
-    this.specializations.set(key, out);
-    return out;
+      // Output types come from the final env value of each effective
+      // output name. Trailing outputs the caller dropped via nargout
+      // truncation aren't checked — they may legitimately be left
+      // unassigned by a `if nargout >= N` body branch.
+      const outputTypes: Type[] = effectiveOutputs.map(o => {
+        const e = this.env.get(o);
+        if (!e) {
+          throw new TypeError(
+            `function '${decl.name}': output '${o}' was never assigned`,
+            decl.span
+          );
+        }
+        return e.ty;
+      });
+
+      const out: IRFunc = {
+        ...placeholder,
+        body,
+        outputTypes,
+      };
+      this.specializations.set(key, out);
+      return out;
+    } catch (err) {
+      // Body lowering threw — drop the placeholder so a future call
+      // with the same key (e.g. after the user fixes the error and
+      // re-translates against the same Lowerer instance) re-attempts
+      // specialization instead of returning the empty placeholder.
+      this.specializations.delete(key);
+      throw err;
+    } finally {
+      this.env = savedEnv;
+      this.tempCounter = savedTempCounter;
+      this.currentFile = savedCurrentFile;
+      this.callFrameStack.pop();
+    }
   }
 
   // ── Helpers ───────────────────────────────────────────────────────────
