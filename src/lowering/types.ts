@@ -769,18 +769,30 @@ export function unify(a: Type, b: Type): Type {
   if (a.kind === "Numeric" && b.kind === "Numeric") {
     if (a.elem !== b.elem) return UNKNOWN;
     if (a.isComplex !== b.isComplex) return UNKNOWN;
-    if (a.dims.length !== b.dims.length) return UNKNOWN;
-    const dims = a.dims.map((d, i) => unifyDim(d, b.dims[i]));
+    // Normalize trailing-singleton dims to a 2-axis minimum on both
+    // sides before comparing. Otherwise an IF arm producing `zeros(2,3)`
+    // (dims=[2,3]) and an ELSE arm producing `zeros(2,3,1)`
+    // (dims=[2,3,1]) would unify to UNKNOWN even though their shapes
+    // are equivalent under MATLAB's trailing-singleton rule.
+    const aDims = trimTrailingSingletons(a.dims);
+    const bDims = trimTrailingSingletons(b.dims);
+    if (aDims.length !== bDims.length) return UNKNOWN;
+    const dims = aDims.map((d, i) => unifyDim(d, bDims[i]));
     const sign = unifySign(a.sign, b.sign);
-    // Shape survives only when both sides agree exactly; otherwise drop.
+    // Shape survives only when both sides agree exactly after the same
+    // trailing-singleton trim.
+    const aShape =
+      a.shape !== undefined ? trimTrailingShapeOnes(a.shape) : undefined;
+    const bShape =
+      b.shape !== undefined ? trimTrailingShapeOnes(b.shape) : undefined;
     let shape: number[] | undefined;
     if (
-      a.shape !== undefined &&
-      b.shape !== undefined &&
-      a.shape.length === b.shape.length &&
-      a.shape.every((s, i) => s === b.shape![i])
+      aShape !== undefined &&
+      bShape !== undefined &&
+      aShape.length === bShape.length &&
+      aShape.every((s, i) => s === bShape[i])
     ) {
-      shape = a.shape.slice();
+      shape = aShape;
     }
     const out: NumericType = {
       kind: "Numeric",
@@ -850,6 +862,27 @@ function unifyDim(a: DimInfo, b: DimInfo): DimInfo {
   if (a.kind === "exact" && b.kind === "exact" && a.value === b.value) return a;
   if (a.kind === "unknown" && b.kind === "unknown") return a;
   return { kind: "unknown" };
+}
+
+/** Strip trailing axes that are statically known to be 1, down to a
+ *  2-axis minimum (matching `tensorDoubleFromDims` and MATLAB's
+ *  trailing-singleton rule). Used by `unify` to align ranks before
+ *  the dimwise compare so equivalent shapes don't trip the
+ *  `dims.length !== dims.length` early-out. */
+function trimTrailingSingletons(dims: ReadonlyArray<DimInfo>): DimInfo[] {
+  const trimmed = dims.slice();
+  while (trimmed.length > 2 && isDimOne(trimmed[trimmed.length - 1])) {
+    trimmed.pop();
+  }
+  return trimmed;
+}
+
+function trimTrailingShapeOnes(shape: ReadonlyArray<number>): number[] {
+  const trimmed = shape.slice();
+  while (trimmed.length > 2 && trimmed[trimmed.length - 1] === 1) {
+    trimmed.pop();
+  }
+  return trimmed;
 }
 
 // ── Pretty-print (for diagnostics) ──────────────────────────────────────

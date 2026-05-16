@@ -93,9 +93,34 @@ export interface Unary {
   span: Span;
 }
 
+/** Single-output function call. `Call` covers three distinct emit
+ *  paths discriminated by how codegen interprets `cName`:
+ *
+ *  1. **User-function specialization** — the lowerer's `buildUserFunctionCall`
+ *     path. `cName` is the mangled spec name returned by
+ *     `specializeUserFunction` (e.g. `apply__a1b2c3d4`); codegen emits
+ *     a direct call to that symbol. The `IRFunc` for the spec lives in
+ *     `IRProgram.functions[cName]`.
+ *  2. **Bundled builtin** — `cName` equals the source-level builtin
+ *     name (e.g. `sqrt`, `zeros`, `disp`). Codegen routes through
+ *     `getBuiltin(cName).codegenC(argsC, argTypes)` to synthesize the
+ *     emitted C expression — there's no Standalone IRFunc.
+ *  3. **Synthesized runtime call** — emitted by the lowerer for a
+ *     handful of fixed runtime helpers (`mtoc2_toc_print`,
+ *     `mtoc2_toc_handle_print`, the complex `'` rewrite to
+ *     `transpose(conj(z))`, etc.). The `name` field carries the
+ *     source-facing identifier the lowerer wants in diagnostics; the
+ *     pattern is the same as the builtin route — codegen treats them
+ *     as builtin-name lookups.
+ *
+ *  The `name` field is purely for diagnostics (user-facing call name
+ *  e.g. `pkg.foo` or `Class.method` or `f`). The semantic key is
+ *  `cName`. */
 export interface Call {
   kind: "Call";
-  /** Resolved name. For user functions this is the mangled name. */
+  /** Resolved name. For user functions: mangled spec name. For
+   *  builtins / synthesized runtime calls: the source-level builtin
+   *  name routed through `getBuiltin`. */
   cName: string;
   /** Source-level name (for diagnostics). */
   name: string;
@@ -419,7 +444,16 @@ export interface TypeComment {
  *  per `null` slot so those temporaries stay scoped to the call. */
 export interface MultiAssignCall {
   kind: "MultiAssignCall";
-  /** Mangled C identifier of the user-function specialization. */
+  /** Resolved C identifier of the callee. Two interpretations,
+   *  matching `Call.cName`:
+   *  - **User-function specialization** — the mangled spec name from
+   *    `specializeUserFunction` (e.g. `apply__a1b2c3d4`); codegen
+   *    emits a direct call.
+   *  - **Multi-output builtin** — the C helper name returned by the
+   *    builtin's `multiOutput.cName(argTypes, nargout)` hook (e.g.
+   *    `mtoc2_sort_real_with_indices`). Codegen emits a direct call
+   *    to that helper; the builtin author is responsible for the
+   *    sret out-pointer ABI. */
   cName: string;
   /** Source-level name (for diagnostics). */
   name: string;
