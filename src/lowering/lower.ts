@@ -1794,34 +1794,13 @@ export class Lowerer {
         e.span
       );
       if (target?.kind === "userFunction") {
-        // Expression-context call site requests exactly 1 output. A
-        // multi-output declared function specializes with nargout=1,
-        // which truncates the spec's output list — the callee then
-        // emits as a single-output C function (return-by-value), and
-        // any `if nargout >= N` branches dead-code via the nargout
-        // fold. A 0-output declared function specializes with
-        // nargout=0 (void); calling it in expression position is
-        // separately rejected by `requireValueType` at the consumer.
-        const spec = this.specializeUserFunction(
-          target.ast,
-          argTypes,
-          qname,
-          target.file,
-          undefined,
-          target.ast.outputs.length === 0 ? 0 : 1
-        );
-        const ty: Type =
-          target.ast.outputs.length === 0
-            ? VOID
-            : (spec.outputTypes[0] ?? { kind: "Unknown" });
-        return {
-          kind: "Call",
-          cName: spec.cName,
-          name: qname,
-          args,
-          ty,
-          span: e.span,
-        };
+        // Expression-context call site requests exactly 1 output (or
+        // 0 for a void-declared function); see `buildUserFunctionCall`
+        // for the discipline.
+        return this.buildUserFunctionCall(target.ast, args, qname, e.span, {
+          specSource: qname,
+          definingFile: target.file,
+        });
       }
       if (target?.kind === "classConstructor") {
         const reg = this.classReg(target.className);
@@ -1916,27 +1895,16 @@ export class Lowerer {
       );
     }
     const allArgs: IRExpr[] = target.stripInstance ? args : [base, ...args];
-    const argTypes = allArgs.map(a => a.ty);
-    const spec = this.specializeUserFunction(
+    return this.buildUserFunctionCall(
       method,
-      argTypes,
-      classMethodSpecSource(target.className, target.methodName),
-      reg.file,
-      undefined,
-      method.outputs.length === 0 ? 0 : 1
+      allArgs,
+      `${target.className}.${target.methodName}`,
+      e.span,
+      {
+        specSource: classMethodSpecSource(target.className, target.methodName),
+        definingFile: reg.file,
+      }
     );
-    const ty: Type =
-      method.outputs.length === 0
-        ? VOID
-        : (spec.outputTypes[0] ?? { kind: "Unknown" });
-    return {
-      kind: "Call",
-      cName: spec.cName,
-      name: `${target.className}.${target.methodName}`,
-      args: allArgs,
-      ty,
-      span: e.span,
-    };
   }
 
   /** Lowers `obj.field(args)` where `field` is a class property (not a
@@ -2045,26 +2013,16 @@ export class Lowerer {
         span
       );
     }
-    const spec = this.specializeUserFunction(
+    return this.buildUserFunctionCall(
       method,
-      argTypes,
-      classMethodSpecSource(target.className, target.methodName),
-      reg.file,
-      undefined,
-      method.outputs.length === 0 ? 0 : 1
-    );
-    const ty: Type =
-      method.outputs.length === 0
-        ? VOID
-        : (spec.outputTypes[0] ?? { kind: "Unknown" });
-    return {
-      kind: "Call",
-      cName: spec.cName,
-      name: `${target.className}.${target.methodName}`,
       args,
-      ty,
+      `${target.className}.${target.methodName}`,
       span,
-    };
+      {
+        specSource: classMethodSpecSource(target.className, target.methodName),
+        definingFile: reg.file,
+      }
+    );
   }
 
   private lowerIdent(e: Extract<Expr, { type: "Ident" }>): IRExpr {
@@ -2781,28 +2739,10 @@ export class Lowerer {
       case "userFunction": {
         // Expression-context: request nargout=1 (the call site's
         // single lvalue). A multi-output declared function specializes
-        // with truncated output list — see the dotted-name branch
-        // above and `specializeUserFunction` for the discipline.
-        const spec = this.specializeUserFunction(
-          target.ast,
-          argTypes,
-          undefined,
-          target.file,
-          undefined,
-          target.ast.outputs.length === 0 ? 0 : 1
-        );
-        const ty: Type =
-          target.ast.outputs.length === 0
-            ? VOID
-            : (spec.outputTypes[0] ?? { kind: "Unknown" });
-        return {
-          kind: "Call",
-          cName: spec.cName,
-          name: e.name,
-          args,
-          ty,
-          span: e.span,
-        };
+        // with truncated output list — see `buildUserFunctionCall`.
+        return this.buildUserFunctionCall(target.ast, args, e.name, e.span, {
+          definingFile: target.file,
+        });
       }
       case "classMethod": {
         // `method(obj, args)` syntax — the resolver decided this
@@ -2835,27 +2775,19 @@ export class Lowerer {
           );
         }
         const callArgs = target.stripInstance ? args.slice(1) : args;
-        const callArgTypes = callArgs.map(a => a.ty);
-        const spec = this.specializeUserFunction(
+        return this.buildUserFunctionCall(
           method,
-          callArgTypes,
-          classMethodSpecSource(target.className, target.methodName),
-          reg.file,
-          undefined,
-          method.outputs.length === 0 ? 0 : 1
+          callArgs,
+          `${target.className}.${target.methodName}`,
+          e.span,
+          {
+            specSource: classMethodSpecSource(
+              target.className,
+              target.methodName
+            ),
+            definingFile: reg.file,
+          }
         );
-        const ty: Type =
-          method.outputs.length === 0
-            ? VOID
-            : (spec.outputTypes[0] ?? { kind: "Unknown" });
-        return {
-          kind: "Call",
-          cName: spec.cName,
-          name: `${target.className}.${target.methodName}`,
-          args: callArgs,
-          ty,
-          span: e.span,
-        };
       }
       case "classConstructor": {
         // Shouldn't fire because we short-circuit above on
@@ -3363,7 +3295,6 @@ export class Lowerer {
       span,
     }));
     const allArgs = [...userArgs, ...captureArgs];
-    const argTypes = allArgs.map(a => a.ty);
     // The handle's stored AST carries its own source span, which
     // identifies the file the function was defined in — that's the
     // right file to salt the spec key with.
@@ -3375,29 +3306,70 @@ export class Lowerer {
         span
       );
     }
-    const spec = this.specializeUserFunction(
+    return this.buildUserFunctionCall(
       handleTy.ast,
+      allArgs,
+      handleTy.targetName,
+      span,
+      { definingFile: handleTy.ast.span.file }
+    );
+  }
+
+  // ── Function specialization ───────────────────────────────────────────
+
+  /** Build a single-output `Call` IR node against a user-function AST,
+   *  specializing the body on the arg-type tuple. Single chokepoint
+   *  for every expression-context user-function call: bare-name calls,
+   *  packaged (`pkg.foo`) calls, instance / static class methods,
+   *  method-call-via-arg-type, and handle dispatch. Each caller is
+   *  still responsible for the verdict-specific bookkeeping (resolver
+   *  routing, prepending the receiver to args for instance methods,
+   *  rejecting >=2-output methods if its dispatch path doesn't yet
+   *  support truncation, …) — but the spec lookup + output-type
+   *  derivation + IR construction is uniform here.
+   *
+   *  For 0-output declarations the resulting `Call` has `ty = VOID`,
+   *  which the caller (`lowerExprStmt`) must accept as bare-statement
+   *  use only. For >=1-output declarations the spec truncates to
+   *  nargout=1 and the result type is the (possibly Unknown if the
+   *  body didn't assign the output) first declared output.
+   *
+   *  The N≥2-output path uses a separate `MultiAssignCall` IR node
+   *  built by `lowerMultiAssign` — this helper is single-output only.
+   */
+  private buildUserFunctionCall(
+    decl: FuncStmt,
+    callArgs: IRExpr[],
+    callName: string,
+    span: Span,
+    opts: {
+      specSource?: string;
+      definingFile?: string;
+    } = {}
+  ): IRExpr {
+    const argTypes = callArgs.map(a => a.ty);
+    const nargout = decl.outputs.length === 0 ? 0 : 1;
+    const spec = this.specializeUserFunction(
+      decl,
       argTypes,
+      opts.specSource,
+      opts.definingFile,
       undefined,
-      handleTy.ast.span.file,
-      undefined,
-      handleTy.ast.outputs.length === 0 ? 0 : 1
+      nargout
     );
     const ty: Type =
-      handleTy.ast.outputs.length === 0
+      decl.outputs.length === 0
         ? VOID
         : (spec.outputTypes[0] ?? { kind: "Unknown" });
     return {
       kind: "Call",
       cName: spec.cName,
-      name: handleTy.targetName,
-      args: allArgs,
+      name: callName,
+      args: callArgs,
       ty,
       span,
     };
   }
-
-  // ── Function specialization ───────────────────────────────────────────
 
   /** Specialize a user function (or method, or anonymous-function
    *  synth) on the given arg-type tuple. The C mangling salts by the
