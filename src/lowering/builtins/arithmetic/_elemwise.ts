@@ -19,6 +19,7 @@ import {
   flipSign,
   isDimOne,
   isMultiElement,
+  shapeNumel,
   EXACT_ARRAY_MAX_ELEMENTS,
 } from "../../types.js";
 import type { Builtin } from "../registry.js";
@@ -134,7 +135,7 @@ export function broadcastFoldExact(
   outShape: number[],
   step: (av: number, bv: number) => number
 ): Float64Array {
-  const total = outShape.reduce((p, q) => p * q, 1);
+  const total = shapeNumel(outShape);
   const rnd = outShape.length;
   const aArr = exactRealArray(a);
   const bArr = exactRealArray(b);
@@ -383,7 +384,7 @@ function buildElemwiseRealBinary(opts: {
         aIsExact &&
         bIsExact &&
         outTy.shape !== undefined &&
-        outTy.shape.reduce((p, q) => p * q, 1) <= EXACT_ARRAY_MAX_ELEMENTS
+        shapeNumel(outTy.shape) <= EXACT_ARRAY_MAX_ELEMENTS
       ) {
         // Reuse the constructor so shape/exact get validated and sign
         // is derived from the actual values.

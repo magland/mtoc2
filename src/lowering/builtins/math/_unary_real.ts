@@ -22,6 +22,7 @@ import {
   tensorComplex,
   tensorDoubleFromDims,
   tensorComplexFromDims,
+  shapeNumel,
   signFromNumber,
   isScalar,
   isMultiElement,
@@ -122,7 +123,7 @@ export function defineUnaryRealMath(opts: UnaryRealMathOpts): Builtin {
         }
         const cx = exactComplexArray(a);
         if (cx !== undefined && a.shape !== undefined) {
-          const total = a.shape.reduce((p, q) => p * q, 1);
+          const total = shapeNumel(a.shape);
           if (total <= EXACT_ARRAY_MAX_ELEMENTS) {
             const re = new Float64Array(total);
             const im = new Float64Array(total);
@@ -157,7 +158,7 @@ export function defineUnaryRealMath(opts: UnaryRealMathOpts): Builtin {
       // just can't fold their values.
       if (a.shape !== undefined) {
         const arr = exactRealArray(a);
-        const total = a.shape.reduce((p, q) => p * q, 1);
+        const total = shapeNumel(a.shape);
         if (arr !== undefined && total <= EXACT_ARRAY_MAX_ELEMENTS) {
           const out = new Float64Array(arr.length);
           let allFinite = true;

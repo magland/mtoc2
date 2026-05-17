@@ -52,6 +52,7 @@ import {
   isVoid,
   isOwned,
   fieldType,
+  shapeNumel,
   structType,
   typeToString,
   VOID,
@@ -1223,7 +1224,7 @@ export class Lowerer {
     // Try a static value first.
     if (top.axis === "linear") {
       if (top.baseTy.shape !== undefined) {
-        const n = top.baseTy.shape.reduce((a, b) => a * b, 1);
+        const n = shapeNumel(top.baseTy.shape);
         return {
           kind: "NumLit",
           value: n,

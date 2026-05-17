@@ -26,6 +26,7 @@ import {
   isRowVecTy,
   isScalarRealNumeric,
   isNumeric,
+  shapeNumel,
   tensorComplex,
   tensorComplexFromDims,
   tensorDouble,
@@ -85,7 +86,7 @@ function resultDimForSlot(slot: IndexSliceArg, baseDim: DimInfo): DimInfo {
   if (slot.kind === "IndexVec") {
     const idxTy = slot.expr.ty;
     if (isNumeric(idxTy) && idxTy.shape !== undefined) {
-      const n = idxTy.shape.reduce((a, b) => a * b, 1);
+      const n = shapeNumel(idxTy.shape);
       return { kind: "exact", value: n };
     }
     return { kind: "unknown" };
@@ -126,7 +127,7 @@ export function lowerIndexSlice(
       // statically known, build a concrete shape; otherwise the
       // leading axis is runtime-only.
       if (baseTy.shape !== undefined) {
-        const n = baseTy.shape.reduce((a, b) => a * b, 1);
+        const n = shapeNumel(baseTy.shape);
         resultTy = wantComplex ? tensorComplex([n, 1]) : tensorDouble([n, 1]);
       } else {
         const dims: DimInfo[] = [

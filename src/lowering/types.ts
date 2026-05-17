@@ -109,6 +109,16 @@ export function isDimOne(d: DimInfo): boolean {
   return d.kind === "exact" && d.value === 1;
 }
 
+/** Product of every entry in `shape` — i.e. `numel` for a tensor with
+ *  this concrete shape. Returns 1 for an empty shape array (a 0-D
+ *  scalar in MATLAB terms; mtoc2 always pads to 2-D so this is rare
+ *  but well-defined). */
+export function shapeNumel(shape: ReadonlyArray<number>): number {
+  let n = 1;
+  for (const s of shape) n *= s;
+  return n;
+}
+
 // ── Exact value (for scalars; arrays later, capped) ─────────────────────
 
 /** Cap for how big an "exact array" we'll propagate through the type
@@ -366,7 +376,7 @@ export function tensorDouble(
     sign: "unknown",
   };
   if (exact !== undefined) {
-    const total = shape.reduce((a, b) => a * b, 1);
+    const total = shapeNumel(shape);
     if (exact.length !== total) {
       throw new Error(
         `tensorDouble: shape [${shape.join(",")}] requires ${total} elements, got ${exact.length}`
@@ -400,7 +410,7 @@ export function tensorComplex(
     sign: "unknown",
   };
   if (exact !== undefined) {
-    const total = shape.reduce((a, b) => a * b, 1);
+    const total = shapeNumel(shape);
     if (exact.re.length !== total || exact.im.length !== total) {
       throw new Error(
         `tensorComplex: shape [${shape.join(",")}] requires ${total} elements, got re=${exact.re.length} im=${exact.im.length}`

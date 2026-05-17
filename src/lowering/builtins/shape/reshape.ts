@@ -48,6 +48,7 @@ import {
   tensorDoubleFromDims,
   scalarComplex,
   scalarDouble,
+  shapeNumel,
   signFromNumber,
   isNumeric,
   isScalar,
@@ -85,7 +86,7 @@ function isEmptyPlaceholder(t: Type): boolean {
   if (!isNumeric(t)) return false;
   if (isScalar(t)) return false;
   if (t.shape === undefined) return false;
-  return t.shape.reduce((a, b) => a * b, 1) === 0;
+  return shapeNumel(t.shape) === 0;
 }
 
 /** Apply numbl's strip / pad rules to a resolved axis list. Drops

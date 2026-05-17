@@ -1,6 +1,7 @@
 import { TypeError } from "../../errors.js";
 import {
   scalarDouble,
+  shapeNumel,
   signFromNumber,
   isNumeric,
   isScalar,
@@ -20,7 +21,7 @@ export const numel: Builtin = {
       // struct/class field). The runtime helper handles it.
       return scalarDouble("nonneg");
     }
-    const v = t.shape.reduce((a, b) => a * b, 1);
+    const v = shapeNumel(t.shape);
     return scalarDouble(signFromNumber(v), v);
   },
   codegenC(argsC, argTypes) {

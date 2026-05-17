@@ -27,6 +27,7 @@ import {
   isNumeric,
   isScalar,
   scalarDouble,
+  shapeNumel,
   signFromNumber,
   tensorDouble,
   typeToString,
@@ -43,7 +44,7 @@ function flipExact(
   shape: number[],
   axisIdx: number
 ): Float64Array {
-  const total = shape.reduce((p, q) => p * q, 1);
+  const total = shapeNumel(shape);
   const out = new Float64Array(total);
   const axisSize = axisIdx >= 0 && axisIdx < shape.length ? shape[axisIdx] : 1;
   if (axisSize <= 1) {
@@ -179,7 +180,7 @@ function defineFlip(opts: {
       // Exact-fold when input is exact and fits the cap.
       const arr = exactRealArray(a);
       if (a.shape !== undefined && arr !== undefined) {
-        const total = a.shape.reduce((p, q) => p * q, 1);
+        const total = shapeNumel(a.shape);
         if (total <= EXACT_ARRAY_MAX_ELEMENTS) {
           const out = flipExact(arr, a.shape, axisIdx);
           return tensorDouble(a.shape, out);

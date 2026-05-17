@@ -34,6 +34,7 @@ import {
   tensorDouble,
   tensorDoubleFromDims,
   scalarDouble,
+  shapeNumel,
   signFromNumber,
   isNumeric,
   isScalar,
@@ -265,7 +266,7 @@ export function defineShapeConstructor(
       const resolved = resolveShape(name, argTypes, span);
       const shape = exactShapeOf(resolved);
       if (shape !== undefined) {
-        const total = shape.reduce((a, b) => a * b, 1);
+        const total = shapeNumel(shape);
         // Empty result (any axis 0) keeps the shape but no exact data —
         // there's no element to put in a Float64Array. Sign stays
         // "unknown" (vacuously true; empty tensors don't constrain

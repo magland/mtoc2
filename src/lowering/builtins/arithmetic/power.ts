@@ -37,6 +37,7 @@ import {
   scalarComplex,
   signFromNumber,
   signIsNonneg,
+  shapeNumel,
   tensorDouble,
   tensorDoubleFromDims,
 } from "../../types.js";
@@ -213,7 +214,7 @@ export const power: Builtin = {
       aIsExact &&
       bIsExact &&
       outTy.shape !== undefined &&
-      outTy.shape.reduce((p, q) => p * q, 1) <= EXACT_ARRAY_MAX_ELEMENTS
+      shapeNumel(outTy.shape) <= EXACT_ARRAY_MAX_ELEMENTS
     ) {
       const data = broadcastFoldExact(a, b, outTy.shape, Math.pow);
       // Drop the fold if any element went non-finite — defer to runtime

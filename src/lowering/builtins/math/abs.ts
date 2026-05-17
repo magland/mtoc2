@@ -1,6 +1,7 @@
 import {
   type NumericType,
   scalarDouble,
+  shapeNumel,
   tensorDouble,
   tensorDoubleFromDims,
   isMultiElement,
@@ -54,7 +55,7 @@ export const abs: Builtin = {
       // and small enough.
       const cx = exactComplexArray(a);
       if (cx !== undefined && a.shape !== undefined) {
-        const total = a.shape.reduce((p, q) => p * q, 1);
+        const total = shapeNumel(a.shape);
         if (total <= EXACT_ARRAY_MAX_ELEMENTS) {
           const out = new Float64Array(total);
           for (let i = 0; i < total; i++) {

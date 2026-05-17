@@ -14,6 +14,8 @@
  * call sites consistent.
  */
 
+import { shapeNumel } from "./types.js";
+
 /** Map an N-D shape and a 1-based index tuple to a column-major flat
  *  offset, or `undefined` if the index is out-of-range or the tuple
  *  shape doesn't match a supported form.
@@ -34,7 +36,7 @@ export function columnMajorOffsetFromIndices(
   idxVals: ReadonlyArray<number>
 ): number | undefined {
   if (idxVals.length === 1) {
-    const total = shape.reduce((a, b) => a * b, 1);
+    const total = shapeNumel(shape);
     const lin = idxVals[0];
     if (lin > total) return undefined;
     return lin - 1;

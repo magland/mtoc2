@@ -21,6 +21,7 @@ import {
   isNumeric,
   isScalar,
   scalarLogical,
+  shapeNumel,
   typeToString,
 } from "../../types.js";
 import type { Builtin } from "../registry.js";
@@ -87,7 +88,7 @@ export const notBuiltin: Builtin = {
     // the element-count cap.
     const arr = exactRealArray(a);
     if (a.shape !== undefined && arr !== undefined) {
-      const total = a.shape.reduce((p, q) => p * q, 1);
+      const total = shapeNumel(a.shape);
       if (total <= EXACT_ARRAY_MAX_ELEMENTS) {
         const out = new Float64Array(arr.length);
         for (let i = 0; i < arr.length; i++) {

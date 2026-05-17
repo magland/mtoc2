@@ -17,6 +17,7 @@ import {
   tensorDouble,
   tensorDoubleFromDims,
   isMultiElement,
+  shapeNumel,
   signFromNumber,
   EXACT_ARRAY_MAX_ELEMENTS,
 } from "../../types.js";
@@ -49,7 +50,7 @@ export const conj: Builtin = {
     if (a.isComplex) {
       const cx = exactComplexArray(a);
       if (cx !== undefined && a.shape !== undefined) {
-        const total = a.shape.reduce((p, q) => p * q, 1);
+        const total = shapeNumel(a.shape);
         if (total <= EXACT_ARRAY_MAX_ELEMENTS) {
           const re = new Float64Array(cx.re.length);
           const im = new Float64Array(cx.im.length);
