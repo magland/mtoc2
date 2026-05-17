@@ -106,6 +106,20 @@ function dimsToStr(dims: ReadonlyArray<DimInfo>): string {
   return dims.map(d => (d.kind === "exact" ? `${d.value}` : "?")).join("×");
 }
 
+/** True iff an elementwise binary op on tensor operands `a` and `b`
+ *  needs the broadcasting `_bcast_tt` helper rather than the same-shape
+ *  `_tt` fast path. Mirrors the per-axis compatibility logic inside
+ *  `elemwiseResultShape` but returns just the bool — codegen call
+ *  sites don't need to thread the resolved output shape from transfer.
+ *  Exported for `power.ts`, which shares the same codegen discipline. */
+export function needsBroadcast(a: NumericType, b: NumericType): boolean {
+  if (a.dims.length !== b.dims.length) return true;
+  for (let i = 0; i < a.dims.length; i++) {
+    if (isDimOne(a.dims[i]) !== isDimOne(b.dims[i])) return true;
+  }
+  return false;
+}
+
 /** Compute the broadcast-aware elementwise fold over `a` and `b` for
  *  the given (fully-exact) output shape, applying `step` per slot.
  *  Both sides must already carry exact data (a `Float64Array` or a
@@ -407,20 +421,9 @@ function buildElemwiseRealBinary(opts: {
         const promote = (c: string, isComplexArg: boolean): string =>
           isComplexArg ? c : `mtoc2_cmake(${c}, 0.0)`;
         if (aMulti && bMulti) {
-          const rnd = Math.max(aN.dims.length, bN.dims.length);
-          let needsBcast = aN.dims.length !== bN.dims.length;
-          if (!needsBcast) {
-            for (let i = 0; i < rnd; i++) {
-              if (isDimOne(aN.dims[i]) !== isDimOne(bN.dims[i])) {
-                needsBcast = true;
-                break;
-              }
-            }
-          }
-          if (needsBcast) {
-            return `${base}_bcast_tt(${argsC[0]}, ${argsC[1]})`;
-          }
-          return `${base}_tt(${argsC[0]}, ${argsC[1]})`;
+          return needsBroadcast(aN, bN)
+            ? `${base}_bcast_tt(${argsC[0]}, ${argsC[1]})`
+            : `${base}_tt(${argsC[0]}, ${argsC[1]})`;
         }
         if (aMulti) {
           return `${base}_ts(${argsC[0]}, ${promote(argsC[1], bN.isComplex)})`;
@@ -432,27 +435,9 @@ function buildElemwiseRealBinary(opts: {
         return `${base}_st(${promote(argsC[0], aN.isComplex)}, ${argsC[1]})`;
       }
       if (aMulti && bMulti) {
-        // Re-derive broadcast vs same-shape from the arg types. Identical
-        // logic to `elemwiseResultShape`, but kept inline so codegen
-        // can decide without threading state from `transfer`.
-        const rnd = Math.max(aN.dims.length, bN.dims.length);
-        let needsBcast = aN.dims.length !== bN.dims.length;
-        if (!needsBcast) {
-          for (let i = 0; i < rnd; i++) {
-            const da = aN.dims[i];
-            const db = bN.dims[i];
-            const aOne = isDimOne(da);
-            const bOne = isDimOne(db);
-            if (aOne !== bOne) {
-              needsBcast = true;
-              break;
-            }
-          }
-        }
-        if (needsBcast) {
-          return `mtoc2_tensor_${helperBase}_bcast_tt(${argsC[0]}, ${argsC[1]})`;
-        }
-        return `mtoc2_tensor_${helperBase}_tt(${argsC[0]}, ${argsC[1]})`;
+        return needsBroadcast(aN, bN)
+          ? `mtoc2_tensor_${helperBase}_bcast_tt(${argsC[0]}, ${argsC[1]})`
+          : `mtoc2_tensor_${helperBase}_tt(${argsC[0]}, ${argsC[1]})`;
       }
       if (aMulti) {
         return `mtoc2_tensor_${helperBase}_ts(${argsC[0]}, ${argsC[1]})`;

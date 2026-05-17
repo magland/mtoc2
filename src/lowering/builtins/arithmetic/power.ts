@@ -32,7 +32,6 @@ import {
   type NumericType,
   type Sign,
   EXACT_ARRAY_MAX_ELEMENTS,
-  isDimOne,
   isMultiElement,
   scalarDouble,
   scalarComplex,
@@ -49,7 +48,11 @@ import {
   requireRealOrComplex,
   requireRealDouble,
 } from "../_shared.js";
-import { broadcastFoldExact, elemwiseResultShape } from "./_elemwise.js";
+import {
+  broadcastFoldExact,
+  elemwiseResultShape,
+  needsBroadcast,
+} from "./_elemwise.js";
 
 function isExactInteger(t: NumericType): boolean {
   const v = exactDouble(t);
@@ -232,21 +235,7 @@ export const power: Builtin = {
       return `pow(${argsC[0]}, ${argsC[1]})`;
     }
     if (aMulti && bMulti) {
-      // Re-derive broadcast vs same-shape from the arg types, same
-      // discipline as `_elemwise.ts`'s shared infix path.
-      const rnd = Math.max(aN.dims.length, bN.dims.length);
-      let needsBcast = aN.dims.length !== bN.dims.length;
-      if (!needsBcast) {
-        for (let i = 0; i < rnd; i++) {
-          const aOne = isDimOne(aN.dims[i]);
-          const bOne = isDimOne(bN.dims[i]);
-          if (aOne !== bOne) {
-            needsBcast = true;
-            break;
-          }
-        }
-      }
-      return needsBcast
+      return needsBroadcast(aN, bN)
         ? `mtoc2_tensor_power_bcast_tt(${argsC[0]}, ${argsC[1]})`
         : `mtoc2_tensor_power_tt(${argsC[0]}, ${argsC[1]})`;
     }
