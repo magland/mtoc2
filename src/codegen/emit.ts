@@ -36,7 +36,6 @@ import {
   handleTypedefName,
   isColVecTy,
   isRowVecTy,
-  isDimOne,
   isNumeric,
   isOwned,
   isScalar,
@@ -1916,8 +1915,7 @@ function emitIndexSliceStore(
   state: RuntimeState
 ): string {
   const baseCName = s.base.cName;
-  const rhsIsScalar =
-    s.rhs.ty.kind === "Numeric" && s.rhs.ty.dims.every(isDimOne);
+  const rhsIsScalar = isScalar(s.rhs.ty);
   const baseIsComplex = isNumeric(s.base.ty) && s.base.ty.isComplex;
   const rhsIsComplex = isNumeric(s.rhs.ty) && s.rhs.ty.isComplex;
   if (baseIsComplex) {

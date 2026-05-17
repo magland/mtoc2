@@ -26,6 +26,7 @@ import {
   EXACT_ARRAY_MAX_ELEMENTS,
   isMultiElement,
   isNumeric,
+  isScalar,
   signFromExactArray,
   tensorComplex,
   tensorDouble,
@@ -105,7 +106,7 @@ export function lowerTensorLit(
         }
         anyComplex = true;
       }
-      if (ty.dims.every(d => d.kind === "exact" && d.value === 1)) {
+      if (isScalar(ty)) {
         // Both scalar real and scalar complex land here.
         out.push({ kind: "scalar", expr: lowered, ty });
         continue;

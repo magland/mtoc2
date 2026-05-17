@@ -15,7 +15,7 @@
 import type { Expr, LValue, Span } from "../parser/index.js";
 import { TypeError, UnsupportedConstruct } from "./errors.js";
 import type { IRStmt, IndexSliceArg } from "./ir.js";
-import { isMultiElement, isNumeric, typeToString } from "./types.js";
+import { isMultiElement, isNumeric, isScalar, typeToString } from "./types.js";
 import type { Lowerer } from "./lower.js";
 import { lowerSliceArg } from "./lowerIndexSlice.js";
 import { resolveIndexBase } from "./indexResolve.js";
@@ -111,9 +111,7 @@ export function lowerIndexSliceStore(
   // uniform. Same ANF rule used by every other owned consume site.
   const hoists: IRStmt[] = [];
   let rhs: typeof rawRhs;
-  const rhsIsScalar =
-    isNumeric(rawRhs.ty) &&
-    rawRhs.ty.dims.every(d => d.kind === "exact" && d.value === 1);
+  const rhsIsScalar = isScalar(rawRhs.ty);
   if (rhsIsScalar) {
     rhs = rawRhs;
   } else if (isMultiElement(rawRhs.ty)) {
