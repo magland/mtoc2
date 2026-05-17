@@ -106,6 +106,65 @@ function dimsToStr(dims: ReadonlyArray<DimInfo>): string {
   return dims.map(d => (d.kind === "exact" ? `${d.value}` : "?")).join("×");
 }
 
+/** Compute the broadcast-aware elementwise fold over `a` and `b` for
+ *  the given (fully-exact) output shape, applying `step` per slot.
+ *  Both sides must already carry exact data (a `Float64Array` or a
+ *  scalar `number`); the caller is responsible for the
+ *  `EXACT_ARRAY_MAX_ELEMENTS` cap. Singleton axes on either side get
+ *  stride 0 so they broadcast against non-singleton output axes;
+ *  output is filled in column-major order to match the runtime layout.
+ *  Exported for `power.ts`, which shares the same broadcast rules. */
+export function broadcastFoldExact(
+  a: NumericType,
+  b: NumericType,
+  outShape: number[],
+  step: (av: number, bv: number) => number
+): Float64Array {
+  const total = outShape.reduce((p, q) => p * q, 1);
+  const rnd = outShape.length;
+  const aArr = exactRealArray(a);
+  const bArr = exactRealArray(b);
+  const ax = exactDouble(a);
+  const bx = exactDouble(b);
+  const aShape: number[] = new Array(rnd);
+  const bShape: number[] = new Array(rnd);
+  for (let i = 0; i < rnd; i++) {
+    const da = i < a.dims.length ? a.dims[i] : DIM_ONE;
+    const db = i < b.dims.length ? b.dims[i] : DIM_ONE;
+    aShape[i] = da.kind === "exact" ? da.value : 1;
+    bShape[i] = db.kind === "exact" ? db.value : 1;
+  }
+  const aStride: number[] = new Array(rnd);
+  const bStride: number[] = new Array(rnd);
+  let aAcc = 1;
+  let bAcc = 1;
+  for (let i = 0; i < rnd; i++) {
+    aStride[i] = aShape[i] === 1 ? 0 : aAcc;
+    bStride[i] = bShape[i] === 1 ? 0 : bAcc;
+    aAcc *= aShape[i];
+    bAcc *= bShape[i];
+  }
+  const data = new Float64Array(total);
+  const ix = new Array(rnd).fill(0);
+  for (let k = 0; k < total; k++) {
+    let ai = 0;
+    let bi = 0;
+    for (let i = 0; i < rnd; i++) {
+      ai += ix[i] * aStride[i];
+      bi += ix[i] * bStride[i];
+    }
+    const av = aArr ? aArr[ai] : (ax as number);
+    const bv = bArr ? bArr[bi] : (bx as number);
+    data[k] = step(av, bv);
+    for (let i = 0; i < rnd; i++) {
+      ix[i]++;
+      if (ix[i] < outShape[i]) break;
+      ix[i] = 0;
+    }
+  }
+  return data;
+}
+
 /** Build a real elementwise binary builtin: scalar, scalar+tensor,
  *  tensor+scalar, tensor+tensor. Folds when every input is exact.
  *  `helperBase` names the matching set of C runtime helpers
@@ -302,67 +361,20 @@ function buildElemwiseRealBinary(opts: {
 
       // Try to fold when every input is exact AND every output dim is
       // known (so the result fits the exact-array cap).
-      const aArr = exactRealArray(aN);
-      const bArr = exactRealArray(bN);
-      const ax = exactDouble(aN);
-      const bx = exactDouble(bN);
-      const aIsExact = aArr !== undefined || ax !== undefined;
-      const bIsExact = bArr !== undefined || bx !== undefined;
+      const aIsExact =
+        exactRealArray(aN) !== undefined || exactDouble(aN) !== undefined;
+      const bIsExact =
+        exactRealArray(bN) !== undefined || exactDouble(bN) !== undefined;
       if (
         aIsExact &&
         bIsExact &&
         outTy.shape !== undefined &&
         outTy.shape.reduce((p, q) => p * q, 1) <= EXACT_ARRAY_MAX_ELEMENTS
       ) {
-        const outShape = outTy.shape;
-        const n = outShape.reduce((p, q) => p * q, 1);
-        const data = new Float64Array(n);
-        // Per-axis broadcast strides for a and b (column-major). Stride
-        // is 0 on any axis where the side has a singleton against a
-        // non-singleton output axis (including ndim-pad axes).
-        const rnd = outShape.length;
-        const aShape: number[] = new Array(rnd);
-        const bShape: number[] = new Array(rnd);
-        for (let i = 0; i < rnd; i++) {
-          const da = i < aN.dims.length ? aN.dims[i] : DIM_ONE;
-          const db = i < bN.dims.length ? bN.dims[i] : DIM_ONE;
-          aShape[i] = da.kind === "exact" ? da.value : 1;
-          bShape[i] = db.kind === "exact" ? db.value : 1;
-        }
-        // If a was a bare scalar (aArr undefined, ax defined), treat its
-        // shape as all-1 for the strider; the scalar value below is used
-        // directly. Same for b.
-        const aStride: number[] = new Array(rnd);
-        const bStride: number[] = new Array(rnd);
-        let aAcc = 1;
-        let bAcc = 1;
-        for (let i = 0; i < rnd; i++) {
-          aStride[i] = aShape[i] === 1 ? 0 : aAcc;
-          bStride[i] = bShape[i] === 1 ? 0 : bAcc;
-          aAcc *= aShape[i];
-          bAcc *= bShape[i];
-        }
-        const ix = new Array(rnd).fill(0);
-        for (let k = 0; k < n; k++) {
-          let ai = 0;
-          let bi = 0;
-          for (let i = 0; i < rnd; i++) {
-            ai += ix[i] * aStride[i];
-            bi += ix[i] * bStride[i];
-          }
-          const av = aArr ? aArr[ai] : (ax as number);
-          const bv = bArr ? bArr[bi] : (bx as number);
-          data[k] = fold(av, bv);
-          // column-major increment
-          for (let i = 0; i < rnd; i++) {
-            ix[i]++;
-            if (ix[i] < outShape[i]) break;
-            ix[i] = 0;
-          }
-        }
         // Reuse the constructor so shape/exact get validated and sign
         // is derived from the actual values.
-        return tensorDouble(outShape, data);
+        const data = broadcastFoldExact(aN, bN, outTy.shape, fold);
+        return tensorDouble(outTy.shape, data);
       }
       outTy.sign = signRule(aN, bN);
       return outTy;

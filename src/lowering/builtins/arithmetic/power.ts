@@ -29,7 +29,6 @@
 
 import { UnsupportedConstruct } from "../../errors.js";
 import {
-  DIM_ONE,
   type NumericType,
   type Sign,
   EXACT_ARRAY_MAX_ELEMENTS,
@@ -50,7 +49,7 @@ import {
   requireRealOrComplex,
   requireRealDouble,
 } from "../_shared.js";
-import { elemwiseResultShape } from "./_elemwise.js";
+import { broadcastFoldExact, elemwiseResultShape } from "./_elemwise.js";
 
 function isExactInteger(t: NumericType): boolean {
   const v = exactDouble(t);
@@ -203,66 +202,20 @@ export const power: Builtin = {
     // Tensor result — try exact-fold when the output shape is fully
     // known and small enough.
     const outTy = tensorDoubleFromDims(resolved.outDims);
-    const aArr = exactRealArray(a);
-    const bArr = exactRealArray(b);
-    const ax = exactDouble(a);
-    const bx = exactDouble(b);
-    const aIsExact = aArr !== undefined || ax !== undefined;
-    const bIsExact = bArr !== undefined || bx !== undefined;
+    const aIsExact =
+      exactRealArray(a) !== undefined || exactDouble(a) !== undefined;
+    const bIsExact =
+      exactRealArray(b) !== undefined || exactDouble(b) !== undefined;
     if (
       aIsExact &&
       bIsExact &&
       outTy.shape !== undefined &&
       outTy.shape.reduce((p, q) => p * q, 1) <= EXACT_ARRAY_MAX_ELEMENTS
     ) {
-      const outShape = outTy.shape;
-      const total = outShape.reduce((p, q) => p * q, 1);
-      // Mirror the broadcast-aware fold in `_elemwise.ts`: stride 0 on
-      // singleton axes, column-major output walk.
-      const rnd = outShape.length;
-      const aShape: number[] = new Array(rnd);
-      const bShape: number[] = new Array(rnd);
-      for (let i = 0; i < rnd; i++) {
-        const da = i < a.dims.length ? a.dims[i] : DIM_ONE;
-        const db = i < b.dims.length ? b.dims[i] : DIM_ONE;
-        aShape[i] = da.kind === "exact" ? da.value : 1;
-        bShape[i] = db.kind === "exact" ? db.value : 1;
-      }
-      const aStride: number[] = new Array(rnd);
-      const bStride: number[] = new Array(rnd);
-      let aAcc = 1;
-      let bAcc = 1;
-      for (let i = 0; i < rnd; i++) {
-        aStride[i] = aShape[i] === 1 ? 0 : aAcc;
-        bStride[i] = bShape[i] === 1 ? 0 : bAcc;
-        aAcc *= aShape[i];
-        bAcc *= bShape[i];
-      }
-      const data = new Float64Array(total);
-      const ix = new Array(rnd).fill(0);
-      let allFinite = true;
-      for (let k = 0; k < total; k++) {
-        let ai = 0;
-        let bi = 0;
-        for (let i = 0; i < rnd; i++) {
-          ai += ix[i] * aStride[i];
-          bi += ix[i] * bStride[i];
-        }
-        const av = aArr ? aArr[ai] : (ax as number);
-        const bv = bArr ? bArr[bi] : (bx as number);
-        const v = Math.pow(av, bv);
-        if (!Number.isFinite(v)) {
-          allFinite = false;
-          break;
-        }
-        data[k] = v;
-        for (let i = 0; i < rnd; i++) {
-          ix[i]++;
-          if (ix[i] < outShape[i]) break;
-          ix[i] = 0;
-        }
-      }
-      if (allFinite) return tensorDouble(outShape, data);
+      const data = broadcastFoldExact(a, b, outTy.shape, Math.pow);
+      // Drop the fold if any element went non-finite — defer to runtime
+      // (which may surface a clearer NaN/Inf at the right span).
+      if (data.every(Number.isFinite)) return tensorDouble(outTy.shape, data);
     }
     outTy.sign = powerSign(a, b);
     return outTy;
