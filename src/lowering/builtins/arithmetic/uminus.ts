@@ -18,6 +18,7 @@ import {
   exactDouble,
   exactRealArray,
   exactComplex,
+  exactComplexArray,
 } from "../_shared.js";
 
 export const uminus: Builtin = {
@@ -35,14 +36,8 @@ export const uminus: Builtin = {
         return scalarComplex();
       }
       // Complex tensor: fold when both lanes are exact, else runtime.
-      if (
-        a.exact !== undefined &&
-        typeof a.exact === "object" &&
-        !(a.exact instanceof Float64Array) &&
-        a.exact.re instanceof Float64Array &&
-        a.shape !== undefined
-      ) {
-        const cx = a.exact as { re: Float64Array; im: Float64Array };
+      const cx = exactComplexArray(a);
+      if (cx !== undefined && a.shape !== undefined) {
         const re = new Float64Array(cx.re.length);
         const im = new Float64Array(cx.im.length);
         for (let i = 0; i < cx.re.length; i++) {

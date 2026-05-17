@@ -27,6 +27,7 @@ import type { Lowerer } from "./lower.js";
 import { resolveIndexBase } from "./indexResolve.js";
 import { lowerIndexSlice } from "./lowerIndexSlice.js";
 import { columnMajorOffsetFromIndices } from "./indexFold.js";
+import { exactComplexArray, exactRealArray } from "./builtins/_shared.js";
 
 /** Lower an index-read of an in-scope variable. */
 export function lowerIndexLoad(
@@ -110,20 +111,10 @@ function foldedElemType(
 
   // Real path: data must be a flat Float64Array exact carrier.
   // Complex path: data must be the split-buffer `{re, im}` carrier.
-  const data = baseTy.exact;
-  let realData: Float64Array | undefined;
-  let complexData: { re: Float64Array; im: Float64Array } | undefined;
-  if (data instanceof Float64Array) {
-    realData = data;
-  } else if (
-    data !== undefined &&
-    typeof data === "object" &&
-    (data as { re?: unknown }).re instanceof Float64Array
-  ) {
-    complexData = data as { re: Float64Array; im: Float64Array };
-  } else {
-    return undefined;
-  }
+  const realData = exactRealArray(baseTy);
+  const complexData =
+    realData === undefined ? exactComplexArray(baseTy) : undefined;
+  if (realData === undefined && complexData === undefined) return undefined;
 
   const idxVals: number[] = [];
   for (const ix of indices) {

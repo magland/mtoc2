@@ -99,6 +99,22 @@ export function exactComplex(t: Type): { re: number; im: number } | undefined {
   return t.exact as { re: number; im: number };
 }
 
+/** Read a complex-tensor split-buffer exact carrier if present.
+ *  Returns the `{re, im}` Float64Array pair when the type's `exact` is
+ *  the complex-tensor carrier (parallel to `exactRealArray` but for
+ *  complex tensors); returns `undefined` for any other shape (no exact,
+ *  scalar number, real-array, scalar-complex `{re: number}`). */
+export function exactComplexArray(
+  t: Type
+): { re: Float64Array; im: Float64Array } | undefined {
+  if (!isNumeric(t)) return undefined;
+  if (t.exact === undefined) return undefined;
+  if (typeof t.exact !== "object") return undefined;
+  if (t.exact instanceof Float64Array) return undefined;
+  if (!(t.exact.re instanceof Float64Array)) return undefined;
+  return t.exact as { re: Float64Array; im: Float64Array };
+}
+
 /** Convenience: project a scalar exact value (real or complex) into a
  *  `{re, im}` pair, returning `undefined` if neither carrier matches. */
 export function exactScalarAsComplex(

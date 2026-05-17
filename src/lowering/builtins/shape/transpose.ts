@@ -40,7 +40,7 @@ import {
 } from "../../types.js";
 import type { NumericType } from "../../types.js";
 import type { Builtin } from "../registry.js";
-import { exactComplex, exactDouble } from "../_shared.js";
+import { exactComplex, exactComplexArray, exactDouble } from "../_shared.js";
 
 /** Shuffle an exact buffer for a 2-D transpose. Column-major source
  *  (m × n) → column-major destination (n × m): source element at
@@ -116,13 +116,8 @@ export const transpose: Builtin = {
 
     if (a.isComplex) {
       // Exact-fold via the `{re, im}` split-buffer carrier when present.
-      if (
-        a.exact !== undefined &&
-        typeof a.exact === "object" &&
-        !(a.exact instanceof Float64Array) &&
-        (a.exact as { re?: unknown }).re instanceof Float64Array
-      ) {
-        const cx = a.exact as { re: Float64Array; im: Float64Array };
+      const cx = exactComplexArray(a);
+      if (cx !== undefined) {
         return tensorComplex(newShape, {
           re: transposeExact(cx.re, m, n),
           im: transposeExact(cx.im, m, n),

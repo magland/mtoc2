@@ -26,7 +26,12 @@ import {
 } from "../../types.js";
 import { TypeError } from "../../errors.js";
 import type { Builtin } from "../registry.js";
-import { exactDouble, exactComplex, exactRealArray } from "../_shared.js";
+import {
+  exactDouble,
+  exactComplex,
+  exactComplexArray,
+  exactRealArray,
+} from "../_shared.js";
 
 export const norm: Builtin = {
   name: "norm",
@@ -40,10 +45,7 @@ export const norm: Builtin = {
       );
     }
     if (a.elem !== "double") {
-      throw new TypeError(
-        `'norm' arg must be double (got ${a.elem})`,
-        span
-      );
+      throw new TypeError(`'norm' arg must be double (got ${a.elem})`, span);
     }
     if (isScalar(a)) {
       if (!a.isComplex) {
@@ -66,8 +68,9 @@ export const norm: Builtin = {
     // require the OTHER dim to be exact, which excludes the common
     // runtime-length-column case — we relax that here.)
     const isVecShape =
-      a.dims.length === 2 &&
-      (a.dims[0].kind === "exact" && a.dims[0].value === 1) ||
+      (a.dims.length === 2 &&
+        a.dims[0].kind === "exact" &&
+        a.dims[0].value === 1) ||
       (a.dims.length === 2 &&
         a.dims[1].kind === "exact" &&
         a.dims[1].value === 1);
@@ -90,13 +93,8 @@ export const norm: Builtin = {
       return scalarDouble("nonneg");
     }
     // Complex vector path. Fold when the split-buffer exact is set.
-    if (
-      a.exact !== undefined &&
-      typeof a.exact === "object" &&
-      !(a.exact instanceof Float64Array) &&
-      (a.exact as { re?: unknown }).re instanceof Float64Array
-    ) {
-      const cx = a.exact as { re: Float64Array; im: Float64Array };
+    const cx = exactComplexArray(a);
+    if (cx !== undefined) {
       let acc = 0;
       for (let i = 0; i < cx.re.length; i++) {
         acc += cx.re[i] * cx.re[i] + cx.im[i] * cx.im[i];

@@ -91,6 +91,7 @@ import {
   unaryOpBuiltin,
 } from "./builtins/index.js";
 import { arityAccepts } from "./builtins/registry.js";
+import { exactComplex } from "./builtins/_shared.js";
 import { isSliceArg } from "./indexResolve.js";
 import { lowerTensorLit } from "./lowerTensorLit.js";
 import { lowerMultiAssign } from "./lowerMultiAssign.js";
@@ -1680,13 +1681,8 @@ function condToBool(cond: IRExpr): boolean | null {
     return x !== 0;
   }
   // Scalar complex exact `{re, im}` — truthy iff either part is nonzero.
-  if (
-    x !== undefined &&
-    typeof x === "object" &&
-    !(x instanceof Float64Array) &&
-    !(x.re instanceof Float64Array)
-  ) {
-    const sx = x as { re: number; im: number };
+  const sx = exactComplex(cond.ty);
+  if (sx !== undefined) {
     if (!Number.isFinite(sx.re) || !Number.isFinite(sx.im)) return null;
     return sx.re !== 0 || sx.im !== 0;
   }

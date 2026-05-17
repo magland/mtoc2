@@ -9,7 +9,11 @@ import {
   EXACT_ARRAY_MAX_ELEMENTS,
 } from "../../types.js";
 import type { Builtin } from "../registry.js";
-import { requireRealOrComplex, exactComplex } from "../_shared.js";
+import {
+  requireRealOrComplex,
+  exactComplex,
+  exactComplexArray,
+} from "../_shared.js";
 import { defineUnaryRealMath } from "./_unary_real.js";
 
 /** Real-input `abs`. Result is `nonneg` in general; `positive` when
@@ -48,14 +52,8 @@ export const abs: Builtin = {
       // Complex tensor → real tensor (magnitude per element). Fold
       // via the split-buffer `{re, im}` exact carrier when present
       // and small enough.
-      if (
-        a.shape !== undefined &&
-        a.exact !== undefined &&
-        typeof a.exact === "object" &&
-        !(a.exact instanceof Float64Array) &&
-        (a.exact as { re?: unknown }).re instanceof Float64Array
-      ) {
-        const cx = a.exact as { re: Float64Array; im: Float64Array };
+      const cx = exactComplexArray(a);
+      if (cx !== undefined && a.shape !== undefined) {
         const total = a.shape.reduce((p, q) => p * q, 1);
         if (total <= EXACT_ARRAY_MAX_ELEMENTS) {
           const out = new Float64Array(total);

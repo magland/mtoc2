@@ -25,6 +25,7 @@ import {
   requireRealOrComplex,
   exactDouble,
   exactComplex,
+  exactComplexArray,
   exactRealArray,
 } from "../_shared.js";
 
@@ -46,14 +47,8 @@ export const conj: Builtin = {
     }
     // Tensor input.
     if (a.isComplex) {
-      if (
-        a.shape !== undefined &&
-        a.exact !== undefined &&
-        typeof a.exact === "object" &&
-        !(a.exact instanceof Float64Array) &&
-        (a.exact as { re?: unknown }).re instanceof Float64Array
-      ) {
-        const cx = a.exact as { re: Float64Array; im: Float64Array };
+      const cx = exactComplexArray(a);
+      if (cx !== undefined && a.shape !== undefined) {
         const total = a.shape.reduce((p, q) => p * q, 1);
         if (total <= EXACT_ARRAY_MAX_ELEMENTS) {
           const re = new Float64Array(cx.re.length);

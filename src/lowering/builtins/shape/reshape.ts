@@ -54,7 +54,12 @@ import {
 } from "../../types.js";
 import type { DimInfo, Type } from "../../types.js";
 import type { Builtin } from "../registry.js";
-import { exactDouble, exactRealArray } from "../_shared.js";
+import {
+  exactComplex,
+  exactComplexArray,
+  exactDouble,
+  exactRealArray,
+} from "../_shared.js";
 
 /** Per-axis resolution. `argIndex` (when present) refers to the index
  *  into the original Form A dim arg list (i.e. `argTypes.slice(1)` —
@@ -321,26 +326,13 @@ export const reshape: Builtin = {
       // input is an exact scalar.
       if (newShape.every(d => d === 1)) {
         if (a.isComplex) {
-          const cx =
-            a.exact !== undefined &&
-            typeof a.exact === "object" &&
-            !(a.exact instanceof Float64Array) &&
-            !((a.exact as { re?: unknown }).re instanceof Float64Array)
-              ? (a.exact as { re: number; im: number })
-              : undefined;
-          if (cx !== undefined) return scalarComplex(cx);
+          const cxScalar = exactComplex(a);
+          if (cxScalar !== undefined) return scalarComplex(cxScalar);
           // Complex tensor with `{re, im}` split-buffer carrier folds
           // to a 1×1 complex scalar.
-          if (
-            a.exact !== undefined &&
-            typeof a.exact === "object" &&
-            !(a.exact instanceof Float64Array) &&
-            (a.exact as { re?: unknown }).re instanceof Float64Array
-          ) {
-            const cxArr = a.exact as { re: Float64Array; im: Float64Array };
-            if (cxArr.re.length === 1) {
-              return scalarComplex({ re: cxArr.re[0], im: cxArr.im[0] });
-            }
+          const cxArr = exactComplexArray(a);
+          if (cxArr !== undefined && cxArr.re.length === 1) {
+            return scalarComplex({ re: cxArr.re[0], im: cxArr.im[0] });
           }
           return scalarComplex();
         }
@@ -352,17 +344,13 @@ export const reshape: Builtin = {
 
       // Multi-element output with all-exact shape.
       if (a.isComplex) {
+        const cxArr = exactComplexArray(a);
         if (
-          a.exact !== undefined &&
-          typeof a.exact === "object" &&
-          !(a.exact instanceof Float64Array) &&
-          (a.exact as { re?: unknown }).re instanceof Float64Array &&
-          newTotal <= EXACT_ARRAY_MAX_ELEMENTS
+          cxArr !== undefined &&
+          newTotal <= EXACT_ARRAY_MAX_ELEMENTS &&
+          cxArr.re.length === newTotal
         ) {
-          const cxArr = a.exact as { re: Float64Array; im: Float64Array };
-          if (cxArr.re.length === newTotal) {
-            return tensorComplex(newShape, cxArr);
-          }
+          return tensorComplex(newShape, cxArr);
         }
         return tensorComplex(newShape);
       }

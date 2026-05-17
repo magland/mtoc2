@@ -35,6 +35,7 @@ import {
   exactDouble,
   exactRealArray,
   exactComplex,
+  exactComplexArray,
 } from "../_shared.js";
 
 export interface UnaryRealMathOpts {
@@ -119,14 +120,8 @@ export function defineUnaryRealMath(opts: UnaryRealMathOpts): Builtin {
           }
           return scalarComplex();
         }
-        if (
-          a.shape !== undefined &&
-          a.exact !== undefined &&
-          typeof a.exact === "object" &&
-          !(a.exact instanceof Float64Array) &&
-          (a.exact as { re?: unknown }).re instanceof Float64Array
-        ) {
-          const cx = a.exact as { re: Float64Array; im: Float64Array };
+        const cx = exactComplexArray(a);
+        if (cx !== undefined && a.shape !== undefined) {
           const total = a.shape.reduce((p, q) => p * q, 1);
           if (total <= EXACT_ARRAY_MAX_ELEMENTS) {
             const re = new Float64Array(total);
