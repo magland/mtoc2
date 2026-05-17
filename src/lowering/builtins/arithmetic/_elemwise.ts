@@ -148,53 +148,7 @@ export function defineElemwiseRealBinary(opts: {
    *  path (e.g. `mtoc2_cdiv` for division). The real-only `_real`
    *  helper still activates unconditionally for the tensor path. */
   complexRuntimeDeps?: string[];
-}): Builtin;
-export function defineElemwiseRealBinary(
-  name: string,
-  cOp: string,
-  helperBase: string,
-  commutative: boolean,
-  fold: (a: number, b: number) => number,
-  signRule: (a: NumericType, b: NumericType) => Sign
-): Builtin;
-export function defineElemwiseRealBinary(
-  ...args:
-    | [
-        {
-          name: string;
-          cOp: string;
-          helperBase: string;
-          commutative: boolean;
-          fold: (a: number, b: number) => number;
-          signRule: (a: NumericType, b: NumericType) => Sign;
-          complexFold?: (
-            a: { re: number; im: number },
-            b: { re: number; im: number }
-          ) => { re: number; im: number };
-          complexScalarExpr?: (aC: string, bC: string) => string;
-          complexRuntimeDeps?: string[];
-        },
-      ]
-    | [
-        string,
-        string,
-        string,
-        boolean,
-        (a: number, b: number) => number,
-        (a: NumericType, b: NumericType) => Sign,
-      ]
-): Builtin {
-  const opts =
-    args.length === 1
-      ? args[0]
-      : {
-          name: args[0],
-          cOp: args[1],
-          helperBase: args[2],
-          commutative: args[3],
-          fold: args[4],
-          signRule: args[5],
-        };
+}): Builtin {
   // Default scalar-complex emit: route through the per-op helper from
   // `cscalar.h` instead of relying on C99 operator overloading on
   // `_Complex` operands. This keeps mtoc2's user-code emission
