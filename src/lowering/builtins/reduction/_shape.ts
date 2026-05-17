@@ -383,58 +383,64 @@ function foldExact(
 
 // ── Result type construction ──────────────────────────────────────────
 
-function makeResultType(
+/** Stamp a tensor result with the spec's output-elem kind. Logical
+ *  reducers (`any`/`all`) flip `elem` and pin the sign to `nonneg`
+ *  (range is `{0, 1}`); double reducers keep the caller's sign rule. */
+function stampOutputElem(out: NumericType, spec: KernelSpec, sign: Sign): void {
+  if (spec.outputElem === "logical") {
+    out.elem = "logical";
+    out.sign = "nonneg";
+  } else {
+    out.sign = sign;
+  }
+}
+
+/** Build a scalar result type. `exactScalar` is the folded value when
+ *  every input was exact; pass `undefined` for the runtime path. */
+function scalarResult(
   spec: KernelSpec,
-  shape: number[] | undefined,
-  dims: DimInfo[] | undefined,
-  isScalarResult: boolean,
   exactScalar: number | undefined,
+  sign: Sign
+): Type {
+  if (spec.outputElem === "logical") {
+    return exactScalar !== undefined
+      ? scalarLogical(exactScalar !== 0)
+      : scalarLogical();
+  }
+  if (exactScalar !== undefined) {
+    return scalarDouble(
+      unifySign(sign, signFromNumber(exactScalar)),
+      exactScalar
+    );
+  }
+  return scalarDouble(sign);
+}
+
+/** Build a tensor result with a concrete shape. `exactArray` is the
+ *  folded data when every input was exact AND the result fit the cap;
+ *  pass `undefined` for the runtime path. */
+function shapedTensorResult(
+  spec: KernelSpec,
+  shape: number[],
   exactArray: Float64Array | undefined,
   sign: Sign
 ): Type {
-  if (isScalarResult) {
-    if (spec.outputElem === "logical") {
-      if (exactScalar !== undefined) {
-        return scalarLogical(exactScalar !== 0);
-      }
-      return scalarLogical();
-    }
-    if (exactScalar !== undefined) {
-      return scalarDouble(
-        unifySign(sign, signFromNumber(exactScalar)),
-        exactScalar
-      );
-    }
-    return scalarDouble(sign);
-  }
-  // Tensor result.
-  if (shape !== undefined) {
-    const out: NumericType = exactArray
-      ? tensorDouble(shape, exactArray)
-      : tensorDouble(shape);
-    if (spec.outputElem === "logical") {
-      out.elem = "logical";
-      // Logical result range is {0, 1} → nonneg.
-      out.sign = "nonneg";
-    } else {
-      out.sign = sign;
-    }
-    return out;
-  }
-  // Lattice-only result (no concrete shape).
-  if (dims !== undefined) {
-    const out = tensorDoubleFromDims(dims);
-    if (spec.outputElem === "logical") {
-      out.elem = "logical";
-      out.sign = "nonneg";
-    } else {
-      out.sign = sign;
-    }
-    return out;
-  }
-  // Should be unreachable — every code path either has a shape or
-  // lattice info to construct from.
-  return scalarDouble(sign);
+  const out: NumericType = exactArray
+    ? tensorDouble(shape, exactArray)
+    : tensorDouble(shape);
+  stampOutputElem(out, spec, sign);
+  return out;
+}
+
+/** Build a tensor result with lattice-only dims (no concrete shape). */
+function latticeTensorResult(
+  spec: KernelSpec,
+  dims: DimInfo[],
+  sign: Sign
+): Type {
+  const out = tensorDoubleFromDims(dims);
+  stampOutputElem(out, spec, sign);
+  return out;
 }
 
 // ── Public entry points ────────────────────────────────────────────────
@@ -532,37 +538,13 @@ export function reductionTransfer(
     const folded = foldExact(spec, exactArr, inputType.shape, resolved);
     if (folded !== undefined) {
       if (folded.kind === "scalar") {
-        return makeResultType(
-          spec,
-          undefined,
-          undefined,
-          true,
-          folded.value,
-          undefined,
-          sign
-        );
+        return scalarResult(spec, folded.value, sign);
       }
-      if (folded.data.length <= EXACT_ARRAY_MAX_ELEMENTS) {
-        return makeResultType(
-          spec,
-          folded.shape,
-          undefined,
-          false,
-          undefined,
-          folded.data,
-          sign
-        );
-      }
-      // Result too big — drop exact, keep shape.
-      return makeResultType(
-        spec,
-        folded.shape,
-        undefined,
-        false,
-        undefined,
-        undefined,
-        sign
-      );
+      const exactData =
+        folded.data.length <= EXACT_ARRAY_MAX_ELEMENTS
+          ? folded.data
+          : undefined;
+      return shapedTensorResult(spec, folded.shape, exactData, sign);
     }
   }
 
@@ -570,62 +552,18 @@ export function reductionTransfer(
   // form so downstream codegen has the precision to dispatch tensor
   // vs. scalar.
   if (resolved.kind === "all") {
-    return makeResultType(
-      spec,
-      undefined,
-      undefined,
-      true,
-      undefined,
-      undefined,
-      sign
-    );
+    return scalarResult(spec, undefined, sign);
   }
   // AxisFixed
   if (inputType.shape !== undefined) {
     const r = reduceConcreteShape(inputType.shape, resolved.dim);
-    if (r.scalar) {
-      return makeResultType(
-        spec,
-        undefined,
-        undefined,
-        true,
-        undefined,
-        undefined,
-        sign
-      );
-    }
-    return makeResultType(
-      spec,
-      r.shape,
-      undefined,
-      false,
-      undefined,
-      undefined,
-      sign
-    );
+    if (r.scalar) return scalarResult(spec, undefined, sign);
+    return shapedTensorResult(spec, r.shape, undefined, sign);
   }
   // Lattice-only.
   const r = reduceLatticeDims(inputType.dims, resolved.dim);
-  if (r.scalar) {
-    return makeResultType(
-      spec,
-      undefined,
-      undefined,
-      true,
-      undefined,
-      undefined,
-      sign
-    );
-  }
-  return makeResultType(
-    spec,
-    undefined,
-    r.dims,
-    false,
-    undefined,
-    undefined,
-    sign
-  );
+  if (r.scalar) return scalarResult(spec, undefined, sign);
+  return latticeTensorResult(spec, r.dims, sign);
 }
 
 // ── Codegen ────────────────────────────────────────────────────────────
