@@ -84,6 +84,22 @@ export interface KernelSpec {
   resultSign(t: NumericType, nonEmpty: boolean): Sign;
 }
 
+/** True iff `t` is the static `[]` empty-bracket literal (shape
+ *  `[0, 0]`). Used by `min` / `max`'s 3-arg form to validate that the
+ *  middle slot is the bracketed empty placeholder rather than some
+ *  other zero-numel tensor. */
+function isEmptyBracketLiteral(t: Type): boolean {
+  return (
+    isNumeric(t) &&
+    t.elem === "double" &&
+    !t.isComplex &&
+    t.shape !== undefined &&
+    t.shape.length === 2 &&
+    t.shape[0] === 0 &&
+    t.shape[1] === 0
+  );
+}
+
 // ── Axis classification ────────────────────────────────────────────────
 
 interface AxisAll {
@@ -483,18 +499,7 @@ export function reductionTransfer(
   }
   // 3-arg form for min/max requires the [] placeholder in slot 2.
   if (spec.dimArgIndex === 2 && argTypes.length === 3) {
-    const placeholder = argTypes[1];
-    if (
-      !(
-        isNumeric(placeholder) &&
-        placeholder.elem === "double" &&
-        !placeholder.isComplex &&
-        placeholder.shape !== undefined &&
-        placeholder.shape.length === 2 &&
-        placeholder.shape[0] === 0 &&
-        placeholder.shape[1] === 0
-      )
-    ) {
+    if (!isEmptyBracketLiteral(argTypes[1])) {
       throw new UnsupportedConstruct(
         `'${spec.name}(A, [], dim)' requires the second arg to be the ` +
           `empty literal '[]' (got something else)`,
@@ -639,18 +644,7 @@ function complexReductionTransfer(
   // 3-arg min/max placeholder check (the `[]` slot). Reuses the
   // real-side check by inspecting the literal directly.
   if (spec.dimArgIndex === 2 && argTypes.length === 3) {
-    const placeholder = argTypes[1];
-    if (
-      !(
-        isNumeric(placeholder) &&
-        placeholder.elem === "double" &&
-        !placeholder.isComplex &&
-        placeholder.shape !== undefined &&
-        placeholder.shape.length === 2 &&
-        placeholder.shape[0] === 0 &&
-        placeholder.shape[1] === 0
-      )
-    ) {
+    if (!isEmptyBracketLiteral(argTypes[1])) {
       throw new UnsupportedConstruct(
         `'${spec.name}(A, [], dim)' requires the second arg to be the ` +
           `empty literal '[]' (got something else)`,
