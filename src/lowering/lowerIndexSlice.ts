@@ -37,12 +37,14 @@ import {
 } from "./types.js";
 import type { Lowerer } from "./lower.js";
 import { resolveIndexBase } from "./indexResolve.js";
+import { rangeCountFromExactEnds } from "./rangeCount.js";
 
 /** Compute the static element count of an `IndexSliceArg` (or
  *  `undefined` if it can't be known at compile time). For a Range slot
  *  every endpoint must have an exact numeric value (the step is always
- *  a NumLit by lowerSliceArg's check), and the same `floor + 1 + ulp`
- *  formula as MakeRange / mtoc2_loop_count applies. */
+ *  a NumLit by lowerSliceArg's check); the count uses the shared
+ *  `rangeCountFromExactEnds` formula (same as `MakeRange` /
+ *  `mtoc2_loop_count`). */
 function exactRangeCount(slot: IndexSliceArg): number | undefined {
   if (slot.kind !== "Range") return undefined;
   const sExact =
@@ -65,8 +67,7 @@ function exactRangeCount(slot: IndexSliceArg): number | undefined {
   ) {
     return undefined;
   }
-  const raw = Math.floor((eExact - sExact) / tExact + 1 + 1e-10);
-  return raw > 0 ? raw : 0;
+  return rangeCountFromExactEnds(sExact, tExact, eExact);
 }
 
 /** Per-slot result-dim kind, used by the multi-slot path. Colon takes

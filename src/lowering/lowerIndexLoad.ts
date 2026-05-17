@@ -26,6 +26,7 @@ import type { NumericType } from "./types.js";
 import type { Lowerer } from "./lower.js";
 import { resolveIndexBase } from "./indexResolve.js";
 import { lowerIndexSlice } from "./lowerIndexSlice.js";
+import { columnMajorOffsetFromIndices } from "./indexFold.js";
 
 /** Lower an index-read of an in-scope variable. */
 export function lowerIndexLoad(
@@ -132,28 +133,8 @@ function foldedElemType(
     idxVals.push(v);
   }
 
-  let offset: number;
-  if (idxVals.length === 1) {
-    // Linear single-index. Numbl accepts any 1-based linear index up
-    // to numel; fold uses the same convention.
-    const total = shape.reduce((a, b) => a * b, 1);
-    const lin = idxVals[0];
-    if (lin > total) return undefined;
-    offset = lin - 1;
-  } else if (idxVals.length === shape.length) {
-    // Full N-index. Each slot must be in range for its axis.
-    offset = 0;
-    let stride = 1;
-    for (let k = 0; k < shape.length; k++) {
-      if (idxVals[k] > shape[k]) return undefined;
-      offset += (idxVals[k] - 1) * stride;
-      stride *= shape[k];
-    }
-  } else {
-    // Mixed shapes (numSlots > shape.length, or 1 < numSlots <
-    // shape.length) — defer; codegen still emits the runtime read.
-    return undefined;
-  }
+  const offset = columnMajorOffsetFromIndices(shape, idxVals);
+  if (offset === undefined) return undefined;
 
   if (complexData !== undefined) {
     return scalarComplex({

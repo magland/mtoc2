@@ -107,6 +107,8 @@ import {
   type IRFunc,
   type IRProgram,
 } from "./ir.js";
+import { rangeCountFromExactEnds } from "./rangeCount.js";
+import { columnMajorOffsetFromIndices } from "./indexFold.js";
 import {
   getBuiltin,
   binaryOpBuiltin,
@@ -1111,51 +1113,20 @@ export class Lowerer {
       return argHoists.length === 0 ? stmt : [...argHoists, stmt];
     }
 
-    // N≥2 outputs. Build a MultiAssignCall. Output slots have one of
-    // two shapes: named binding (routed through `recordAssignment` to
-    // register the env entry and cName) or `null` for ignored /
-    // trailing-omitted slots.
-    const outputs: {
-      ty: Type;
-      binding: { name: string; cName: string } | null;
-    }[] = [];
-    for (let i = 0; i < spec.outputTypes.length; i++) {
-      const slotTy = spec.outputTypes[i] ?? { kind: "Unknown" };
-      // Accept scalar real numeric or any owned type (tensor / struct /
-      // class / handle). Owned slots transfer ownership via the kind's
-      // `_assign` helper at the callee's sret write site; scalar slots
-      // use a bare struct copy. Void / Unknown / String stay rejected
-      // — no C representation that fits the sret slot.
-      if (!isMultiOutputSlotType(slotTy)) {
-        throw new UnsupportedConstruct(
-          `multi-output function '${callName}': output ` +
-            `'${fnAst.outputs[i]}' has type ${typeToString(slotTy)}; ` +
-            `this type isn't supported in a multi-output slot`,
-          s.span
-        );
-      }
-      const lv: LValue | undefined = s.lvalues[i];
-      if (lv === undefined || lv.type !== "Var") {
-        outputs.push({ ty: slotTy, binding: null });
-        continue;
-      }
-      // Named slot. We reuse `recordAssignment` for its side effects
-      // (env update, cName allocation). The synthetic Var expression
-      // it builds the Assign around is discarded — we only consume the
-      // returned cName.
-      const synthRhs: IRExpr = {
-        kind: "Var",
-        name: lv.name,
-        cName: "<placeholder>",
-        ty: slotTy,
-        span: s.span,
-      };
-      const rec = this.recordAssignment(lv.name, synthRhs, s.span);
-      outputs.push({
-        ty: slotTy,
-        binding: { name: lv.name, cName: rec.cName },
-      });
-    }
+    // N≥2 outputs. Build a MultiAssignCall via the shared
+    // slot-binding helper so the user-function and builtin paths
+    // share one place for the slot-type validation and the
+    // `recordAssignment` discipline.
+    const slotTypes: Type[] = spec.outputTypes.map(
+      t => t ?? { kind: "Unknown" }
+    );
+    const outputs = this.buildMultiOutputSlots(
+      callName,
+      slotTypes,
+      s.lvalues,
+      i => `output '${fnAst.outputs[i]}'`,
+      s.span
+    );
     const mac: IRStmt = {
       kind: "MultiAssignCall",
       cName: spec.cName,
@@ -1165,6 +1136,68 @@ export class Lowerer {
       span: s.span,
     };
     return argHoists.length === 0 ? mac : [...argHoists, mac];
+  }
+
+  /** Validate each multi-output slot type, register the lvalue
+   *  bindings in env (or mark them as discarded), and return the
+   *  `MultiAssignCall.outputs` list. Single chokepoint for the
+   *  user-function and builtin multi-output paths.
+   *
+   *  `slotLabel(i)` returns a per-slot description for the error
+   *  message when a slot's type isn't supported — e.g.
+   *  `output 'a'` for declared user-function outputs or
+   *  `output slot 1` for builtin slots that have no source-level
+   *  name. */
+  private buildMultiOutputSlots(
+    callName: string,
+    slotTypes: ReadonlyArray<Type>,
+    lvalues: ReadonlyArray<LValue>,
+    slotLabel: (i: number) => string,
+    span: Span
+  ): { ty: Type; binding: { name: string; cName: string } | null }[] {
+    const outputs: {
+      ty: Type;
+      binding: { name: string; cName: string } | null;
+    }[] = [];
+    for (let i = 0; i < slotTypes.length; i++) {
+      const slotTy = slotTypes[i];
+      // Accept scalar real numeric or any owned type (tensor / struct
+      // / class / handle / Char / String). Owned slots transfer
+      // ownership via the kind's `_assign` helper at the callee's
+      // sret write site; scalar slots use a bare struct copy. Void /
+      // Unknown stay rejected — no C representation that fits the
+      // sret slot.
+      if (!isMultiOutputSlotType(slotTy)) {
+        throw new UnsupportedConstruct(
+          `multi-output call '${callName}': ${slotLabel(i)} has type ` +
+            `${typeToString(slotTy)}; this type isn't supported in a ` +
+            `multi-output slot`,
+          span
+        );
+      }
+      const lv: LValue | undefined = lvalues[i];
+      if (lv === undefined || lv.type !== "Var") {
+        outputs.push({ ty: slotTy, binding: null });
+        continue;
+      }
+      // Named slot. We reuse `recordAssignment` for its side effects
+      // (env update, cName allocation). The synthetic Var expression
+      // it builds the Assign around is discarded — we only consume
+      // the returned cName.
+      const synthRhs: IRExpr = {
+        kind: "Var",
+        name: lv.name,
+        cName: "<placeholder>",
+        ty: slotTy,
+        span,
+      };
+      const rec = this.recordAssignment(lv.name, synthRhs, span);
+      outputs.push({
+        ty: slotTy,
+        binding: { name: lv.name, cName: rec.cName },
+      });
+    }
+    return outputs;
   }
 
   /** Routes a `[v, i, ...] = builtin(args)` call through `MultiAssignCall`,
@@ -1212,38 +1245,13 @@ export class Lowerer {
         s.span
       );
     }
-    const outputs: {
-      ty: Type;
-      binding: { name: string; cName: string } | null;
-    }[] = [];
-    for (let i = 0; i < outTys.length; i++) {
-      const slotTy = outTys[i];
-      if (!isMultiOutputSlotType(slotTy)) {
-        throw new UnsupportedConstruct(
-          `multi-output builtin '${callName}': output slot ${i + 1} has ` +
-            `type ${typeToString(slotTy)}; this type isn't supported in a ` +
-            `multi-output slot`,
-          s.span
-        );
-      }
-      const lv: LValue | undefined = s.lvalues[i];
-      if (lv === undefined || lv.type !== "Var") {
-        outputs.push({ ty: slotTy, binding: null });
-        continue;
-      }
-      const synthRhs: IRExpr = {
-        kind: "Var",
-        name: lv.name,
-        cName: "<placeholder>",
-        ty: slotTy,
-        span: s.span,
-      };
-      const rec = this.recordAssignment(lv.name, synthRhs, s.span);
-      outputs.push({
-        ty: slotTy,
-        binding: { name: lv.name, cName: rec.cName },
-      });
-    }
+    const outputs = this.buildMultiOutputSlots(
+      callName,
+      outTys,
+      s.lvalues,
+      i => `output slot ${i + 1}`,
+      s.span
+    );
     const cName = multiOutput.cName(argTypes, nargout);
     const mac: IRStmt = {
       kind: "MultiAssignCall",
@@ -1678,14 +1686,11 @@ export class Lowerer {
       Number.isFinite(tExact) &&
       Number.isFinite(eExact)
     ) {
-      // Mirrors numbl's `makeRangeTensor` count formula. The naive
-      // `floor((e-s)/step) + 1` underflows by one for ranges like
-      // `0:0.1:0.3` because `(0.3-0)/0.1` evaluates to 2.99999...; the
-      // `+ 1e-10` cushion absorbs that ulp without affecting genuinely
-      // non-integer quotients. Must match `mtoc2_loop_count` so the
-      // statically-known shape and the runtime-allocated buffer agree.
-      const raw = Math.floor((eExact - sExact) / tExact + 1 + 1e-10);
-      const n = raw > 0 ? raw : 0;
+      // Mirrors numbl's `makeRangeTensor` count formula via the
+      // shared `rangeCountFromExactEnds` helper — same formula as
+      // `lowerIndexSlice.exactRangeCount` and the C-side
+      // `mtoc2_loop_count`.
+      const n = rangeCountFromExactEnds(sExact, tExact, eExact);
       // Length-1 collapse: a `1:1`-style range is a single-element
       // tensor with dims [1, 1]. The type system classifies that as
       // scalar (both dims `one`), so the LHS would be declared
@@ -3987,22 +3992,8 @@ function tryRefreshExactAfterIndexedWrite(
     if (!Number.isFinite(v) || !Number.isInteger(v) || v < 1) return false;
     idxVals.push(v);
   }
-  let offset: number;
-  if (idxVals.length === 1) {
-    const total = shape.reduce((a, b) => a * b, 1);
-    if (idxVals[0] > total) return false;
-    offset = idxVals[0] - 1;
-  } else if (idxVals.length === shape.length) {
-    offset = 0;
-    let stride = 1;
-    for (let k = 0; k < shape.length; k++) {
-      if (idxVals[k] > shape[k]) return false;
-      offset += (idxVals[k] - 1) * stride;
-      stride *= shape[k];
-    }
-  } else {
-    return false;
-  }
+  const offset = columnMajorOffsetFromIndices(shape, idxVals);
+  if (offset === undefined) return false;
   const newData = new Float64Array(data);
   newData[offset] = rhsVal;
   const newSign = signFromExactArray(newData);
