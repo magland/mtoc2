@@ -40,11 +40,9 @@ import {
   type Type,
   type Sign,
   type NumericType,
-  type ClassType,
   scalarDouble,
   scalarComplex,
   tensorDouble,
-  classType,
   signFromExactArray,
   signFromNumber,
   unifySign,
@@ -105,7 +103,8 @@ import {
   lowerAnonFunc,
   lowerFuncHandle,
 } from "./lowerHandle.js";
-import { buildUserFunctionCall, specializeUserFunction } from "./specialize.js";
+import { lowerClassConstructorCall } from "./lowerClassConstructor.js";
+import { buildUserFunctionCall } from "./specialize.js";
 import { lowerIndexStore } from "./lowerIndexStore.js";
 import { lowerIndexSlice } from "./lowerIndexSlice.js";
 import { lowerIndexSliceStore } from "./lowerIndexSliceStore.js";
@@ -1398,7 +1397,7 @@ export class Lowerer {
       // `pkg.Foo(args)` — packaged class constructor.
       if (this.workspace.isClass(qname)) {
         const reg = this.workspace.classes.get(qname)!;
-        return this.lowerClassConstructorCall(reg, e.args, e.span);
+        return lowerClassConstructorCall.call(this, reg, e.args, e.span);
       }
       // `ClassName.staticMethod(args)` where `ClassName` is either a
       // bare class or a qualified one (`pkg.Foo.staticMethod(...)`).
@@ -1443,7 +1442,7 @@ export class Lowerer {
             e.span
           );
         }
-        return this.lowerClassConstructorCall(reg, e.args, e.span);
+        return lowerClassConstructorCall.call(this, reg, e.args, e.span);
       }
       // Numbl's resolver only returns these dotted-route verdicts for
       // qualified names; if we got something else (or nothing) for a
@@ -1859,7 +1858,8 @@ export class Lowerer {
       return dispatchHandleCall.call(this, e.name, envEntry, e.args, e.span);
     }
     if (envEntry === undefined && this.workspace.isClass(e.name)) {
-      return this.lowerClassConstructorCall(
+      return lowerClassConstructorCall.call(
+        this,
         this.workspace.classes.get(e.name)!,
         e.args,
         e.span
@@ -2043,7 +2043,7 @@ export class Lowerer {
             e.span
           );
         }
-        return this.lowerClassConstructorCall(reg, e.args, e.span);
+        return lowerClassConstructorCall.call(this, reg, e.args, e.span);
       }
     }
   }
@@ -2183,189 +2183,7 @@ export class Lowerer {
     };
   }
 
-  /** `ClassName(args)` — class constructor call. Synthesizes a
-   *  default-valued receiver (a `StructLit` whose `ty` is the
-   *  class's declared `ClassType`) and routes it as the first arg of
-   *  the specialized constructor.
-   *
-   *  When the class has properties without explicit defaults, the
-   *  ClassType is resolved on first call: `resolveClassType()` runs
-   *  the inference (lowering each pending property's first direct
-   *  write in the constructor body, in a temp env bound to the
-   *  call's argTypes) and caches the result on the registration. */
-  private lowerClassConstructorCall(
-    reg: ClassRegistration,
-    args: Expr[],
-    span: Span
-  ): IRExpr {
-    if (reg.constructor === null) {
-      // No constructor declared: only a zero-arg call is valid; the
-      // value IS the default-valued receiver. (Classes with pending
-      // properties are required to declare a constructor at
-      // registration time, so reg.ty is non-null on this branch.)
-      if (args.length !== 0) {
-        throw new TypeError(
-          `class '${reg.className}' has no constructor; cannot pass arguments`,
-          span
-        );
-      }
-      const ty = this.resolveClassType(reg, [], span);
-      return this.makeInitialClassReceiver(reg, ty, span);
-    }
-    const userArgs = args.map(a => this.lowerExpr(a));
-    for (const a of userArgs) {
-      this.requireValueType(a, `argument to constructor '${reg.className}'`);
-    }
-    const argTypes = userArgs.map(a => a.ty);
-    const classTy = this.resolveClassType(reg, argTypes, span);
-    const initialReceiver = this.makeInitialClassReceiver(reg, classTy, span);
-    const outName = reg.constructor.outputs[0];
-    const spec = specializeUserFunction.call(
-      this,
-      reg.constructor,
-      argTypes,
-      reg.className,
-      reg.file,
-      { name: outName, ty: classTy, initExpr: initialReceiver },
-      1
-    );
-    // Constructor must return one output (validated at registration).
-    const ty: Type = spec.outputTypes[0] ?? classTy;
-    return {
-      kind: "Call",
-      cName: spec.cName,
-      name: reg.className,
-      args: userArgs,
-      ty,
-      span,
-    };
-  }
-
-  /** Settle the class's `ClassType`. For a class with every property
-   *  declaring a default, `reg.ty` is already filled in at
-   *  registration and we just return it. For a class with pending
-   *  properties, we pre-scan the constructor body for direct
-   *  `obj.<prop> = <rhs>` writes (where `obj` is the constructor's
-   *  output receiver) and lower each first-write RHS in a temp env
-   *  bound to the call's `argTypes`. The first call wins — subsequent
-   *  specs validate against the cached type via the normal
-   *  `MemberStore` storage-equivalence check. */
-  private resolveClassType(
-    reg: ClassRegistration,
-    argTypes: Type[],
-    span: Span
-  ): ClassType {
-    if (reg.ty !== null) return reg.ty;
-    // `registerClassDef` enforces that pendingProperties.size > 0
-    // implies a constructor is declared. Defensive assertion.
-    if (reg.constructor === null) {
-      throw new UnsupportedConstruct(
-        `internal: class '${reg.className}' has pending properties but no constructor`,
-        span
-      );
-    }
-    const decl = reg.constructor;
-    if (argTypes.length !== decl.params.length) {
-      // Surface the arity mismatch with the constructor call site span.
-      throw new TypeError(
-        `constructor '${reg.className}' expects ${decl.params.length} arg(s), got ${argTypes.length}`,
-        span
-      );
-    }
-    const receiverName = decl.outputs[0];
-
-    // Save outer lowering state — we're going to lower the first-write
-    // RHSs in a fresh env that mirrors the constructor's entry state
-    // (params bound, no other locals).
-    const savedEnv = this.env;
-    const savedTempCounter = this.tempCounter;
-    const savedCurrentFile = this.currentFile;
-    this.env = new Map();
-    this.tempCounter = 0;
-    this.currentFile = reg.file;
-    for (let i = 0; i < decl.params.length; i++) {
-      this.env.set(decl.params[i], {
-        cName: cIdentForUserName(decl.params[i]),
-        ty: argTypes[i],
-      });
-    }
-
-    const props: { name: string; ty: Type }[] = [];
-    try {
-      for (const propName of reg.propertyNames) {
-        const def = reg.defaults.get(propName);
-        if (def !== undefined) {
-          // Default-having property: use the type already inferred at
-          // registration (it's literal-derived, so it's stable).
-          props.push({ name: propName, ty: def.ty });
-          continue;
-        }
-        // Pending property: find the first top-level direct write in
-        // the constructor body and lower its RHS for its static type.
-        const rhs = findFirstPropertyWrite(decl.body, receiverName, propName);
-        if (rhs === null) {
-          throw new UnsupportedConstruct(
-            `class '${reg.className}' property '${propName}' has no default ` +
-              `and is not directly assigned at the top level of the ` +
-              `constructor body (\`${receiverName}.${propName} = <expr>;\`); ` +
-              `either add a default value or add such an assignment`,
-            decl.span
-          );
-        }
-        const inferred = this.lowerExpr(rhs);
-        this.requireValueType(
-          inferred,
-          `inferring type of '${reg.className}.${propName}'`
-        );
-        props.push({ name: propName, ty: inferred.ty });
-      }
-    } finally {
-      this.env = savedEnv;
-      this.tempCounter = savedTempCounter;
-      this.currentFile = savedCurrentFile;
-    }
-
-    const ty = classType(reg.className, props);
-    reg.ty = ty;
-    return ty;
-  }
-
-  /** Synthesize a `StructLit` whose ty is `classTy` and whose field
-   *  values are the property defaults from `reg.defaults` — for any
-   *  property without a default, synthesize a zero-value matching the
-   *  inferred C-level type (the constructor body's first write
-   *  overwrites it anyway; the zero is just a typed placeholder so
-   *  the C designated initializer is well-formed and any
-   *  read-before-write reads as 0 / empty). */
-  private makeInitialClassReceiver(
-    reg: ClassRegistration,
-    classTy: ClassType,
-    span: Span
-  ): IRExpr {
-    const fields: { name: string; value: IRExpr }[] = [];
-    for (const p of classTy.properties) {
-      const def = reg.defaults.get(p.name);
-      let value: IRExpr;
-      if (def !== undefined) {
-        // Defaults are restricted to literals, so an empty env is
-        // sufficient to lower them.
-        const savedEnv = this.env;
-        this.env = new Map();
-        value = this.lowerExpr(def.expr);
-        this.env = savedEnv;
-      } else {
-        value = synthesizeZeroValue(p.ty, reg.className, p.name, span);
-      }
-      fields.push({ name: p.name, value });
-    }
-    return {
-      kind: "StructLit",
-      fields,
-      ty: classTy,
-      span,
-    };
-  }
-
+  // ── Class constructors live in `./lowerClassConstructor.ts`. ──────────
   // ── Function handles live in `./lowerHandle.ts`. ──────────────────────
   // ── Function specialization lives in `./specialize.ts`. ───────────────
 
@@ -2509,72 +2327,6 @@ export function tryExtractDottedName(e: Expr): string | null {
     if (base) return `${base}.${e.name}`;
   }
   return null;
-}
-
-/** Scan a constructor body for the FIRST top-level direct
- *  `<receiver>.<propName> = <rhs>` assignment. Returns the rhs Expr,
- *  or `null` if no such assignment is found. Conditional / loop /
- *  nested-block writes are intentionally NOT considered — for v1,
- *  property-type inference relies on writes that the body
- *  unconditionally performs. */
-function findFirstPropertyWrite(
-  body: Stmt[],
-  receiverName: string,
-  propName: string
-): Expr | null {
-  for (const s of body) {
-    if (
-      s.type === "AssignLValue" &&
-      s.lvalue.type === "Member" &&
-      s.lvalue.name === propName &&
-      s.lvalue.base.type === "Ident" &&
-      s.lvalue.base.name === receiverName
-    ) {
-      return s.expr;
-    }
-  }
-  return null;
-}
-
-/** Build a zero / empty IR value of `ty`'s C-level shape. Used by
- *  `makeInitialClassReceiver` to fill the `StructLit` slot for a
- *  property that lacks an explicit default — the constructor body's
- *  first write overwrites it anyway, but the C designated initializer
- *  still needs a syntactic value, and a read-before-write should
- *  observe a stable zero. Only Numeric types are supported in v1;
- *  struct / class / handle / string properties without defaults raise
- *  `UnsupportedConstruct` here. */
-function synthesizeZeroValue(
-  ty: Type,
-  className: string,
-  propName: string,
-  span: Span
-): IRExpr {
-  if (ty.kind === "Numeric") {
-    if (isMultiElement(ty)) {
-      // Empty 0×0 tensor — matches MATLAB's `[]` initial value. The
-      // first constructor write replaces it.
-      return {
-        kind: "TensorBuild",
-        elements: [],
-        shape: [0, 0],
-        ty: tensorDouble([0, 0]),
-        span,
-      };
-    }
-    return {
-      kind: "NumLit",
-      value: 0,
-      ty: scalarDouble("zero", 0),
-      span,
-    };
-  }
-  throw new UnsupportedConstruct(
-    `class '${className}' property '${propName}' is inferred to type ` +
-      `${typeToString(ty)}, but v1 can only synthesize a zero placeholder ` +
-      `for numeric properties; provide an explicit default value`,
-    span
-  );
 }
 
 /** If the lowered cond's type carries an exact scalar value, return
