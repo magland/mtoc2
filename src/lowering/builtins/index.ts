@@ -280,4 +280,3 @@ export function unaryOpBuiltin(op: UnaryOperation, span: Span): string {
       );
   }
 }
-
