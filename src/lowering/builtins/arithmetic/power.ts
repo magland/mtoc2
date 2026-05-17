@@ -30,7 +30,6 @@
 import { UnsupportedConstruct } from "../../errors.js";
 import {
   DIM_ONE,
-  type DimInfo,
   type NumericType,
   type Sign,
   EXACT_ARRAY_MAX_ELEMENTS,
@@ -43,7 +42,6 @@ import {
   tensorDouble,
   tensorDoubleFromDims,
 } from "../../types.js";
-import type { Span } from "../../../parser/index.js";
 import type { Builtin } from "../registry.js";
 import {
   exactDouble,
@@ -52,6 +50,7 @@ import {
   requireRealOrComplex,
   requireRealDouble,
 } from "../_shared.js";
+import { elemwiseResultShape } from "./_elemwise.js";
 
 function isExactInteger(t: NumericType): boolean {
   const v = exactDouble(t);
@@ -126,62 +125,6 @@ function checkDomain(a: NumericType, b: NumericType): string | null {
   );
 }
 
-/** Shape resolution for `.^`. Returns `null` for scalar+scalar;
- *  otherwise the output dim list plus a flag for whether broadcasting
- *  is required. Same rules as `elemwiseResultShape` in `_elemwise.ts`:
- *  align dims on axis 1, pad with trailing 1s, axis-wise
- *  `da == db || da == 1 || db == 1`. */
-function powerShape(
-  a: NumericType,
-  b: NumericType,
-  span: Span
-): { outDims: DimInfo[]; bcast: boolean } | null {
-  const aMulti = isMultiElement(a);
-  const bMulti = isMultiElement(b);
-  if (!aMulti && !bMulti) return null;
-  if (!aMulti) return { outDims: b.dims.slice(), bcast: false };
-  if (!bMulti) return { outDims: a.dims.slice(), bcast: false };
-  const rnd = Math.max(a.dims.length, b.dims.length);
-  const outDims: DimInfo[] = new Array(rnd);
-  let bcast = a.dims.length !== b.dims.length;
-  for (let i = 0; i < rnd; i++) {
-    const da: DimInfo = i < a.dims.length ? a.dims[i] : DIM_ONE;
-    const db: DimInfo = i < b.dims.length ? b.dims[i] : DIM_ONE;
-    const aOne = isDimOne(da);
-    const bOne = isDimOne(db);
-    if (aOne && bOne) {
-      outDims[i] = DIM_ONE;
-      continue;
-    }
-    if (aOne) {
-      outDims[i] = db;
-      bcast = true;
-      continue;
-    }
-    if (bOne) {
-      outDims[i] = da;
-      bcast = true;
-      continue;
-    }
-    if (da.kind === "exact" && db.kind === "exact") {
-      if (da.value !== db.value) {
-        throw new UnsupportedConstruct(
-          `'.^' shape mismatch: axis ${i + 1} is ${da.value} vs ${db.value}; incompatible for implicit expansion`,
-          span
-        );
-      }
-      outDims[i] = da;
-    } else if (da.kind === "exact") {
-      outDims[i] = da;
-    } else if (db.kind === "exact") {
-      outDims[i] = db;
-    } else {
-      outDims[i] = { kind: "unknown" };
-    }
-  }
-  return { outDims, bcast };
-}
-
 /** Complex scalar power fold. Uses the standard
  *  `z^w = exp(w * log(z))` formula. Returns `undefined` when the
  *  result would be non-finite. */
@@ -244,7 +187,7 @@ export const power: Builtin = {
     const reject = checkDomain(a, b);
     if (reject !== null) throw new UnsupportedConstruct(reject, span);
 
-    const resolved = powerShape(a, b, span);
+    const resolved = elemwiseResultShape(a, b, ".^", span);
 
     if (resolved === null) {
       // Pure scalar OP scalar.

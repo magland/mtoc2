@@ -46,8 +46,9 @@ type ResolvedShape = {
 
 /** Shape resolution for elementwise binary. Returns `null` for scalar+
  *  scalar; otherwise computes the broadcast output shape and whether
- *  broadcasting is required. Throws on statically incompatible axes. */
-function elemwiseResultShape(
+ *  broadcasting is required. Throws on statically incompatible axes.
+ *  Exported for `power.ts`, which shares the same broadcast rules. */
+export function elemwiseResultShape(
   a: NumericType,
   b: NumericType,
   name: string,
