@@ -69,15 +69,12 @@ import {
   structType,
   typeToString,
   VOID,
-  hashType,
   unify,
   storageEquivalent,
   stripExactFromEnv,
   widenAfterIndexedWrite,
   withoutExact,
-  canonicalizeType,
   classMethodSpecSource,
-  sanitizeCIdent,
 } from "./types.js";
 import type { ClassRegistration } from "./classDefs.js";
 import type { Workspace } from "../workspace/workspace.js";
@@ -116,11 +113,12 @@ import {
 import { isSliceArg } from "./indexResolve.js";
 import { lowerIndexLoad } from "./lowerIndexLoad.js";
 import { lowerTensorLit } from "./lowerTensorLit.js";
+import { buildUserFunctionCall, specializeUserFunction } from "./specialize.js";
 import { lowerIndexStore } from "./lowerIndexStore.js";
 import { lowerIndexSlice } from "./lowerIndexSlice.js";
 import { lowerIndexSliceStore } from "./lowerIndexSliceStore.js";
 
-interface EnvEntry {
+export interface EnvEntry {
   cName: string;
   ty: Type;
 }
@@ -128,8 +126,13 @@ interface EnvEntry {
 type FuncStmt = Extract<Stmt, { type: "Function" }>;
 
 export class Lowerer {
-  private env: Map<string, EnvEntry> = new Map();
-  private specializations: Map<string, IRFunc> = new Map();
+  // The members below are formally `package-internal` — used by the
+  // extracted helpers in `./lower*.ts` and `./specialize.ts` via the
+  // same `this: Lowerer` pattern as `lowerIndexLoad` etc. Treat them
+  // as private to the lowering module; external callers should go
+  // through `lowerProgram` / `lowerExpr`.
+  env: Map<string, EnvEntry> = new Map();
+  specializations: Map<string, IRFunc> = new Map();
   /** Stack of contexts for resolving the `end` keyword inside an
    *  index slot. Pushed by the index-lowering helpers (lowerIndexLoad
    *  / lowerIndexStore / lowerIndexSlice / lowerIndexSliceStore)
@@ -144,7 +147,7 @@ export class Lowerer {
   }> = [];
   /** Monotonic counter for synthesizing `_mtoc2_t1`, `_mtoc2_t2`, ...
    *  hoist-temp names. Reset per function specialization. */
-  private tempCounter: number = 0;
+  tempCounter: number = 0;
   /** Expression-level hoist statements queued by sub-lowerings that
    *  can't pass a `hoists` array up the IR-expression return chain.
    *  Used today by member-rooted indexing (`obj.field(args)`) to push a
@@ -161,14 +164,14 @@ export class Lowerer {
    *  workspace's main file at construction; pushed/popped by
    *  `specializeUserFunction` so a call from inside `helper.m`'s
    *  subfunction reports the right file in its `CallSite`. */
-  private currentFile: string;
+  currentFile: string;
   /** Per-specialization `nargin` / `nargout` values. Pushed by
    *  `specializeUserFunction` before lowering a function body; popped
    *  after. Read by the matching identifier arms of `lowerIdent`. Empty
    *  at top level — MATLAB rejects `nargin` / `nargout` outside a
    *  function body, which we mirror by leaving the reference
    *  unresolved (which falls through to the "undefined" error). */
-  private callFrameStack: { nargin: number; nargout: number }[] = [];
+  callFrameStack: { nargin: number; nargout: number }[] = [];
 
   constructor(private workspace: Workspace) {
     this.currentFile = workspace.mainFile;
@@ -209,7 +212,7 @@ export class Lowerer {
 
   // ── Statement lowering ────────────────────────────────────────────────
 
-  private lowerStmts(stmts: Stmt[]): IRStmt[] {
+  lowerStmts(stmts: Stmt[]): IRStmt[] {
     const out: IRStmt[] = [];
     for (const s of stmts) {
       const lowered = this.lowerStmt(s);
@@ -524,7 +527,7 @@ export class Lowerer {
    *  Void type tags a call to a zero-output user function; it has no
    *  representation as a value and is only valid as the direct
    *  expression of an `ExprStmt`. */
-  private requireValueType(e: IRExpr, what: string): void {
+  requireValueType(e: IRExpr, what: string): void {
     if (isVoid(e.ty)) {
       throw new UnsupportedConstruct(
         `${what}: cannot use the result of a zero-output function as a value`,
@@ -1051,7 +1054,8 @@ export class Lowerer {
     // Caller's requested `nargout`: count of lvalues (0 for the
     // bare-drop-all path that `lowerExprStmt` routes here).
     const callNargout = s.lvalues.length;
-    const spec = this.specializeUserFunction(
+    const spec = specializeUserFunction.call(
+      this,
       fnAst,
       argTypes,
       specSource,
@@ -1259,7 +1263,7 @@ export class Lowerer {
     return argHoists.length === 0 ? mac : [...argHoists, mac];
   }
 
-  private recordAssignment(name: string, expr: IRExpr, span: Span): Assign {
+  recordAssignment(name: string, expr: IRExpr, span: Span): Assign {
     const existing = this.env.get(name);
     // Type-compat check: catch reassignments that would invalidate the
     // C-side declaration. The function-top `collectOwnedLocals` walk
@@ -1797,10 +1801,17 @@ export class Lowerer {
         // Expression-context call site requests exactly 1 output (or
         // 0 for a void-declared function); see `buildUserFunctionCall`
         // for the discipline.
-        return this.buildUserFunctionCall(target.ast, args, qname, e.span, {
-          specSource: qname,
-          definingFile: target.file,
-        });
+        return buildUserFunctionCall.call(
+          this,
+          target.ast,
+          args,
+          qname,
+          e.span,
+          {
+            specSource: qname,
+            definingFile: target.file,
+          }
+        );
       }
       if (target?.kind === "classConstructor") {
         const reg = this.classReg(target.className);
@@ -1895,7 +1906,9 @@ export class Lowerer {
       );
     }
     const allArgs: IRExpr[] = target.stripInstance ? args : [base, ...args];
-    return this.buildUserFunctionCall(
+    return buildUserFunctionCall.call(
+      this,
+
       method,
       allArgs,
       `${target.className}.${target.methodName}`,
@@ -2013,7 +2026,9 @@ export class Lowerer {
         span
       );
     }
-    return this.buildUserFunctionCall(
+    return buildUserFunctionCall.call(
+      this,
+
       method,
       args,
       `${target.className}.${target.methodName}`,
@@ -2338,9 +2353,16 @@ export class Lowerer {
         // Expression-context: request nargout=1 (the call site's
         // single lvalue). A multi-output declared function specializes
         // with truncated output list — see `buildUserFunctionCall`.
-        return this.buildUserFunctionCall(target.ast, args, e.name, e.span, {
-          definingFile: target.file,
-        });
+        return buildUserFunctionCall.call(
+          this,
+          target.ast,
+          args,
+          e.name,
+          e.span,
+          {
+            definingFile: target.file,
+          }
+        );
       }
       case "classMethod": {
         // `method(obj, args)` syntax — the resolver decided this
@@ -2373,7 +2395,9 @@ export class Lowerer {
           );
         }
         const callArgs = target.stripInstance ? args.slice(1) : args;
-        return this.buildUserFunctionCall(
+        return buildUserFunctionCall.call(
+          this,
+
           method,
           callArgs,
           `${target.className}.${target.methodName}`,
@@ -2574,7 +2598,8 @@ export class Lowerer {
     const classTy = this.resolveClassType(reg, argTypes, span);
     const initialReceiver = this.makeInitialClassReceiver(reg, classTy, span);
     const outName = reg.constructor.outputs[0];
-    const spec = this.specializeUserFunction(
+    const spec = specializeUserFunction.call(
+      this,
       reg.constructor,
       argTypes,
       reg.className,
@@ -2904,7 +2929,9 @@ export class Lowerer {
         span
       );
     }
-    return this.buildUserFunctionCall(
+    return buildUserFunctionCall.call(
+      this,
+
       handleTy.ast,
       allArgs,
       handleTy.targetName,
@@ -2913,229 +2940,7 @@ export class Lowerer {
     );
   }
 
-  // ── Function specialization ───────────────────────────────────────────
-
-  /** Build a single-output `Call` IR node against a user-function AST,
-   *  specializing the body on the arg-type tuple. Single chokepoint
-   *  for every expression-context user-function call: bare-name calls,
-   *  packaged (`pkg.foo`) calls, instance / static class methods,
-   *  method-call-via-arg-type, and handle dispatch. Each caller is
-   *  still responsible for the verdict-specific bookkeeping (resolver
-   *  routing, prepending the receiver to args for instance methods,
-   *  rejecting >=2-output methods if its dispatch path doesn't yet
-   *  support truncation, …) — but the spec lookup + output-type
-   *  derivation + IR construction is uniform here.
-   *
-   *  For 0-output declarations the resulting `Call` has `ty = VOID`,
-   *  which the caller (`lowerExprStmt`) must accept as bare-statement
-   *  use only. For >=1-output declarations the spec truncates to
-   *  nargout=1 and the result type is the (possibly Unknown if the
-   *  body didn't assign the output) first declared output.
-   *
-   *  The N≥2-output path uses a separate `MultiAssignCall` IR node
-   *  built by `lowerMultiAssign` — this helper is single-output only.
-   */
-  private buildUserFunctionCall(
-    decl: FuncStmt,
-    callArgs: IRExpr[],
-    callName: string,
-    span: Span,
-    opts: {
-      specSource?: string;
-      definingFile?: string;
-    } = {}
-  ): IRExpr {
-    const argTypes = callArgs.map(a => a.ty);
-    const nargout = decl.outputs.length === 0 ? 0 : 1;
-    const spec = this.specializeUserFunction(
-      decl,
-      argTypes,
-      opts.specSource,
-      opts.definingFile,
-      undefined,
-      nargout
-    );
-    const ty: Type =
-      decl.outputs.length === 0
-        ? VOID
-        : (spec.outputTypes[0] ?? { kind: "Unknown" });
-    return {
-      kind: "Call",
-      cName: spec.cName,
-      name: callName,
-      args: callArgs,
-      ty,
-      span,
-    };
-  }
-
-  /** Specialize a user function (or method, or anonymous-function
-   *  synth) on the given arg-type tuple. The C mangling salts by the
-   *  defining file so two files defining a same-named subfunction
-   *  get distinct mangled names.
-   *
-   *  Caller is responsible for passing `definingFile` — for top-level
-   *  functions resolved through the workspace, that's the resolver's
-   *  verdict file; for class methods it's the class's file; for
-   *  anonymous-function synth ASTs it's the file where `@(...)` was
-   *  written. */
-  private specializeUserFunction(
-    decl: FuncStmt,
-    argTypes: Type[],
-    /** Optional override for the specialization-key source-name half.
-     *  Class methods pass `<className>__<methodName>` so the mangled
-     *  C name disambiguates two methods of the same source-level name
-     *  on different classes. Defaults to `decl.name`. */
-    specSource?: string,
-    /** File the function definition lives in. Salts the spec key so
-     *  cross-file homonyms get distinct C names. Defaults to the
-     *  function's source span's file. */
-    definingFile?: string,
-    /** When set, the named output gets a synthetic first assignment
-     *  to `initExpr` (an already-lowered IR expression) prepended to
-     *  the body. The user's constructor body then sees the receiver
-     *  initialized with the class defaults. */
-    preSeedOutput?: { name: string; ty: Type; initExpr: IRExpr },
-    /** Per-call-site `nargout`: the number of outputs the caller
-     *  requested. Salts the spec key so two callers requesting
-     *  different output counts get distinct specializations.
-     *  Defaults to `decl.outputs.length` (the declared count) when
-     *  the caller can't supply a more specific value (e.g.
-     *  cross-file resolver paths that don't yet thread this through).
-     *  Inside the body, the `nargout` identifier folds to this value
-     *  via the `callFrameStack`. */
-    nargout?: number
-  ): IRFunc {
-    if (argTypes.length !== decl.params.length) {
-      throw new TypeError(
-        `function '${decl.name}' expects ${decl.params.length} arg(s), got ${argTypes.length}`,
-        decl.span
-      );
-    }
-    const source = specSource ?? decl.name;
-    const file = definingFile ?? decl.span.file ?? this.currentFile;
-    // Per-specialization `nargout`: defaults to the declared count so
-    // resolver paths that don't yet thread the caller's request still
-    // produce a working specialization (matches numbl's "max possible
-    // nargout" interpretation when the call site isn't statically
-    // known). Callers that DO know — `lowerMultiAssign`,
-    // `lowerFuncCall`, ExprStmt drop-all — supply the precise count
-    // so the spec key shards correctly.
-    const effectiveNargout = nargout ?? decl.outputs.length;
-    // Hash the (file, argTypes, nargout) triple together so the C
-    // name salts by all three. Keep the human-readable prefix
-    // (`apply__<hex>`) — the hash collapses everything that doesn't
-    // matter.
-    const hashInput = `${file}|${argTypes.map(canonicalizeType).join("|")}|nargout=${effectiveNargout}`;
-    const key = `${sanitizeCIdent(source)}__${hashType(hashInput)}`;
-    const cached = this.specializations.get(key);
-    if (cached) return cached;
-
-    // Per-spec output list: truncate to the caller's requested nargout.
-    // A 3-output function called as `[a] = f(...)` or `x = f(...)`
-    // becomes a 1-output specialization (single-output C ABI); a bare
-    // `f(...)` becomes a 0-output (void) spec. The body's assignments
-    // to trailing outputs are kept but unused — the nargout fold may
-    // dead-code them via `if nargout >= N` branches.
-    const effectiveOutputs = decl.outputs.slice(0, effectiveNargout);
-    // Insert placeholder to break recursion (not supported in MVP but
-    // we'll throw a cleaner error than infinite recursion).
-    const placeholder: IRFunc = {
-      name: decl.name,
-      cName: key,
-      params: decl.params.slice(),
-      cParams: decl.params.map(cIdentForUserName),
-      paramTypes: argTypes,
-      outputs: effectiveOutputs.slice(),
-      cOutputs: effectiveOutputs.map(cIdentForUserName),
-      outputTypes: [],
-      body: [],
-      span: decl.span,
-    };
-    this.specializations.set(key, placeholder);
-
-    // Save outer state. The try/finally guarantees state is restored
-    // even if body lowering throws — otherwise a TypeError /
-    // UnsupportedConstruct from the body would leak this function's
-    // env / tempCounter / currentFile / callFrameStack to the caller.
-    const savedEnv = this.env;
-    const savedTempCounter = this.tempCounter;
-    const savedCurrentFile = this.currentFile;
-    this.env = new Map();
-    this.tempCounter = 0;
-    this.currentFile = file;
-    this.callFrameStack.push({
-      nargin: argTypes.length,
-      nargout: effectiveNargout,
-    });
-
-    try {
-      // Bind params. The C name goes through `cIdentForUserName` so a
-      // user-source `function r = f(struct)` doesn't reference the C
-      // keyword `struct` for reads of `struct` inside the body.
-      for (let i = 0; i < decl.params.length; i++) {
-        const pName = decl.params[i];
-        this.env.set(pName, {
-          cName: cIdentForUserName(pName),
-          ty: argTypes[i],
-        });
-      }
-      // Class constructors pre-seed their output (the receiver) with
-      // the default-valued class instance via an injected first stmt,
-      // so the body can read `obj.x` / write `obj.x = ...` against an
-      // initialized slot from the very first source statement.
-      let initStmts: IRStmt[] = [];
-      if (preSeedOutput !== undefined) {
-        this.requireValueType(
-          preSeedOutput.initExpr,
-          `constructor init for '${preSeedOutput.name}'`
-        );
-        const initStmt = this.recordAssignment(
-          preSeedOutput.name,
-          preSeedOutput.initExpr,
-          decl.span
-        );
-        initStmts = [initStmt];
-      }
-
-      const body = [...initStmts, ...this.lowerStmts(decl.body)];
-
-      // Output types come from the final env value of each effective
-      // output name. Trailing outputs the caller dropped via nargout
-      // truncation aren't checked — they may legitimately be left
-      // unassigned by a `if nargout >= N` body branch.
-      const outputTypes: Type[] = effectiveOutputs.map(o => {
-        const e = this.env.get(o);
-        if (!e) {
-          throw new TypeError(
-            `function '${decl.name}': output '${o}' was never assigned`,
-            decl.span
-          );
-        }
-        return e.ty;
-      });
-
-      const out: IRFunc = {
-        ...placeholder,
-        body,
-        outputTypes,
-      };
-      this.specializations.set(key, out);
-      return out;
-    } catch (err) {
-      // Body lowering threw — drop the placeholder so a future call
-      // with the same key (e.g. after the user fixes the error and
-      // re-translates against the same Lowerer instance) re-attempts
-      // specialization instead of returning the empty placeholder.
-      this.specializations.delete(key);
-      throw err;
-    } finally {
-      this.env = savedEnv;
-      this.tempCounter = savedTempCounter;
-      this.currentFile = savedCurrentFile;
-      this.callFrameStack.pop();
-    }
-  }
+  // ── Function specialization lives in `./specialize.ts`. ───────────────
 
   // ── Helpers ───────────────────────────────────────────────────────────
 
@@ -3259,7 +3064,7 @@ const C_RESERVED_NAMES: ReadonlySet<string> = new Set([
  *  remains readable for the common case. The numbl parser already
  *  rejects identifiers starting with `_`, so a user `for` only collides
  *  with the C keyword (not with `v_for` from any other source). */
-function cIdentForUserName(name: string): string {
+export function cIdentForUserName(name: string): string {
   if (C_RESERVED_NAMES.has(name)) return `v_${name}`;
   return name;
 }
