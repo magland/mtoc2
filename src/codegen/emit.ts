@@ -130,8 +130,7 @@ export function emitProgram(prog: IRProgram, opts: EmitOptions = {}): string {
   const mainLocals = collectLocals(prog.topLevelStmts);
   const mainOwned = mainLocals.owned;
   for (const o of mainOwned) {
-    activateOwnedRuntime(o.ty, state);
-    const h = requireOwnedHelpers(o.ty);
+    const h = activatedOwnedHelpers(o.ty, state);
     userParts.push(`  ${cTypeFor(o.ty)} ${o.cName} = ${h.empty}();`);
   }
   for (const o of mainLocals.scalars) {
@@ -351,6 +350,15 @@ function activateOwnedRuntime(t: Type, state: RuntimeState): void {
   }
 }
 
+/** Activate the runtime snippets needed for an owned type AND return
+ *  its OwnedHelpers descriptor. Shorthand for the
+ *  `activateOwnedRuntime(t, state); requireOwnedHelpers(t)` pair that
+ *  appears at every owned-codegen site. */
+function activatedOwnedHelpers(t: Type, state: RuntimeState) {
+  activateOwnedRuntime(t, state);
+  return requireOwnedHelpers(t);
+}
+
 function fnRetType(fn: IRFunc): string {
   // 0 outputs → C `void`. 1 output → classic return-by-value. N≥2
   // outputs → `void` return + out-pointer params (see `fnParamList`).
@@ -471,8 +479,7 @@ function emitFunction(fn: IRFunc, state: RuntimeState): string {
     outputCNames.add(cOut);
     if (paramNames.has(cOut)) continue;
     if (outTy && isOwned(outTy)) {
-      activateOwnedRuntime(outTy, state);
-      const h = requireOwnedHelpers(outTy);
+      const h = activatedOwnedHelpers(outTy, state);
       lines.push(`  ${cTypeFor(outTy)} ${cOut} = ${h.empty}();`);
     } else if (outTy !== undefined) {
       lines.push(`  ${cTypeFor(outTy)} ${cOut} = ${defaultInitFor()};`);
@@ -492,8 +499,7 @@ function emitFunction(fn: IRFunc, state: RuntimeState): string {
   const fnLocals = collectLocals(fn.body);
   const owned = fnLocals.owned.filter(isLocalDeclSite);
   for (const o of owned) {
-    activateOwnedRuntime(o.ty, state);
-    const h = requireOwnedHelpers(o.ty);
+    const h = activatedOwnedHelpers(o.ty, state);
     lines.push(`  ${cTypeFor(o.ty)} ${o.cName} = ${h.empty}();`);
   }
   for (const o of fnLocals.scalars.filter(isLocalDeclSite)) {
@@ -647,8 +653,7 @@ function emitBody(
           `emit: early-free of '${v}' but no owned type recorded`
         );
       }
-      activateOwnedRuntime(ty, state);
-      const h = requireOwnedHelpers(ty);
+      const h = activatedOwnedHelpers(ty, state);
       out.push(`${indent}${h.free}(&${v});`);
     }
   }
@@ -677,8 +682,7 @@ function emitStmt(
           activateOwnedRuntime(s.ty, state);
           return emitTensorAssignFused(s, indent, state);
         }
-        activateOwnedRuntime(s.ty, state);
-        const h = requireOwnedHelpers(s.ty);
+        const h = activatedOwnedHelpers(s.ty, state);
         const rhs = emitOwnedRhs(s.expr, state);
         return `${indent}${h.assign}(&${s.cName}, ${rhs});`;
       }
@@ -688,8 +692,7 @@ function emitStmt(
     case "MemberStore": {
       const slot = [s.base.cName, ...s.fieldPath].join(".");
       if (isOwned(s.leafTy)) {
-        activateOwnedRuntime(s.leafTy, state);
-        const h = requireOwnedHelpers(s.leafTy);
+        const h = activatedOwnedHelpers(s.leafTy, state);
         const rhs = emitOwnedRhs(s.rhs, state);
         return `${indent}${h.assign}(&${slot}, ${rhs});`;
       }
@@ -891,8 +894,7 @@ function emitStmt(
             // (Unreachable in v1; kept for the future-tensor-output
             // extension.) Initialize the discard temp to an empty
             // handle so the callee's `_assign` sees a freeable slot.
-            activateOwnedRuntime(slot.ty, state);
-            const h = requireOwnedHelpers(slot.ty);
+            const h = activatedOwnedHelpers(slot.ty, state);
             out.push(`${indent}  ${cTypeFor(slot.ty)} ${tmp} = ${h.empty}();`);
           } else {
             out.push(
@@ -911,8 +913,7 @@ function emitStmt(
       for (let i = 0; i < s.outputs.length; i++) {
         const slot = s.outputs[i];
         if (slot.binding === null && isOwned(slot.ty)) {
-          activateOwnedRuntime(slot.ty, state);
-          const h = requireOwnedHelpers(slot.ty);
+          const h = activatedOwnedHelpers(slot.ty, state);
           out.push(`${indent}  ${h.free}(&_mtoc2_discard_${callIdx}_${i});`);
         }
       }
@@ -941,18 +942,15 @@ function emitStmt(
  *                          emit fresh-allocating helpers) */
 function emitOwnedRhs(e: IRExpr, state: RuntimeState): string {
   if (e.kind === "Var") {
-    activateOwnedRuntime(e.ty, state);
-    const h = requireOwnedHelpers(e.ty);
+    const h = activatedOwnedHelpers(e.ty, state);
     return `${h.copy}(${e.cName})`;
   }
   if (e.kind === "MemberLoad" && isOwned(e.ty)) {
-    activateOwnedRuntime(e.ty, state);
-    const h = requireOwnedHelpers(e.ty);
+    const h = activatedOwnedHelpers(e.ty, state);
     return `${h.copy}(${emitMemberLoadBare(e, state)})`;
   }
   if (e.kind === "HandleCaptureLoad" && isOwned(e.ty)) {
-    activateOwnedRuntime(e.ty, state);
-    const h = requireOwnedHelpers(e.ty);
+    const h = activatedOwnedHelpers(e.ty, state);
     return `${h.copy}(${e.base.cName}.cap_${e.captureName})`;
   }
   return emitExpr(e, state);
