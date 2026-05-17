@@ -1198,11 +1198,7 @@ function emitExpr(e: IRExpr, state: RuntimeState): string {
         throw new Error("emit internal: EndRef with non-numeric baseTy");
       }
       if (e.axis === "linear") {
-        const parts: string[] = [];
-        for (let i = 0; i < e.baseTy.dims.length; i++) {
-          parts.push(`${e.baseCName}.dims[${i}]`);
-        }
-        return `(double)(${parts.join(" * ")})`;
+        return `(double)(${dimsProductExpr(e.baseCName, e.baseTy)})`;
       }
       return `(double)${e.baseCName}.dims[${e.axis}]`;
     case "MakeRange":
@@ -1304,6 +1300,16 @@ function locStringOf(span: { file: string; start: number }): string {
   return `${JSON.stringify(`${span.file}:offset ${span.start}`)}`;
 }
 
+/** Build the C expression for `numel(<cName>)` as the product of its
+ *  per-axis `.dims[i]` slots. Returns `"0L"` for an empty / non-numeric
+ *  type so the emitted C still parses on degenerate inputs. */
+function dimsProductExpr(cName: string, ty: Type): string {
+  if (ty.kind !== "Numeric" || ty.dims.length === 0) return "0L";
+  const parts: string[] = [];
+  for (let i = 0; i < ty.dims.length; i++) parts.push(`${cName}.dims[${i}]`);
+  return parts.join(" * ");
+}
+
 /** Compute the column-major linear offset for an N-D access given
  *  per-axis source terms and a stride source. */
 function formatNdOffset(
@@ -1376,14 +1382,9 @@ function emitSliceSlotSetup(
       useRuntimeByName(state, "mtoc2_oob_abort");
       const idxCName = slot.expr.cName;
       const idxTy = slot.expr.ty;
-      const dimsProd: string[] = [];
-      if (idxTy.kind === "Numeric") {
-        for (let j = 0; j < idxTy.dims.length; j++) {
-          dimsProd.push(`${idxCName}.dims[${j}]`);
-        }
-      }
-      const numelExpr = dimsProd.length === 0 ? "0L" : dimsProd.join(" * ");
-      lines.push(`${indent}long _mtoc2_n_${i} = ${numelExpr};`);
+      lines.push(
+        `${indent}long _mtoc2_n_${i} = ${dimsProductExpr(idxCName, idxTy)};`
+      );
       const loc = locStringOf(slot.span);
       // Per-iteration: read the 1-based index, bounds-check, convert to 0-based.
       slotSrc.push(
@@ -1405,16 +1406,10 @@ function emitSliceSlotSetup(
       useRuntimeByName(state, "mtoc2_alloc");
       const maskCName = slot.expr.cName;
       const maskTy = slot.expr.ty;
-      const maskDimsProd: string[] = [];
-      if (maskTy.kind === "Numeric") {
-        for (let j = 0; j < maskTy.dims.length; j++) {
-          maskDimsProd.push(`${maskCName}.dims[${j}]`);
-        }
-      }
-      const maskNumelExpr =
-        maskDimsProd.length === 0 ? "0L" : maskDimsProd.join(" * ");
       const loc = locStringOf(slot.span);
-      lines.push(`${indent}long _mtoc2_mask_n_${i} = ${maskNumelExpr};`);
+      lines.push(
+        `${indent}long _mtoc2_mask_n_${i} = ${dimsProductExpr(maskCName, maskTy)};`
+      );
       lines.push(
         `${indent}long *_mtoc2_idx_${i} = (long *)mtoc2_alloc(sizeof(long) * (_mtoc2_mask_n_${i} > 0 ? (size_t)_mtoc2_mask_n_${i} : 1));`
       );
@@ -1702,6 +1697,48 @@ function emitLinearRangeSetup(
   return k => `(long)(_mtoc2_start + ${stepStr} * (double)${k}) - 1L`;
 }
 
+/** Emit setup for a single-slot linear logical-mask slice (read or
+ *  write). Pushes the `_mtoc2_mask_n`, `_mtoc2_base_n`, `_mtoc2_idx`,
+ *  and `_mtoc2_n` locals into `lines`, activates the required runtime
+ *  helpers, and returns the per-iter source-index expression plus a
+ *  cleanup line to emit after the iter loop. Indent is applied to the
+ *  pushed lines AND to the returned cleanup so the caller can drop it
+ *  straight into its line list. */
+function emitLinearLogicalMaskSetup(
+  slot: Extract<IndexSliceArg, { kind: "LogicalMask" }>,
+  baseCName: string,
+  baseTy: Type,
+  lines: string[],
+  indent: string,
+  state: RuntimeState
+): { srcIndexFor: (kVar: string) => string; cleanup: string } {
+  if (slot.expr.kind !== "Var") {
+    throw new Error(
+      "emit internal: LogicalMask slot expr must be a Var after ANF"
+    );
+  }
+  useRuntimeByName(state, "mtoc2_logical_mask_indices");
+  useRuntimeByName(state, "mtoc2_alloc");
+  const maskCName = slot.expr.cName;
+  const loc = locStringOf(slot.span);
+  lines.push(
+    `${indent}long _mtoc2_mask_n = ${dimsProductExpr(maskCName, slot.expr.ty)};`
+  );
+  lines.push(
+    `${indent}long _mtoc2_base_n = ${dimsProductExpr(baseCName, baseTy)};`
+  );
+  lines.push(
+    `${indent}long *_mtoc2_idx = (long *)mtoc2_alloc(sizeof(long) * (_mtoc2_mask_n > 0 ? (size_t)_mtoc2_mask_n : 1));`
+  );
+  lines.push(
+    `${indent}long _mtoc2_n = mtoc2_logical_mask_indices(${maskCName}, _mtoc2_base_n, -1, ${loc}, _mtoc2_idx);`
+  );
+  return {
+    srcIndexFor: k => `_mtoc2_idx[${k}]`,
+    cleanup: `${indent}free(_mtoc2_idx);`,
+  };
+}
+
 /** Emit a "lhs/rhs element count mismatch" runtime check for a tensor
  *  RHS in a slice store. Assumes `_mtoc2_n` is already declared as the
  *  lhs slice element count. Pushes `_mtoc2_rhs_n` and the abort branch;
@@ -1713,13 +1750,9 @@ function emitTensorRhsSizeCheck(
   lines: string[],
   indent: string
 ): void {
-  const rhsParts: string[] = [];
-  if (rhs.ty.kind === "Numeric") {
-    for (let i = 0; i < rhs.ty.dims.length; i++) {
-      rhsParts.push(`${rhs.cName}.dims[${i}]`);
-    }
-  }
-  lines.push(`${indent}long _mtoc2_rhs_n = ${rhsParts.join(" * ")};`);
+  lines.push(
+    `${indent}long _mtoc2_rhs_n = ${dimsProductExpr(rhs.cName, rhs.ty)};`
+  );
   lines.push(`${indent}if (_mtoc2_n != _mtoc2_rhs_n) {`);
   lines.push(
     `${indent}  fprintf(stderr, "mtoc2: Subscripted assignment dimension mismatch (lhs slice has %ld elements, rhs has %ld)\\n", _mtoc2_n, _mtoc2_rhs_n);`
@@ -1774,13 +1807,7 @@ function emitIndexSliceProducer(
     let resultCols: string;
     let linearCleanup: string | null = null;
     if (slot.kind === "Colon") {
-      const parts: string[] = [];
-      if (e.base.ty.kind === "Numeric") {
-        for (let i = 0; i < e.base.ty.dims.length; i++) {
-          parts.push(`${baseCName}.dims[${i}]`);
-        }
-      }
-      lines.push(`long _mtoc2_n = ${parts.join(" * ")};`);
+      lines.push(`long _mtoc2_n = ${dimsProductExpr(baseCName, e.base.ty)};`);
       count = "_mtoc2_n";
       srcIndexFor = k => k;
       resultRows = "_mtoc2_n";
@@ -1804,42 +1831,16 @@ function emitIndexSliceProducer(
       // `mtoc2_logical_mask_indices` aborts otherwise. Result shape
       // mirrors single-slot Range: row-vec base → row; col-vec base
       // → col; matrix / N-D base → column vector.
-      if (slot.expr.kind !== "Var") {
-        throw new Error(
-          "emit internal: LogicalMask slot expr must be a Var after ANF"
-        );
-      }
-      useRuntimeByName(state, "mtoc2_logical_mask_indices");
-      useRuntimeByName(state, "mtoc2_alloc");
-      const maskCName = slot.expr.cName;
-      const maskTy = slot.expr.ty;
-      const maskDimsProd: string[] = [];
-      if (maskTy.kind === "Numeric") {
-        for (let j = 0; j < maskTy.dims.length; j++) {
-          maskDimsProd.push(`${maskCName}.dims[${j}]`);
-        }
-      }
-      const maskNumelExpr =
-        maskDimsProd.length === 0 ? "0L" : maskDimsProd.join(" * ");
-      const baseDimsProd: string[] = [];
-      if (e.base.ty.kind === "Numeric") {
-        for (let j = 0; j < e.base.ty.dims.length; j++) {
-          baseDimsProd.push(`${baseCName}.dims[${j}]`);
-        }
-      }
-      const baseNumelExpr =
-        baseDimsProd.length === 0 ? "0L" : baseDimsProd.join(" * ");
-      const loc = locStringOf(slot.span);
-      lines.push(`long _mtoc2_mask_n = ${maskNumelExpr};`);
-      lines.push(`long _mtoc2_base_n = ${baseNumelExpr};`);
-      lines.push(
-        `long *_mtoc2_idx = (long *)mtoc2_alloc(sizeof(long) * (_mtoc2_mask_n > 0 ? (size_t)_mtoc2_mask_n : 1));`
-      );
-      lines.push(
-        `long _mtoc2_n = mtoc2_logical_mask_indices(${maskCName}, _mtoc2_base_n, -1, ${loc}, _mtoc2_idx);`
+      const linMask = emitLinearLogicalMaskSetup(
+        slot,
+        baseCName,
+        e.base.ty,
+        lines,
+        "",
+        state
       );
       count = "_mtoc2_n";
-      srcIndexFor = k => `_mtoc2_idx[${k}]`;
+      srcIndexFor = linMask.srcIndexFor;
       const isRowBase = e.base.ty.kind === "Numeric" && isRowVecTy(e.base.ty);
       if (isRowBase) {
         resultRows = "1";
@@ -1848,7 +1849,7 @@ function emitIndexSliceProducer(
         resultRows = "_mtoc2_n";
         resultCols = "1";
       }
-      linearCleanup = `free(_mtoc2_idx);`;
+      linearCleanup = linMask.cleanup;
     } else {
       throw new Error(
         "emit internal: single-slot Scalar IndexSlice should have routed to IndexLoad"
@@ -1952,13 +1953,9 @@ function emitIndexSliceStore(
     let dstOffsetFor: (kVar: string) => string;
     let linearStoreCleanup: string | null = null;
     if (slot.kind === "Colon") {
-      const parts: string[] = [];
-      if (s.base.ty.kind === "Numeric") {
-        for (let i = 0; i < s.base.ty.dims.length; i++) {
-          parts.push(`${baseCName}.dims[${i}]`);
-        }
-      }
-      lines.push(`${indent}  long _mtoc2_n = ${parts.join(" * ")};`);
+      lines.push(
+        `${indent}  long _mtoc2_n = ${dimsProductExpr(baseCName, s.base.ty)};`
+      );
       dstOffsetFor = k => k;
     } else if (slot.kind === "Range") {
       dstOffsetFor = emitLinearRangeSetup(
@@ -1971,42 +1968,16 @@ function emitIndexSliceStore(
     } else if (slot.kind === "LogicalMask") {
       // Single-slot linear logical-mask write: precompute the buffer of
       // 0-based truthy positions, then walk it.
-      if (slot.expr.kind !== "Var") {
-        throw new Error(
-          "emit internal: LogicalMask slot expr must be a Var after ANF"
-        );
-      }
-      useRuntimeByName(state, "mtoc2_logical_mask_indices");
-      useRuntimeByName(state, "mtoc2_alloc");
-      const maskCName = slot.expr.cName;
-      const maskTy = slot.expr.ty;
-      const maskDimsProd: string[] = [];
-      if (maskTy.kind === "Numeric") {
-        for (let j = 0; j < maskTy.dims.length; j++) {
-          maskDimsProd.push(`${maskCName}.dims[${j}]`);
-        }
-      }
-      const maskNumelExpr =
-        maskDimsProd.length === 0 ? "0L" : maskDimsProd.join(" * ");
-      const baseDimsProd: string[] = [];
-      if (s.base.ty.kind === "Numeric") {
-        for (let j = 0; j < s.base.ty.dims.length; j++) {
-          baseDimsProd.push(`${baseCName}.dims[${j}]`);
-        }
-      }
-      const baseNumelExpr =
-        baseDimsProd.length === 0 ? "0L" : baseDimsProd.join(" * ");
-      const loc = locStringOf(slot.span);
-      lines.push(`${indent}  long _mtoc2_mask_n = ${maskNumelExpr};`);
-      lines.push(`${indent}  long _mtoc2_base_n = ${baseNumelExpr};`);
-      lines.push(
-        `${indent}  long *_mtoc2_idx = (long *)mtoc2_alloc(sizeof(long) * (_mtoc2_mask_n > 0 ? (size_t)_mtoc2_mask_n : 1));`
+      const linMask = emitLinearLogicalMaskSetup(
+        slot,
+        baseCName,
+        s.base.ty,
+        lines,
+        `${indent}  `,
+        state
       );
-      lines.push(
-        `${indent}  long _mtoc2_n = mtoc2_logical_mask_indices(${maskCName}, _mtoc2_base_n, -1, ${loc}, _mtoc2_idx);`
-      );
-      dstOffsetFor = k => `_mtoc2_idx[${k}]`;
-      linearStoreCleanup = `${indent}  free(_mtoc2_idx);`;
+      dstOffsetFor = linMask.srcIndexFor;
+      linearStoreCleanup = linMask.cleanup;
     } else {
       throw new Error(
         "emit internal: single-slot Scalar IndexSliceStore should have routed to IndexStore"
