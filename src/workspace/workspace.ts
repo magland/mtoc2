@@ -33,6 +33,8 @@ import {
   registerClassDef,
   type ClassRegistration,
 } from "../lowering/classDefs.js";
+import type { Builtin } from "../lowering/builtins/registry.js";
+import { loadMtoc2UserFunction } from "./mtoc2UserFunctionLoader.js";
 
 type FuncStmt = Extract<Stmt, { type: "Function" }>;
 type ClassDefStmt = Extract<Stmt, { type: "ClassDef" }>;
@@ -69,6 +71,16 @@ export type ResolvedTarget =
        *  validates it against its own builtin registry. */
       kind: "builtin";
       name: string;
+    }
+  | {
+      /** A `.mtoc2.js` user function discovered in the workspace.
+       *  The evaluated `Builtin` lives in `Workspace.userBuiltins` —
+       *  fetch via `getUserBuiltin(name)` for both lowering and
+       *  codegen. The resolved-target carries the source-level name
+       *  (which the lowerer also uses as the emitted C call name). */
+      kind: "mtoc2UserFunction";
+      name: string;
+      file: string;
     }
   | {
       /** `Foo(args)` — class constructor call. The class is looked
@@ -114,6 +126,11 @@ export class Workspace {
    *  applying mtoc2's validation/property-type inference. */
   classes: Map<string, ClassRegistration> = new Map();
 
+  /** Workspace-scoped `Builtin` objects loaded from `.mtoc2.js` files.
+   *  Keyed by source-level function name (matches numbl's
+   *  `mtoc2UserFunctionsByName` keys). Populated lazily by `finalize`. */
+  private userBuiltins: Map<string, Builtin> = new Map();
+
   private finalized = false;
 
   constructor(mainFile: string, searchPaths: ReadonlyArray<string> = []) {
@@ -123,10 +140,20 @@ export class Workspace {
     this.ctx.registry.searchPaths = [...searchPaths];
   }
 
-  /** Register a file by name. Pre-parsed `ast` (from `parseMFile`)
-   *  is required so numbl's resolver and mtoc2's lowerer share one
-   *  cached AST per file. */
+  /** Register a file by name.
+   *
+   *  - `.m` files require a pre-parsed `ast` (from `parseMFile`) so
+   *    numbl's resolver and mtoc2's lowerer share one cached AST per
+   *    file.
+   *  - `.mtoc2.js` files carry source text only; the workspace passes
+   *    the source to numbl's registry under the function's basename
+   *    and (later) evaluates the JS via `loadMtoc2UserFunctions`. No
+   *    AST is required. */
   addFile(file: WorkspaceFile): void {
+    if (file.name.endsWith(".mtoc2.js")) {
+      this.files.set(file.name, file);
+      return;
+    }
     if (!file.ast) {
       throw new Error(
         `Workspace.addFile: '${file.name}' must be pre-parsed (ast missing)`
@@ -211,7 +238,61 @@ export class Workspace {
       }
     }
 
+    // Evaluate every `.mtoc2.js` user function numbl discovered. Each
+    // file's source runs through `new Function` once here; errors
+    // (parse, throw at top-level, missing fields, cBody-eval failure)
+    // surface as UnsupportedConstruct at workspace-init time, NOT
+    // lazily at first call site — so a broken user file fails fast
+    // with a clear file attribution rather than confusingly later.
+    //
+    // The workspace-relative path is used as the prefix-hash input so
+    // two `.mtoc2.js` files with the same function name in different
+    // directories (or different packages) get distinct C-namespace
+    // prefixes for their private helpers.
+    for (const [funcName, entry] of this.ctx.registry
+      .mtoc2UserFunctionsByName) {
+      const relPath = this.workspaceRelativePath(entry.fileName);
+      const b = loadMtoc2UserFunction(
+        entry.fileName,
+        entry.source,
+        funcName,
+        relPath
+      );
+      this.userBuiltins.set(funcName, b);
+    }
+
     this.finalized = true;
+  }
+
+  /** Compute the workspace-relative path for `absPath`. Used to hash
+   *  per-file C-namespace prefixes for `.mtoc2.js` user functions so
+   *  the same hash falls out regardless of where the project lives
+   *  on disk. Falls back to the bare basename when no search path
+   *  contains the file (web IDE, ad-hoc absolute path outside the
+   *  entry's directory). */
+  private workspaceRelativePath(absPath: string): string {
+    let best = "";
+    for (const sp of this.searchPaths) {
+      const prefix = sp.endsWith("/") ? sp : sp + "/";
+      if (absPath.startsWith(prefix) && prefix.length > best.length) {
+        best = prefix;
+      }
+    }
+    if (best) return absPath.slice(best.length);
+    // No search path matched (e.g. web IDE flat layout). Fall back to
+    // the basename — stable enough since names within a workspace
+    // are unique anyway.
+    const i = absPath.lastIndexOf("/");
+    return i >= 0 ? absPath.slice(i + 1) : absPath;
+  }
+
+  /** Look up an evaluated `.mtoc2.js` user function by source-level
+   *  name. Returns `undefined` if no such workspace user function
+   *  exists. Both the lowerer and codegen consult this — the former
+   *  to call `transfer`, the latter to call `emit`. */
+  getUserBuiltin(name: string): Builtin | undefined {
+    this.finalize();
+    return this.userBuiltins.get(name);
   }
 
   /** Pull the primary Function AST from each `@ClassName/<methodName>.m`
@@ -394,6 +475,27 @@ export class Workspace {
           `JS user functions (.numbl.js) are not yet supported by mtoc2`,
           span
         );
+      case "mtoc2UserFunction": {
+        const entry = this.ctx.registry.mtoc2UserFunctionsByName.get(
+          target.name
+        );
+        if (!entry) {
+          throw new UnsupportedConstruct(
+            `internal: resolver claimed '${target.name}' is a .mtoc2.js ` +
+              `user function but no entry is registered`,
+            span
+          );
+        }
+        // The evaluated `Builtin` is already in `userBuiltins` (loaded
+        // during `finalize`). The lowerer / codegen pull it via
+        // `getUserBuiltin`; the resolved-target carries enough for
+        // diagnostics.
+        return {
+          kind: "mtoc2UserFunction",
+          name: target.name,
+          file: entry.fileName,
+        };
+      }
       default: {
         const _exhaustive: never = target;
         void _exhaustive;
@@ -414,15 +516,24 @@ export class Workspace {
 }
 
 /** Pre-parse a list of source files into `WorkspaceFile`s. Parser
- *  errors are propagated; the caller normalizes them. */
+ *  errors are propagated; the caller normalizes them.
+ *
+ *  Files ending in `.mtoc2.js` skip MATLAB parsing — they're plain
+ *  JavaScript text that the workspace will hand to the mtoc2 user-
+ *  function loader later. Their `ast` field stays undefined. */
 export function parseFiles(
   files: ReadonlyArray<{ name: string; source: string }>
 ): WorkspaceFile[] {
-  return files.map(f => ({
-    name: f.name,
-    source: f.source,
-    ast: parseMFile(f.source, f.name),
-  }));
+  return files.map(f => {
+    if (f.name.endsWith(".mtoc2.js")) {
+      return { name: f.name, source: f.source };
+    }
+    return {
+      name: f.name,
+      source: f.source,
+      ast: parseMFile(f.source, f.name),
+    };
+  });
 }
 
 /** Adapter from mtoc2's `Type` to numbl's `ItemType`. The resolver

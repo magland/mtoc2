@@ -15,9 +15,13 @@ import {
   isOwned,
   structTypedefName,
 } from "../lowering/types.js";
-import { getBuiltin } from "../lowering/builtins/index.js";
 import { formatDouble } from "./cHelpers.js";
-import { useRuntimeByName, type RuntimeState } from "./runtime.js";
+import {
+  lookupBuiltin,
+  makeEmitUseRuntime,
+  useRuntimeByName,
+  type RuntimeState,
+} from "./runtime.js";
 import { cStringLiteral, dimsProductExpr } from "./cFormat.js";
 import { emitTensorConcat } from "./emitTensorConcat.js";
 import { emitIndexSliceProducer, emitNdScalarOffset } from "./emitIndex.js";
@@ -163,33 +167,33 @@ export function emitExpr(e: IRExpr, state: RuntimeState): string {
       // (Assign RHS, user-function call) wraps in copy where needed.
       return e.cName;
     case "Binary": {
-      const b = getBuiltin(e.builtin);
+      const b = lookupBuiltin(state, e.builtin);
       if (!b) throw new Error(`emit: builtin '${e.builtin}' not found`);
       return b.emit({
         argsC: [emitExpr(e.left, state), emitExpr(e.right, state)],
         argTypes: [e.left.ty, e.right.ty],
         nargout: 1,
-        useRuntime: name => useRuntimeByName(state, name),
+        useRuntime: makeEmitUseRuntime(state),
       });
     }
     case "Unary": {
-      const b = getBuiltin(e.builtin);
+      const b = lookupBuiltin(state, e.builtin);
       if (!b) throw new Error(`emit: builtin '${e.builtin}' not found`);
       return b.emit({
         argsC: [emitExpr(e.operand, state)],
         argTypes: [e.operand.ty],
         nargout: 1,
-        useRuntime: name => useRuntimeByName(state, name),
+        useRuntime: makeEmitUseRuntime(state),
       });
     }
     case "Call": {
-      const builtinB = getBuiltin(e.name);
+      const builtinB = lookupBuiltin(state, e.name);
       if (builtinB) {
         return builtinB.emit({
           argsC: e.args.map(a => emitExpr(a, state)),
           argTypes: e.args.map(a => a.ty),
           nargout: 1,
-          useRuntime: name => useRuntimeByName(state, name),
+          useRuntime: makeEmitUseRuntime(state),
         });
       }
       // Lowerer-synthesized bare-`toc;` print form. Not registered as

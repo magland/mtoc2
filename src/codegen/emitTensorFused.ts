@@ -32,7 +32,12 @@ import type { Assign, IRExpr } from "../lowering/ir.js";
 import type { NumericType, Type } from "../lowering/types.js";
 import { DIM_ONE, isMultiElement, isNumeric } from "../lowering/types.js";
 import { getBuiltin } from "../lowering/builtins/index.js";
-import { useRuntimeByName, type RuntimeState } from "./runtime.js";
+import {
+  lookupBuiltin,
+  makeEmitUseRuntime,
+  useRuntimeByName,
+  type RuntimeState,
+} from "./runtime.js";
 import { formatDouble } from "./cHelpers.js";
 
 /** Strip multi-element shape from a type, leaving a scalar variant
@@ -197,7 +202,7 @@ function emitPerSlotExpr(e: IRExpr, state: RuntimeState): string {
       }
       return e.cName;
     case "Binary": {
-      const b = getBuiltin(e.builtin);
+      const b = lookupBuiltin(state, e.builtin);
       if (!b || !b.elementwise) {
         throw new Error(
           `emitTensorFused internal: builtin '${e.builtin}' is not elementwise`
@@ -210,11 +215,11 @@ function emitPerSlotExpr(e: IRExpr, state: RuntimeState): string {
         ],
         argTypes: [scalarVersionOf(e.left.ty), scalarVersionOf(e.right.ty)],
         nargout: 1,
-        useRuntime: name => useRuntimeByName(state, name),
+        useRuntime: makeEmitUseRuntime(state),
       });
     }
     case "Unary": {
-      const b = getBuiltin(e.builtin);
+      const b = lookupBuiltin(state, e.builtin);
       if (!b || !b.elementwise) {
         throw new Error(
           `emitTensorFused internal: builtin '${e.builtin}' is not elementwise`
@@ -224,11 +229,11 @@ function emitPerSlotExpr(e: IRExpr, state: RuntimeState): string {
         argsC: [emitPerSlotExpr(e.operand, state)],
         argTypes: [scalarVersionOf(e.operand.ty)],
         nargout: 1,
-        useRuntime: name => useRuntimeByName(state, name),
+        useRuntime: makeEmitUseRuntime(state),
       });
     }
     case "Call": {
-      const b = getBuiltin(e.name);
+      const b = lookupBuiltin(state, e.name);
       if (!b || !b.elementwise) {
         throw new Error(
           `emitTensorFused internal: builtin '${e.name}' is not elementwise`
@@ -238,7 +243,7 @@ function emitPerSlotExpr(e: IRExpr, state: RuntimeState): string {
         argsC: e.args.map(a => emitPerSlotExpr(a, state)),
         argTypes: e.args.map(a => scalarVersionOf(a.ty)),
         nargout: 1,
-        useRuntime: name => useRuntimeByName(state, name),
+        useRuntime: makeEmitUseRuntime(state),
       });
     }
     default:

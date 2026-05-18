@@ -15,6 +15,15 @@
  */
 
 import { SNIPPETS } from "./runtime/snippets.gen.js";
+import { getBuiltin } from "../lowering/builtins/index.js";
+import type { Builtin } from "../lowering/builtins/registry.js";
+
+/** Minimal Workspace shape consulted at emit time. Importing the
+ *  concrete Workspace class would create a cycle (workspace ↔ codegen);
+ *  the structural type below captures exactly what codegen needs. */
+export interface WorkspaceLike {
+  getUserBuiltin(name: string): Builtin | undefined;
+}
 
 export interface RuntimeSnippet {
   /** Standard-library headers parsed out of the source file. */
@@ -565,7 +574,8 @@ const REGISTRY: ReadonlyMap<string, RuntimeSnippet> = new Map<
   ],
 ]);
 
-export function getRuntimeSnippet(name: string): RuntimeSnippet {
+/** Look up a snippet from the global registry. Throws if unregistered. */
+function lookupGlobalSnippet(name: string): RuntimeSnippet {
   const s = REGISTRY.get(name);
   if (!s) {
     throw new Error(`runtime snippet '${name}' not registered`);
@@ -573,7 +583,32 @@ export function getRuntimeSnippet(name: string): RuntimeSnippet {
   return s;
 }
 
+/** State-aware lookup. Consults the state's `extraSnippets` (registered
+ *  by user `.mtoc2.js` builtins via `useRuntime({name, code, ...})`)
+ *  first, then falls back to the global mtoc2 registry. */
+function lookupSnippet(state: RuntimeState, name: string): RuntimeSnippet {
+  const extra = state.extraSnippets.get(name);
+  if (extra !== undefined) return extra;
+  return lookupGlobalSnippet(name);
+}
+
+/** Public re-export for callers that don't have a `RuntimeState` (the
+ *  build-snippets script). Resolves against the global registry only. */
+export function getRuntimeSnippet(name: string): RuntimeSnippet {
+  return lookupGlobalSnippet(name);
+}
+
 // ── Activation state + topological emit ────────────────────────────────
+
+/** Inline snippet definition supplied by a user `.mtoc2.js` builtin's
+ *  `emit` via `useRuntime({...})`. Once registered on a `RuntimeState`,
+ *  subsequent activations of the same `name` are deduplicated. */
+export interface InlineSnippet {
+  name: string;
+  code: string;
+  headers?: ReadonlyArray<string>;
+  deps?: ReadonlyArray<string>;
+}
 
 export interface RuntimeState {
   /** Insertion-ordered set of activated snippet names. */
@@ -582,26 +617,87 @@ export interface RuntimeState {
    *  multi-output call sites don't collide on `_mtoc2_discard_<N>_<i>`
    *  names. Incremented each time a multi-output call is emitted. */
   multiAssignCallCounter: number;
+  /** Workspace-scoped snippets registered via the user `useRuntime`
+   *  callback. Looked up by name alongside the global registry. */
+  extraSnippets: Map<string, RuntimeSnippet>;
+  /** Workspace reference for resolving names to `.mtoc2.js` user
+   *  builtins during emit. Undefined for non-workspace-driven codegen
+   *  (the snippet-build script, vitest unit tests that bypass the
+   *  workspace). */
+  workspace?: WorkspaceLike;
 }
 
-export function newRuntimeState(): RuntimeState {
-  return { active: new Set(), multiAssignCallCounter: 0 };
+export function newRuntimeState(workspace?: WorkspaceLike): RuntimeState {
+  return {
+    active: new Set(),
+    multiAssignCallCounter: 0,
+    extraSnippets: new Map(),
+    ...(workspace !== undefined ? { workspace } : {}),
+  };
+}
+
+/** Look up a `Builtin` for an emit-time call. Consults the workspace's
+ *  `.mtoc2.js` user builtins first (so a `foo.mtoc2.js` overrides any
+ *  identically-named built-in for callers in this workspace), then
+ *  falls back to the global registry. */
+export function lookupBuiltin(
+  state: RuntimeState,
+  name: string
+): Builtin | undefined {
+  const user = state.workspace?.getUserBuiltin(name);
+  if (user !== undefined) return user;
+  return getBuiltin(name);
 }
 
 /** Activate a snippet by its registered name. Pulls its `deps` in first
  *  so they appear before it in the final emission order. Idempotent. */
 export function useRuntimeByName(state: RuntimeState, name: string): void {
   if (state.active.has(name)) return;
-  const s = getRuntimeSnippet(name);
+  const s = lookupSnippet(state, name);
   for (const d of s.deps) useRuntimeByName(state, d);
   state.active.add(name);
+}
+
+/** Register-and-activate an inline snippet supplied by a user builtin.
+ *  First call registers the snippet on the state; subsequent calls
+ *  (with the same name) are no-ops at the registration step and just
+ *  re-activate through the global pathway. */
+export function useRuntimeInline(
+  state: RuntimeState,
+  snippet: InlineSnippet
+): void {
+  if (!state.extraSnippets.has(snippet.name)) {
+    state.extraSnippets.set(snippet.name, {
+      headers: snippet.headers ?? [],
+      code: snippet.code,
+      deps: snippet.deps ?? [],
+    });
+  }
+  useRuntimeByName(state, snippet.name);
+}
+
+/** Build the `useRuntime` callback passed into a `Builtin.emit` call.
+ *  Accepts either a name (resolved against the global mtoc2 runtime
+ *  registry) or an `InlineSnippet` (registered on the current state).
+ *  Centralized here so every emit call site activates snippets
+ *  uniformly. */
+export function makeEmitUseRuntime(
+  state: RuntimeState
+): (spec: string | InlineSnippet) => void {
+  return spec => {
+    if (typeof spec === "string") {
+      useRuntimeByName(state, spec);
+    } else {
+      useRuntimeInline(state, spec);
+    }
+  };
 }
 
 /** All headers required by the activated snippets, in insertion order. */
 export function collectRuntimeHeaders(state: RuntimeState): string[] {
   const headers = new Set<string>();
   for (const name of state.active) {
-    const s = getRuntimeSnippet(name);
+    const s = lookupSnippet(state, name);
     for (const h of s.headers) headers.add(h);
   }
   return Array.from(headers);
@@ -613,7 +709,7 @@ export function renderRuntimeBodies(state: RuntimeState): string {
   if (state.active.size === 0) return "";
   const bodies: string[] = [];
   for (const name of state.active) {
-    const s = getRuntimeSnippet(name);
+    const s = lookupSnippet(state, name);
     bodies.push(s.code);
   }
   return bodies.join("\n");

@@ -66,12 +66,17 @@ export interface EmitOptions {
   includeRuntime?: boolean;
   /** Max-threads OpenMP setting. See `TranslateOptions.threads`. */
   threads?: number | "auto";
+  /** Workspace context. Threaded through `RuntimeState` so emit-time
+   *  builtin lookups consult `.mtoc2.js` user builtins via
+   *  `getUserBuiltin`. Optional — vitest unit tests that don't drive
+   *  through a workspace can omit it. */
+  workspace?: import("./runtime.js").WorkspaceLike;
 }
 
 export function emitProgram(prog: IRProgram, opts: EmitOptions = {}): string {
   const includeRuntime = opts.includeRuntime ?? true;
   const threads = opts.threads;
-  const state = newRuntimeState();
+  const state = newRuntimeState(opts.workspace);
   const userParts: string[] = [];
 
   // Struct / class / handle typedefs — one per distinct shape.

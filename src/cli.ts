@@ -105,7 +105,8 @@ function scanSiblings(dir: string, excludeAbs: string): SourceFile[] {
         }
         continue;
       }
-      if (!st.isFile() || !entry.endsWith(".m")) continue;
+      if (!st.isFile()) continue;
+      if (!entry.endsWith(".m") && !entry.endsWith(".mtoc2.js")) continue;
       if (resolve(full) === excludeAbs) continue;
       out.push({ name: full, source: readFileSync(full, "utf8") });
     }

@@ -16,9 +16,13 @@ import {
   typeToString,
   type Type,
 } from "../lowering/types.js";
-import { getBuiltin } from "../lowering/builtins/index.js";
 import { cTypeFor, formatDouble, requireOwnedHelpers } from "./cHelpers.js";
-import { useRuntimeByName, type RuntimeState } from "./runtime.js";
+import {
+  lookupBuiltin,
+  makeEmitUseRuntime,
+  useRuntimeByName,
+  type RuntimeState,
+} from "./runtime.js";
 import {
   computeFutureTouches,
   earlyFreeCandidates,
@@ -539,7 +543,7 @@ function emitStmt(
       // at the call site), matching every other `mtoc2_tensor_*`
       // helper that takes a tensor by value.
       const isBuiltinMA = s.isBuiltin === true;
-      const builtinMA = isBuiltinMA ? getBuiltin(s.name) : undefined;
+      const builtinMA = isBuiltinMA ? lookupBuiltin(state, s.name) : undefined;
       const argStrs = s.args.map((a: IRExpr) =>
         !isBuiltinMA && isOwned(a.ty)
           ? emitOwnedRhs(a, state)
@@ -577,7 +581,7 @@ function emitStmt(
           argTypes: s.args.map((a: IRExpr) => a.ty),
           nargout: s.outputs.length,
           outArgsC: outArgs,
-          useRuntime: name => useRuntimeByName(state, name),
+          useRuntime: makeEmitUseRuntime(state),
         });
         out.push(`${indent}  ${callStr};`);
       } else {

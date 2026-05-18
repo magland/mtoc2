@@ -74,9 +74,30 @@ export interface EmitArgs {
    *  framework pre-builds these as `&v`, `&i`, … so `emit` just
    *  splices them in. */
   outArgsC?: string[];
-  /** Activate a runtime C snippet by name. Idempotent; the framework
-   *  dedupes and orders deps automatically. */
-  useRuntime(name: string): void;
+  /** Activate a runtime C snippet. Accepts either:
+   *
+   *   - A `string` name resolving to a snippet registered in mtoc2's
+   *     global `runtime.ts` registry. Used by every built-in.
+   *
+   *   - An `InlineSnippet` `{ name, code, headers?, deps? }`. The
+   *     framework registers the snippet on the current translation
+   *     unit's state and activates it. Used by `.mtoc2.js` user
+   *     builtins to inject their C function bodies. Subsequent
+   *     activations of the same `name` are idempotent.
+   *
+   *  Dependency ordering and header deduplication are handled by the
+   *  framework. */
+  useRuntime(spec: string | InlineSnippet): void;
+}
+
+/** Inline-defined runtime snippet supplied by a user `.mtoc2.js`
+ *  builtin's `emit`. Re-exported from `runtime.ts` — kept here for
+ *  doc-locality with the `Builtin` contract. */
+export interface InlineSnippet {
+  name: string;
+  code: string;
+  headers?: ReadonlyArray<string>;
+  deps?: ReadonlyArray<string>;
 }
 
 // ── Registry ────────────────────────────────────────────────────────────

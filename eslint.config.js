@@ -12,6 +12,7 @@ export default defineConfig([
     "coverage",
     "tmp",
     "test_scripts",
+    "test_scripts_mtoc2_only",
     ".claude",
     "src/codegen/runtime/snippets.gen.ts",
   ]),

@@ -112,7 +112,11 @@ export function translateProject(
     const prog = lowerer.lowerProgram(activeWsFile.ast);
     if (opts.enableTempInlining) inlinePass(prog);
     return {
-      c: emitProgram(prog, { includeRuntime, threads: opts.threads }),
+      c: emitProgram(prog, {
+        includeRuntime,
+        threads: opts.threads,
+        workspace,
+      }),
     };
   } catch (e) {
     if (e instanceof UnsupportedConstruct || e instanceof TypeError) {
