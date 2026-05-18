@@ -164,11 +164,22 @@ export async function buildWasm(
     return { ok: false, kind: "translate", error: translateResult.error };
   }
   const cSource = translateResult.c!;
+  // `.mtoc2.js` user functions can ship sibling `.c` / `.h` files.
+  // The wasm-service stages each into the build tempdir under the
+  // per-owner subpath (`user_<hash>/<filename>`) and adds the `.c`
+  // entries to its emcc command. We send only the relpath + source
+  // since the service has no need for the owner-function metadata.
+  const extraSources = (translateResult.extraCSources ?? []).map(cs => ({
+    relPath: `user_${cs.ownerHash}/${cs.relPath}`,
+    source: cs.source,
+  }));
 
-  // Step 2: cache lookup. Computed on the *translated* C so changes to
-  // numbl source that compile to identical C are cache hits, and so
-  // user-source-side bugs in the cache key are impossible.
-  const cacheKey = await computeCacheKey(cSource, opts).catch(() => null);
+  // Step 2: cache lookup. Computed on the *translated* C plus the
+  // extras' content so changes to a sibling `.c` invalidate the
+  // cache even when the main translated C is identical.
+  const cacheKey = await computeCacheKey(cSource, opts, extraSources).catch(
+    () => null
+  );
   if (cacheKey) {
     const cached = await getCachedWasm(cacheKey);
     if (cached) return { ok: true, artifact: cached };
@@ -190,6 +201,7 @@ export async function buildWasm(
         fastMath: opts.fastMath ?? false,
         simd: opts.simd ?? false,
         optLevel: opts.optLevel ?? "O3",
+        ...(extraSources.length > 0 ? { extraSources } : {}),
       }),
       signal: abortSignal,
     });
