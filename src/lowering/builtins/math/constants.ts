@@ -9,19 +9,12 @@
  * `e` is intentionally absent — MATLAB and numbl don't define it
  * either (use `exp(1)`).
  *
- * The C literal is emitted at full IEEE-754 precision (17 significant
- * digits is enough to round-trip every double, but JS's
- * `Number.prototype.toString` already produces the shortest round-trip
- * form, which matches what C `strtod` parses back exactly). For Inf
- * and NaN we use C's `INFINITY` / `NAN` macros from `<math.h>` (already
- * in `BASE_HEADERS`).
- *
  * `nan` / `NaN` / `Inf` / `inf` also accept the MATLAB shape-constructor
  * form (`nan(3)`, `Inf(2, 3)`, `nan(m, n, p)`) — see `fillConstBuiltin`
- * below. `pi` / `eps` stay strictly 0-arity; passing args errors with
- * the standard arity message.
+ * below. `pi` / `eps` stay strictly 0-arity; passing args errors.
  */
-import { MTOC2_MAX_NDIM, scalarDouble } from "../../types.js";
+import { TypeError, UnsupportedConstruct } from "../../errors.js";
+import { scalarDouble } from "../../types.js";
 import type { Builtin } from "../registry.js";
 import { defineShapeConstructor } from "../shape/_construct.js";
 
@@ -33,19 +26,26 @@ function constBuiltin(
 ): Builtin {
   return {
     name,
-    arity: 0,
-    transfer() {
-      return scalarDouble(sign, value);
+    transfer(argTypes, nargout) {
+      if (argTypes.length !== 0) {
+        throw new TypeError(
+          `'${name}' expects 0 arg(s), got ${argTypes.length}`
+        );
+      }
+      if (nargout !== 1) {
+        throw new UnsupportedConstruct(
+          `'${name}' does not support multi-output (nargout=${nargout})`
+        );
+      }
+      return [scalarDouble(sign, value)];
     },
-    codegenC() {
+    emit() {
       return cLiteral;
     },
-    /** Per-slot is the same literal — no loop-dependent context. Wiring
-     *  this lets the fused emitter accept Assigns whose RHS contains
-     *  `pi`, `eps`, `Inf`, `NaN`. */
-    perSlotC() {
-      return cLiteral;
-    },
+    // Per-slot is the same literal — no loop-dependent context. Marking
+    // elementwise lets the fused emitter accept Assigns whose RHS contains
+    // `pi`, `eps`, `Inf`, `NaN`.
+    elementwise: true,
   };
 }
 
@@ -68,27 +68,27 @@ function fillConstBuiltin(
   );
   return {
     name,
-    arity: { min: 0, max: MTOC2_MAX_NDIM },
-    transfer(argTypes, span) {
-      if (argTypes.length === 0) return scalarDouble(sign, value);
-      return shape.transfer(argTypes, span);
+    transfer(argTypes, nargout) {
+      if (argTypes.length === 0) {
+        if (nargout !== 1) {
+          throw new UnsupportedConstruct(
+            `'${name}' does not support multi-output (nargout=${nargout})`
+          );
+        }
+        return [scalarDouble(sign, value)];
+      }
+      return shape.transfer(argTypes, nargout);
     },
-    codegenC(argsC, argTypes) {
-      if (argTypes.length === 0) return cLiteral;
-      return shape.codegenC(argsC, argTypes);
+    emit(args) {
+      if (args.argTypes.length === 0) return cLiteral;
+      return shape.emit(args);
     },
-    perSlotC(argsC, argTypes) {
-      // Per-slot is only invoked by the fused emitter for elementwise
-      // ops, where the constant appears as a scalar slot. The shape-
-      // constructor (>=1 args) is a tensor producer — A-normalization
-      // hoists it out before the fused emitter sees the surrounding
-      // expression, so this branch only runs with `argTypes.length === 0`
-      // in practice. Forward `cLiteral` unconditionally.
-      void argsC;
-      void argTypes;
-      return cLiteral;
-    },
-    runtimeDeps: shape.runtimeDeps,
+    // Per-slot is only invoked by the fused emitter for elementwise ops,
+    // where the constant appears as a scalar slot. The shape-constructor
+    // (>=1 args) is a tensor producer — A-normalization hoists it out
+    // before the fused emitter sees the surrounding expression, so the
+    // 0-arg branch is the only one fusion ever asks for.
+    elementwise: true,
   };
 }
 

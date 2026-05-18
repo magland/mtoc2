@@ -1,4 +1,4 @@
-import { TypeError } from "../../errors.js";
+import { TypeError, UnsupportedConstruct } from "../../errors.js";
 import {
   scalarDouble,
   shapeNumel,
@@ -10,26 +10,31 @@ import type { Builtin } from "../registry.js";
 
 export const numel: Builtin = {
   name: "numel",
-  arity: 1,
-  transfer(argTypes, span) {
+  transfer(argTypes, nargout) {
+    if (argTypes.length !== 1) {
+      throw new TypeError(`'numel' expects 1 arg(s), got ${argTypes.length}`);
+    }
+    if (nargout !== 1) {
+      throw new UnsupportedConstruct(
+        `'numel' does not support multi-output (nargout=${nargout})`
+      );
+    }
     const t = argTypes[0];
     if (!isNumeric(t)) {
-      throw new TypeError(`'numel' arg must be numeric (got ${t.kind})`, span);
+      throw new TypeError(`'numel' arg must be numeric (got ${t.kind})`);
     }
     if (t.shape === undefined) {
-      // Shape unknown at compile time (e.g. a tensor stored on a
-      // struct/class field). The runtime helper handles it.
-      return scalarDouble("nonneg");
+      return [scalarDouble("nonneg")];
     }
     const v = shapeNumel(t.shape);
-    return scalarDouble(signFromNumber(v), v);
+    return [scalarDouble(signFromNumber(v), v)];
   },
-  codegenC(argsC, argTypes) {
+  emit({ argsC, argTypes, useRuntime }) {
+    useRuntime("mtoc2_numel");
     const t = argTypes[0];
     if (isNumeric(t) && isScalar(t)) {
       return `1.0`;
     }
     return `mtoc2_numel(${argsC[0]})`;
   },
-  runtimeDeps: ["mtoc2_numel"],
 };

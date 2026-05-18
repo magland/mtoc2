@@ -27,12 +27,7 @@ import {
 import { irFuncDocComment, irStmtHeader } from "./prettyIR.js";
 import { emitTensorAssignFused, isFusableAssign } from "./emitTensorFused.js";
 import { emitIndexSliceStore, emitNdScalarOffset } from "./emitIndex.js";
-import {
-  activateRuntimeDeps,
-  emitCondToBoolExpr,
-  emitExpr,
-  emitOwnedRhs,
-} from "./emitExpr.js";
+import { emitCondToBoolExpr, emitExpr, emitOwnedRhs } from "./emitExpr.js";
 import { activateOwnedRuntime, activatedOwnedHelpers } from "./emit.js";
 
 /** Default initializer for a freshly-declared non-owned local. Owned
@@ -531,28 +526,20 @@ function emitStmt(
       return lines.join("\n");
     }
     case "MultiAssignCall": {
-      // N≥2-output user-function call OR builtin with a `multiOutput`
-      // hook (e.g. `[v, i] = sort(a)`). Named slots' `binding.cName` is
-      // pre-declared at function top by `collectLocals`. Ignored slots
+      // N≥2-output user-function call OR multi-output builtin (e.g.
+      // `[v, i] = sort(a)`). Named slots' `binding.cName` is pre-
+      // declared at function top by `collectLocals`; ignored slots
       // become `_mtoc2_discard_<callIdx>_<i>` locals scoped to the
       // call's `{}` block.
       //
-      // Owned arg-copy uses the same `emitOwnedRhs` wrapping as a
-      // regular `Call` so the user-function callee owns its arg.
-      // Builtin multi-output helpers follow the single-output builtin
-      // convention instead: they read the arg without taking ownership
-      // (no `_copy` at the call site), matching every other
-      // `mtoc2_tensor_*` helper that takes a tensor by value.
-      //
-      // Builtin path: activate the registry-declared runtime deps so the
-      // `mtoc2_<name>_<nargout>` helper snippet lands in the emitted C.
-      // User-function path: the spec is already emitted elsewhere, no
-      // runtime dep activation needed.
-      const builtinMA = getBuiltin(s.name);
-      const isBuiltinMA = builtinMA?.multiOutput !== undefined;
-      if (isBuiltinMA) {
-        activateRuntimeDeps(builtinMA!.runtimeDeps, state);
-      }
+      // User-function path: callee owns its args, so owned-typed args
+      // wrap in `emitOwnedRhs` (the standard `_copy` per kind).
+      // Builtin path: follows the single-output builtin convention —
+      // the helper reads the arg without taking ownership (no `_copy`
+      // at the call site), matching every other `mtoc2_tensor_*`
+      // helper that takes a tensor by value.
+      const isBuiltinMA = s.isBuiltin === true;
+      const builtinMA = isBuiltinMA ? getBuiltin(s.name) : undefined;
       const argStrs = s.args.map((a: IRExpr) =>
         !isBuiltinMA && isOwned(a.ty)
           ? emitOwnedRhs(a, state)
@@ -582,8 +569,21 @@ function emitStmt(
           outArgs.push(`&${slot.binding.cName}`);
         }
       }
-      const callArgs = [...argStrs, ...outArgs].join(", ");
-      out.push(`${indent}  ${s.cName}(${callArgs});`);
+      if (builtinMA !== undefined) {
+        // Builtin path: builtin's `emit` returns the full call string
+        // including out-pointer args.
+        const callStr = builtinMA.emit({
+          argsC: argStrs,
+          argTypes: s.args.map((a: IRExpr) => a.ty),
+          nargout: s.outputs.length,
+          outArgsC: outArgs,
+          useRuntime: name => useRuntimeByName(state, name),
+        });
+        out.push(`${indent}  ${callStr};`);
+      } else {
+        const callArgs = [...argStrs, ...outArgs].join(", ");
+        out.push(`${indent}  ${s.cName}(${callArgs});`);
+      }
       // Release any owned discard temps before closing the block.
       // (Unreachable in v1; for symmetry with the future extension.)
       for (let i = 0; i < s.outputs.length; i++) {

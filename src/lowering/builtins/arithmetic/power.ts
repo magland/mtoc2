@@ -27,7 +27,7 @@
  * "complex-result" case numbl handles but mtoc2 v1 doesn't.
  */
 
-import { UnsupportedConstruct } from "../../errors.js";
+import { TypeError, UnsupportedConstruct } from "../../errors.js";
 import {
   type NumericType,
   type Sign,
@@ -101,8 +101,7 @@ function powerSign(a: NumericType, b: NumericType): Sign {
 
 /** Check the base/exponent pair for a possible complex-result case
  *  that mtoc2 v1 doesn't support. Returns null when accepted; an
- *  error message when rejected. Span attribution is the caller's
- *  responsibility. */
+ *  error message when rejected. */
 function checkDomain(a: NumericType, b: NumericType): string | null {
   // Easy accept: base is statically nonneg.
   if (signIsNonneg(a.sign)) return null;
@@ -158,39 +157,45 @@ function cpowFold(
 
 export const power: Builtin = {
   name: "power",
-  arity: 2,
-  transfer(argTypes, span) {
-    requireRealOrComplex(argTypes[0], `'.^' arg 1`, span);
-    requireRealOrComplex(argTypes[1], `'.^' arg 2`, span);
+  transfer(argTypes, nargout) {
+    if (argTypes.length !== 2) {
+      throw new TypeError(`'power' expects 2 arg(s), got ${argTypes.length}`);
+    }
+    if (nargout !== 1) {
+      throw new UnsupportedConstruct(
+        `'power' does not support multi-output (nargout=${nargout})`
+      );
+    }
+    requireRealOrComplex(argTypes[0], `'.^' arg 1`);
+    requireRealOrComplex(argTypes[1], `'.^' arg 2`);
     const a0 = argTypes[0] as NumericType;
     const b0 = argTypes[1] as NumericType;
     // Complex contamination — scalar path only (Phase 1).
     if (a0.isComplex || b0.isComplex) {
       if (isMultiElement(a0) || isMultiElement(b0)) {
         throw new UnsupportedConstruct(
-          `'.^' on a complex tensor is not yet supported`,
-          span
+          `'.^' on a complex tensor is not yet supported`
         );
       }
       const ax = exactScalarAsComplex(a0);
       const bx = exactScalarAsComplex(b0);
       if (ax !== undefined && bx !== undefined) {
         const v = cpowFold(ax, bx);
-        if (v !== undefined) return scalarComplex(v);
+        if (v !== undefined) return [scalarComplex(v)];
       }
-      return scalarComplex();
+      return [scalarComplex()];
     }
     // Real path — both args must be real-double after the
     // contamination check above.
-    requireRealDouble(argTypes[0], `'.^' arg 1`, span);
-    requireRealDouble(argTypes[1], `'.^' arg 2`, span);
+    requireRealDouble(argTypes[0], `'.^' arg 1`);
+    requireRealDouble(argTypes[1], `'.^' arg 2`);
     const a = argTypes[0] as NumericType;
     const b = argTypes[1] as NumericType;
 
     const reject = checkDomain(a, b);
-    if (reject !== null) throw new UnsupportedConstruct(reject, span);
+    if (reject !== null) throw new UnsupportedConstruct(reject);
 
-    const resolved = elemwiseResultShape(a, b, ".^", span);
+    const resolved = elemwiseResultShape(a, b, ".^");
 
     if (resolved === null) {
       // Pure scalar OP scalar.
@@ -198,9 +203,9 @@ export const power: Builtin = {
       const bx = exactDouble(b);
       if (ax !== undefined && bx !== undefined) {
         const v = Math.pow(ax, bx);
-        if (Number.isFinite(v)) return scalarDouble(signFromNumber(v), v);
+        if (Number.isFinite(v)) return [scalarDouble(signFromNumber(v), v)];
       }
-      return scalarDouble(powerSign(a, b));
+      return [scalarDouble(powerSign(a, b))];
     }
 
     // Tensor result — try exact-fold when the output shape is fully
@@ -219,22 +224,24 @@ export const power: Builtin = {
       const data = broadcastFoldExact(a, b, outTy.shape, Math.pow);
       // Drop the fold if any element went non-finite — defer to runtime
       // (which may surface a clearer NaN/Inf at the right span).
-      if (data.every(Number.isFinite)) return tensorDouble(outTy.shape, data);
+      if (data.every(Number.isFinite)) return [tensorDouble(outTy.shape, data)];
     }
     outTy.sign = powerSign(a, b);
-    return outTy;
+    return [outTy];
   },
-  codegenC(argsC, argTypes) {
+  emit({ argsC, argTypes, useRuntime }) {
     const aN = argTypes[0] as NumericType;
     const bN = argTypes[1] as NumericType;
     const aMulti = isMultiElement(aN);
     const bMulti = isMultiElement(bN);
     if (!aMulti && !bMulti) {
       if (aN.isComplex || bN.isComplex) {
+        useRuntime("mtoc2_cscalar");
         return `mtoc2_cpow(${argsC[0]}, ${argsC[1]})`;
       }
       return `pow(${argsC[0]}, ${argsC[1]})`;
     }
+    useRuntime("mtoc2_tensor_elemwise_real_fn");
     if (aMulti && bMulti) {
       return needsBroadcast(aN, bN)
         ? `mtoc2_tensor_power_bcast_tt(${argsC[0]}, ${argsC[1]})`
@@ -246,17 +253,5 @@ export const power: Builtin = {
     // scalar .^ tensor — not commutative.
     return `mtoc2_tensor_power_st(${argsC[0]}, ${argsC[1]})`;
   },
-  /** Per-slot template for the elementwise-fused emitter. Mirrors the
-   *  scalar codegen path's `pow(a, b)` / `mtoc2_cpow(a, b)` choice.
-   *  The fused emitter only calls this with same-shape numeric
-   *  operands (broadcast paths fall back to the helper). */
-  perSlotC(argsC, argTypes) {
-    const aN = argTypes[0] as NumericType;
-    const bN = argTypes[1] as NumericType;
-    if (aN.isComplex || bN.isComplex) {
-      return `mtoc2_cpow(${argsC[0]}, ${argsC[1]})`;
-    }
-    return `pow(${argsC[0]}, ${argsC[1]})`;
-  },
-  runtimeDeps: ["mtoc2_tensor_elemwise_real_fn", "mtoc2_cscalar"],
+  elementwise: true,
 };

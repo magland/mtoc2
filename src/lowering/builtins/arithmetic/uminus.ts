@@ -12,6 +12,7 @@ import {
   isNumeric,
   isScalar,
 } from "../../types.js";
+import { TypeError, UnsupportedConstruct } from "../../errors.js";
 import type { Builtin } from "../registry.js";
 import {
   requireRealOrComplex,
@@ -23,17 +24,24 @@ import {
 
 export const uminus: Builtin = {
   name: "uminus",
-  arity: 1,
-  transfer(argTypes, span) {
-    requireRealOrComplex(argTypes[0], `'uminus' arg`, span);
+  transfer(argTypes, nargout) {
+    if (argTypes.length !== 1) {
+      throw new TypeError(`'uminus' expects 1 arg(s), got ${argTypes.length}`);
+    }
+    if (nargout !== 1) {
+      throw new UnsupportedConstruct(
+        `'uminus' does not support multi-output (nargout=${nargout})`
+      );
+    }
+    requireRealOrComplex(argTypes[0], `'uminus' arg`);
     const a = argTypes[0] as NumericType;
     if (a.isComplex) {
       if (!isMultiElement(a)) {
         const cx = exactComplex(a);
         if (cx !== undefined) {
-          return scalarComplex({ re: -cx.re, im: -cx.im });
+          return [scalarComplex({ re: -cx.re, im: -cx.im })];
         }
-        return scalarComplex();
+        return [scalarComplex()];
       }
       // Complex tensor: fold when both lanes are exact, else runtime.
       const cx = exactComplexArray(a);
@@ -44,17 +52,17 @@ export const uminus: Builtin = {
           re[i] = -cx.re[i];
           im[i] = -cx.im[i];
         }
-        return tensorComplex(a.shape, { re, im });
+        return [tensorComplex(a.shape, { re, im })];
       }
-      return tensorComplexFromDims(a.dims.slice());
+      return [tensorComplexFromDims(a.dims.slice())];
     }
     if (isScalar(a)) {
       const ax = exactDouble(a);
       if (ax !== undefined) {
         const v = -ax;
-        return scalarDouble(signFromNumber(v), v);
+        return [scalarDouble(signFromNumber(v), v)];
       }
-      return scalarDouble(flipSign(a.sign));
+      return [scalarDouble(flipSign(a.sign))];
     }
     // Tensor uminus: fold when exact, else runtime. The C helper
     // iterates `n = prod(dims)` regardless of whether shape is known
@@ -64,33 +72,28 @@ export const uminus: Builtin = {
     if (arr !== undefined && a.shape !== undefined) {
       const out = new Float64Array(arr.length);
       for (let i = 0; i < arr.length; i++) out[i] = -arr[i];
-      return tensorDouble(a.shape, out);
+      return [tensorDouble(a.shape, out)];
     }
     const out = tensorDoubleFromDims(a.dims.slice());
     out.sign = flipSign(a.sign);
-    return out;
+    return [out];
   },
-  codegenC(argsC, argTypes) {
+  emit({ argsC, argTypes, useRuntime }) {
     const ty = argTypes[0] as NumericType;
     if (isMultiElement(ty)) {
       if (ty.isComplex) {
+        useRuntime("mtoc2_tensor_elemwise_complex");
+        useRuntime("mtoc2_cscalar");
         return `mtoc2_tensor_uminus_complex(${argsC[0]})`;
       }
+      useRuntime("mtoc2_tensor_elemwise_real");
       return `mtoc2_tensor_uminus(${argsC[0]})`;
     }
     if (isNumeric(ty) && ty.isComplex) {
+      useRuntime("mtoc2_cscalar");
       return `mtoc2_cneg(${argsC[0]})`;
     }
     return `(-${argsC[0]})`;
   },
-  perSlotC(argsC, argTypes) {
-    const ty = argTypes[0] as NumericType;
-    if (ty.isComplex) return `mtoc2_cneg(${argsC[0]})`;
-    return `(-${argsC[0]})`;
-  },
-  runtimeDeps: [
-    "mtoc2_tensor_elemwise_real",
-    "mtoc2_tensor_elemwise_complex",
-    "mtoc2_cscalar",
-  ],
+  elementwise: true,
 };

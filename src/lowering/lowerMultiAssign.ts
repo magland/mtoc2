@@ -13,7 +13,7 @@
  */
 
 import type { Expr, Span, Stmt, LValue } from "../parser/index.js";
-import { TypeError, UnsupportedConstruct } from "./errors.js";
+import { UnsupportedConstruct } from "./errors.js";
 import type { IRExpr, IRStmt } from "./ir.js";
 import {
   type Type,
@@ -22,8 +22,8 @@ import {
   typeToString,
 } from "./types.js";
 import { getBuiltin } from "./builtins/index.js";
-import { arityAccepts, arityDescribe } from "./builtins/registry.js";
 import type { Builtin } from "./builtins/registry.js";
+import { withSpan } from "./errors.js";
 import type { Lowerer } from "./lower.js";
 import { tryExtractDottedName } from "./lower.js";
 import { specializeUserFunction } from "./specialize.js";
@@ -123,21 +123,19 @@ export function lowerMultiAssign(
   );
 
   // Builtin multi-output path. A builtin opts into `[...] = f(x)` by
-  // populating the `multiOutput` field on its registry entry. Numbl's
-  // resolver returns `kind: "builtin"` for the call; we re-fetch from
-  // mtoc2's own registry (the source of truth for `multiOutput`) and
-  // route through the same `MultiAssignCall` IR shape user functions
-  // use. Single-output `b = f(x)` still flows through `lowerFuncCall`
-  // → `transfer`/`codegenC` — this hook only fires for true multi-
-  // output uses.
+  // accepting an `nargout > 1` in its `transfer` hook. Numbl's
+  // resolver returns `kind: "builtin"`; we re-fetch from mtoc2's own
+  // registry and route through the same `MultiAssignCall` IR shape
+  // user functions use. Single-output `b = f(x)` still flows through
+  // `lowerFuncCall` → `transfer`/`emit` — this hook only fires for
+  // true multi-output uses.
   if (target?.kind === "builtin") {
     const builtin = getBuiltin(callName);
-    if (builtin?.multiOutput !== undefined) {
+    if (builtin !== undefined) {
       return buildBuiltinMultiAssign.call(
         this,
         callName,
         builtin,
-        builtin.multiOutput,
         anfArgs,
         argTypes,
         argHoists,
@@ -315,45 +313,30 @@ export function buildMultiOutputSlots(
 }
 
 /** Routes a `[v, i, ...] = builtin(args)` call through
- *  `MultiAssignCall`, using the builtin's `multiOutput` hook for the
- *  output-type tuple and the C helper name. Reuses the same
- *  output-slot bookkeeping as the user-function path (named slots go
- *  through `recordAssignment` for env / cName setup; `~` /
- *  trailing-omitted slots become discard temps in the emitter). */
+ *  `MultiAssignCall`. The builtin's `transfer(argTypes, nargout)`
+ *  validates arity / arg types / output count and returns one type
+ *  per requested output; the builtin's `emit` hook (called at codegen
+ *  time) produces the full C call string including out-pointer args.
+ *  Reuses the same output-slot bookkeeping as the user-function path
+ *  (named slots go through `recordAssignment` for env / cName setup;
+ *  `~` / trailing-omitted slots become discard temps in the
+ *  emitter). */
 function buildBuiltinMultiAssign(
   this: Lowerer,
   callName: string,
   builtin: Builtin,
-  multiOutput: NonNullable<Builtin["multiOutput"]>,
   anfArgs: IRExpr[],
   argTypes: Type[],
   argHoists: IRStmt[],
   s: Extract<Stmt, { type: "MultiAssign" }>
 ): IRStmt | IRStmt[] {
-  if (!arityAccepts(builtin.arity, anfArgs.length)) {
-    throw new TypeError(
-      `'${callName}' expects ${arityDescribe(builtin.arity)} arg(s), ` +
-        `got ${anfArgs.length}`,
-      s.span
-    );
-  }
   const nargout = s.lvalues.length;
-  if (nargout < multiOutput.minNargout || nargout > multiOutput.maxNargout) {
-    throw new UnsupportedConstruct(
-      `'${callName}' supports ${multiOutput.minNargout}..` +
-        `${multiOutput.maxNargout} output(s) in '[...] = ${callName}(...)' ` +
-        `form; got ${nargout}`,
-      s.span
-    );
-  }
-  const outTys = multiOutput.transfer(argTypes, nargout, s.span);
+  const outTys = withSpan(s.span, () => builtin.transfer(argTypes, nargout));
   if (outTys.length !== nargout) {
     // Builtin author contract violation. Surfaces with the call-site
-    // span so the bad builtin name + invocation are easy to locate;
-    // the message text alone is enough to point a builtin author at
-    // the buggy `multiOutput.transfer`.
+    // span so the bad builtin name + invocation are easy to locate.
     throw new UnsupportedConstruct(
-      `internal: builtin '${callName}' multiOutput.transfer returned ` +
+      `internal: builtin '${callName}' transfer returned ` +
         `${outTys.length} type(s) for nargout=${nargout}`,
       s.span
     );
@@ -366,11 +349,14 @@ function buildBuiltinMultiAssign(
     i => `output slot ${i + 1}`,
     s.span
   );
-  const cName = multiOutput.cName(argTypes, nargout);
   const mac: IRStmt = {
     kind: "MultiAssignCall",
-    cName,
+    // cName is unused for builtin MAC at codegen — the builtin's emit
+    // hook produces the full call string. Keep the source-level name
+    // here for prettyIR / debugging.
+    cName: callName,
     name: callName,
+    isBuiltin: true,
     args: anfArgs,
     outputs,
     span: s.span,

@@ -8,11 +8,9 @@ import {
   type NumericType,
   type Sign,
 } from "../../types.js";
-import { type Builtin, getBuiltin } from "../registry.js";
-import {
-  exactRealArray,
-  requireRealOrComplex,
-} from "../_shared.js";
+import type { Builtin } from "../registry.js";
+import { times } from "./times.js";
+import { exactRealArray, requireRealOrComplex } from "../_shared.js";
 
 /** Result-sign rule for matrix multiplication. Each output element is
  *  a sum of products; we only assert sign when both operands are
@@ -62,23 +60,29 @@ function mtimesExact(
 // when both args are tensors.
 export const mtimes: Builtin = {
   name: "mtimes",
-  arity: 2,
-  transfer(argTypes, span) {
-    requireRealOrComplex(argTypes[0], `'mtimes' arg 1`, span);
-    requireRealOrComplex(argTypes[1], `'mtimes' arg 2`, span);
+  transfer(argTypes, nargout) {
+    if (argTypes.length !== 2) {
+      throw new TypeError(`'mtimes' expects 2 arg(s), got ${argTypes.length}`);
+    }
+    requireRealOrComplex(argTypes[0], `'mtimes' arg 1`);
+    requireRealOrComplex(argTypes[1], `'mtimes' arg 2`);
     const a = argTypes[0] as NumericType;
     const b = argTypes[1] as NumericType;
     if (!isMultiElement(a) || !isMultiElement(b)) {
       // Scalar mtimes delegates to elementwise times — identical fold
       // and codegen. The `times` transfer handles complex contamination.
-      return getBuiltin("times")!.transfer(argTypes, span);
+      return times.transfer(argTypes, nargout);
+    }
+    if (nargout !== 1) {
+      throw new UnsupportedConstruct(
+        `'mtimes' does not support multi-output (nargout=${nargout})`
+      );
     }
     // Tensor mtimes: real and complex both supported. Complex result
     // when either operand is complex.
     if (a.elem !== "double" || b.elem !== "double") {
       throw new TypeError(
-        `'mtimes' tensor operands must be double (got ${a.elem}, ${b.elem})`,
-        span
+        `'mtimes' tensor operands must be double (got ${a.elem}, ${b.elem})`
       );
     }
     const resultIsComplex = a.isComplex || b.isComplex;
@@ -87,21 +91,18 @@ export const mtimes: Builtin = {
     if (a.shape !== undefined && a.shape.length !== 2) {
       throw new UnsupportedConstruct(
         `'mtimes' on a ${a.shape.length}-D tensor is not supported ` +
-          `(MATLAB defines matrix multiplication only on 2-D operands)`,
-        span
+          `(MATLAB defines matrix multiplication only on 2-D operands)`
       );
     }
     if (b.shape !== undefined && b.shape.length !== 2) {
       throw new UnsupportedConstruct(
         `'mtimes' on a ${b.shape.length}-D tensor is not supported ` +
-          `(MATLAB defines matrix multiplication only on 2-D operands)`,
-        span
+          `(MATLAB defines matrix multiplication only on 2-D operands)`
       );
     }
     if (a.dims.length !== 2 || b.dims.length !== 2) {
       throw new UnsupportedConstruct(
-        `'mtimes' requires 2-D tensor operands (got ${a.dims.length}-D, ${b.dims.length}-D)`,
-        span
+        `'mtimes' requires 2-D tensor operands (got ${a.dims.length}-D, ${b.dims.length}-D)`
       );
     }
     // Read dims directly (not `shape`) so partially-known cases —
@@ -113,8 +114,7 @@ export const mtimes: Builtin = {
     const bCols = b.dims[1].kind === "exact" ? b.dims[1].value : undefined;
     if (aCols !== undefined && bRows !== undefined && aCols !== bRows) {
       throw new TypeError(
-        `'mtimes' inner-dim mismatch: ${aRows ?? "?"}×${aCols} * ${bRows}×${bCols ?? "?"}`,
-        span
+        `'mtimes' inner-dim mismatch: ${aRows ?? "?"}×${aCols} * ${bRows}×${bCols ?? "?"}`
       );
     }
     // Result shape: outer dims of A and B.
@@ -138,44 +138,57 @@ export const mtimes: Builtin = {
         ) {
           const out = mtimesExact(ad, m, k, bd, n);
           const t = tensorDouble([m, n], out);
-          return { ...t, sign: signFromExactArray(out) };
+          return [{ ...t, sign: signFromExactArray(out) }];
         }
         const t = tensorDouble([m, n]);
-        return { ...t, sign };
+        return [{ ...t, sign }];
       }
       // Complex result — no fold, no sign refinement.
-      return tensorComplexFromDims([
-        { kind: "exact", value: m },
-        { kind: "exact", value: n },
-      ]);
+      return [
+        tensorComplexFromDims([
+          { kind: "exact", value: m },
+          { kind: "exact", value: n },
+        ]),
+      ];
     }
     // Partially-unknown shape (e.g. one axis is `unknown` due to a
     // runtime-only length): emit the helper call; shape stays as
     // unknown on the relevant axis.
     if (resultIsComplex) {
-      return tensorComplexFromDims([
-        m !== undefined ? { kind: "exact", value: m } : { kind: "unknown" },
-        n !== undefined ? { kind: "exact", value: n } : { kind: "unknown" },
-      ]);
+      return [
+        tensorComplexFromDims([
+          m !== undefined ? { kind: "exact", value: m } : { kind: "unknown" },
+          n !== undefined ? { kind: "exact", value: n } : { kind: "unknown" },
+        ]),
+      ];
     }
-    return {
-      kind: "Numeric",
-      elem: "double",
-      isComplex: false,
-      dims: [
-        m !== undefined ? { kind: "exact", value: m } : { kind: "unknown" },
-        n !== undefined ? { kind: "exact", value: n } : { kind: "unknown" },
-      ],
-      sign,
-    };
+    return [
+      {
+        kind: "Numeric",
+        elem: "double",
+        isComplex: false,
+        dims: [
+          m !== undefined ? { kind: "exact", value: m } : { kind: "unknown" },
+          n !== undefined ? { kind: "exact", value: n } : { kind: "unknown" },
+        ],
+        sign,
+      },
+    ];
   },
-  codegenC(argsC, argTypes) {
+  emit(args) {
+    const { argsC, argTypes, useRuntime } = args;
     if (!isMultiElement(argTypes[0]) || !isMultiElement(argTypes[1])) {
-      return getBuiltin("times")!.codegenC(argsC, argTypes);
+      return times.emit(args);
     }
     const a = argTypes[0] as NumericType;
     const b = argTypes[1] as NumericType;
     const isComplex = a.isComplex || b.isComplex;
+    if (isComplex) {
+      useRuntime("mtoc2_tensor_mtimes_complex");
+      useRuntime("mtoc2_cscalar");
+    } else {
+      useRuntime("mtoc2_tensor_mtimes_real");
+    }
     // 1×k * k×1 → 1×1 scalar. Transfer returns a scalar type for this
     // shape; consumers expect a `double` (or `double _Complex`) C
     // expression. The scalar helper does the inner product without
@@ -189,18 +202,10 @@ export const mtimes: Builtin = {
       ? `mtoc2_tensor_mtimes_complex(${argsC[0]}, ${argsC[1]})`
       : `mtoc2_tensor_mtimes_real(${argsC[0]}, ${argsC[1]})`;
   },
-  /** Elementwise per-slot template — only valid when at least one
-   *  operand is scalar (tensor * tensor is matrix product). The
-   *  `isPureElementwiseExpr` predicate in
-   *  `src/codegen/emitTensorFused.ts` rejects the both-tensor case
-   *  so this hook is only consulted on the elementwise call. */
-  perSlotC(argsC, argTypes) {
-    return getBuiltin("times")!.perSlotC!(argsC, argTypes);
-  },
-  runtimeDeps: [
-    "mtoc2_tensor_elemwise_real",
-    "mtoc2_tensor_mtimes_real",
-    "mtoc2_tensor_mtimes_complex",
-    "mtoc2_cscalar",
-  ],
+  // Elementwise per-slot template — only valid when at least one
+  // operand is scalar (tensor * tensor is matrix product). The
+  // `isPureElementwiseExpr` predicate in
+  // `src/codegen/emitTensorFused.ts` rejects the both-tensor case
+  // so this branch only fires on the elementwise call.
+  elementwise: true,
 };

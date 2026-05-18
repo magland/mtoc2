@@ -1,4 +1,4 @@
-import { TypeError } from "../../errors.js";
+import { TypeError, UnsupportedConstruct } from "../../errors.js";
 import {
   isScalarRealNumeric,
   isNumeric,
@@ -10,50 +10,51 @@ import type { Builtin } from "../registry.js";
 
 export const disp: Builtin = {
   name: "disp",
-  arity: 1,
-  transfer(argTypes, span) {
+  transfer(argTypes, nargout) {
+    if (argTypes.length !== 1) {
+      throw new TypeError(`'disp' expects 1 arg(s), got ${argTypes.length}`);
+    }
+    if (nargout !== 1) {
+      throw new UnsupportedConstruct(
+        `'disp' does not support multi-output (nargout=${nargout})`
+      );
+    }
     const t = argTypes[0];
     if (isScalarRealNumeric(t)) {
-      // Scalar real (double or logical) — runtime call path.
-      return { kind: "Unknown" };
+      return [{ kind: "Unknown" }];
     }
     if (isNumeric(t) && isScalar(t) && t.isComplex && t.elem === "double") {
-      // Scalar complex — routes through mtoc2_disp_complex.
-      return { kind: "Unknown" };
+      return [{ kind: "Unknown" }];
     }
     if (
       isNumeric(t) &&
       !t.isComplex &&
       (t.elem === "double" || t.elem === "logical")
     ) {
-      // Either an exact tensor (compile-time format) or a runtime
-      // tensor with statically-known shape (mtoc2_disp_tensor call).
-      return { kind: "Unknown" };
+      return [{ kind: "Unknown" }];
     }
     if (isNumeric(t) && t.isComplex && !isScalar(t) && t.elem === "double") {
-      // Complex multi-element tensor — phase 2 disp helper.
-      return { kind: "Unknown" };
+      return [{ kind: "Unknown" }];
     }
     if (isText(t)) {
-      // Char ('foo') or String ("foo") — bridged to the runtime
-      // text-view helper via the kind's `_text_from_*` adapter.
-      return { kind: "Unknown" };
+      return [{ kind: "Unknown" }];
     }
     if (t.kind === "Struct") {
-      // Per-shape `<typedef>_disp` is program-emitted; routing
-      // happens in codegenC.
-      return { kind: "Unknown" };
+      return [{ kind: "Unknown" }];
     }
     throw new TypeError(
       `'disp' arg must be a scalar numeric, a real or complex tensor, text, or a struct ` +
-        `(got ${t.kind})`,
-      span
+        `(got ${t.kind})`
     );
   },
-  codegenC(argsC, argTypes) {
+  emit({ argsC, argTypes, useRuntime }) {
+    useRuntime("mtoc2_disp_double");
+    useRuntime("mtoc2_disp_tensor");
+    useRuntime("mtoc2_disp_text");
+    useRuntime("mtoc2_disp_complex");
+    useRuntime("mtoc2_disp_tensor_complex");
     const t = argTypes[0];
     if (t.kind === "Struct") {
-      // Program-emitted helper; no runtime-snippet dep needed.
       return `${structTypedefName(t)}_disp(${argsC[0]})`;
     }
     if (t.kind === "String") {
@@ -69,20 +70,8 @@ export const disp: Builtin = {
       return `mtoc2_disp_tensor_complex(${argsC[0]})`;
     }
     if (isNumeric(t) && !isScalarRealNumeric(t)) {
-      // Runtime tensor — call the runtime disp helper. The arg is
-      // passed by value (struct copy of the pointers); disp_tensor
-      // reads but doesn't take ownership. Lifetime stays with the
-      // caller's local.
       return `mtoc2_disp_tensor(${argsC[0]})`;
     }
-    // Scalar runtime path.
     return `mtoc2_disp_double(${argsC[0]})`;
   },
-  runtimeDeps: [
-    "mtoc2_disp_double",
-    "mtoc2_disp_tensor",
-    "mtoc2_disp_text",
-    "mtoc2_disp_complex",
-    "mtoc2_disp_tensor_complex",
-  ],
 };

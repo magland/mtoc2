@@ -11,44 +11,53 @@ import {
   isMultiElement,
   signFromNumber,
 } from "../../types.js";
+import { TypeError, UnsupportedConstruct } from "../../errors.js";
 import type { Builtin } from "../registry.js";
 import { requireRealOrComplex, exactComplex } from "../_shared.js";
 
 export const imag: Builtin = {
   name: "imag",
-  arity: 1,
-  transfer(argTypes, span) {
-    requireRealOrComplex(argTypes[0], `'imag' arg`, span);
+  transfer(argTypes, nargout) {
+    if (argTypes.length !== 1) {
+      throw new TypeError(`'imag' expects 1 arg(s), got ${argTypes.length}`);
+    }
+    if (nargout !== 1) {
+      throw new UnsupportedConstruct(
+        `'imag' does not support multi-output (nargout=${nargout})`
+      );
+    }
+    requireRealOrComplex(argTypes[0], `'imag' arg`);
     const a = argTypes[0] as NumericType;
     if (isMultiElement(a)) {
-      // Real or complex tensor → real tensor of the same shape.
       const out = tensorDoubleFromDims(a.dims.slice());
       if (!a.isComplex) out.sign = "zero";
-      return out;
+      return [out];
     }
     if (a.isComplex) {
       const cx = exactComplex(a);
       if (cx !== undefined) {
-        return scalarDouble(signFromNumber(cx.im), cx.im);
+        return [scalarDouble(signFromNumber(cx.im), cx.im)];
       }
-      return scalarDouble();
+      return [scalarDouble()];
     }
-    return scalarDouble("zero", 0);
+    return [scalarDouble("zero", 0)];
   },
-  codegenC(argsC, argTypes) {
+  emit({ argsC, argTypes, useRuntime }) {
     const a = argTypes[0] as NumericType;
     if (isMultiElement(a)) {
-      if (a.isComplex) return `mtoc2_tensor_imag_complex(${argsC[0]})`;
-      // Real tensor — imag is all zeros. Build via 0 * the input so
-      // the codegen produces an owned freshly-allocated tensor.
+      if (a.isComplex) {
+        useRuntime("mtoc2_tensor_unary_complex_math");
+        useRuntime("mtoc2_cscalar");
+        return `mtoc2_tensor_imag_complex(${argsC[0]})`;
+      }
+      useRuntime("mtoc2_tensor_elemwise_real");
       return `mtoc2_tensor_times_ts(${argsC[0]}, 0.0)`;
     }
-    if (a.isComplex) return `mtoc2_cimag(${argsC[0]})`;
+    if (a.isComplex) {
+      useRuntime("mtoc2_cscalar");
+      return `mtoc2_cimag(${argsC[0]})`;
+    }
     return `0.0`;
   },
-  runtimeDeps: [
-    "mtoc2_cscalar",
-    "mtoc2_tensor_unary_complex_math",
-    "mtoc2_tensor_elemwise_real",
-  ],
+  elementwise: true,
 };

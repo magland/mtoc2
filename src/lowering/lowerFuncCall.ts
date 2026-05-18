@@ -29,7 +29,7 @@ import {
   typeToString,
 } from "./types.js";
 import { getBuiltin } from "./builtins/index.js";
-import { arityAccepts, arityDescribe } from "./builtins/registry.js";
+import { withSpan } from "./errors.js";
 import { isSliceArg } from "./indexResolve.js";
 import { lowerIndexLoad } from "./lowerIndexLoad.js";
 import { lowerIndexSlice } from "./lowerIndexSlice.js";
@@ -107,16 +107,24 @@ export function lowerFuncCall(
   // mtoc2 v1).
   if (args.length === 0) {
     const b = getBuiltin(e.name);
-    if (b !== undefined && b.arity === 0) {
-      const ty = b.transfer([], e.span);
-      return {
-        kind: "Call",
-        cName: e.name,
-        name: e.name,
-        args: [],
-        ty,
-        span: e.span,
-      };
+    if (b !== undefined) {
+      // Probe: if `transfer([], 1)` accepts, treat as a 0-arg call.
+      let tys: ReturnType<typeof b.transfer> | undefined;
+      try {
+        tys = b.transfer([], 1);
+      } catch {
+        tys = undefined;
+      }
+      if (tys !== undefined) {
+        return {
+          kind: "Call",
+          cName: e.name,
+          name: e.name,
+          args: [],
+          ty: tys[0],
+          span: e.span,
+        };
+      }
     }
   }
 
@@ -134,8 +142,8 @@ export function lowerFuncCall(
     // validate-then-route shape is identical to the standard builtin
     // branch below; we just don't have numbl's blessing.
     const fallback = getBuiltin(e.name);
-    if (fallback !== undefined && arityAccepts(fallback.arity, args.length)) {
-      const ty = fallback.transfer(argTypes, e.span);
+    if (fallback !== undefined) {
+      const ty = withSpan(e.span, () => fallback.transfer(argTypes, 1))[0];
       return {
         kind: "Call",
         cName: e.name,
@@ -150,7 +158,7 @@ export function lowerFuncCall(
   switch (target.kind) {
     case "builtin": {
       // Numbl agreed it's a builtin; mtoc2 still requires the builtin
-      // to be registered in its own table (and to match arity).
+      // to be registered in its own table.
       const b = getBuiltin(e.name);
       if (!b) {
         throw new UnsupportedConstruct(
@@ -158,13 +166,7 @@ export function lowerFuncCall(
           e.span
         );
       }
-      if (!arityAccepts(b.arity, args.length)) {
-        throw new TypeError(
-          `'${e.name}' expects ${arityDescribe(b.arity)} arg(s), got ${args.length}`,
-          e.span
-        );
-      }
-      const ty = b.transfer(argTypes, e.span);
+      const ty = withSpan(e.span, () => b.transfer(argTypes, 1))[0];
       return {
         kind: "Call",
         cName: e.name,

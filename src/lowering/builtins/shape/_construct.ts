@@ -25,7 +25,6 @@
  * time gives a proper span.
  */
 
-import type { Span } from "../../../parser/index.js";
 import { UnsupportedConstruct, TypeError } from "../../errors.js";
 import {
   DIM_ONE,
@@ -91,15 +90,10 @@ interface ResolvedShape {
  *  resolve time, dynamic dims are accepted as-is and surface as
  *  `kind: "dynamic"` axes. Throws on bad arg types or out-of-range
  *  exact values. */
-function resolveShape(
-  name: string,
-  argTypes: Type[],
-  span: Span
-): ResolvedShape {
+function resolveShape(name: string, argTypes: Type[]): ResolvedShape {
   if (argTypes.length < 1 || argTypes.length > MTOC2_MAX_NDIM) {
     throw new UnsupportedConstruct(
-      `'${name}' supports 1..${MTOC2_MAX_NDIM} shape arguments (got ${argTypes.length})`,
-      span
+      `'${name}' supports 1..${MTOC2_MAX_NDIM} shape arguments (got ${argTypes.length})`
     );
   }
 
@@ -116,27 +110,23 @@ function resolveShape(
     const a = argTypes[0];
     if (a.elem !== "double" && a.elem !== "logical") {
       throw new TypeError(
-        `'${name}' dim vector must be a real-double tensor (got ${a.elem})`,
-        span
+        `'${name}' dim vector must be a real-double tensor (got ${a.elem})`
       );
     }
     if (a.isComplex) {
       throw new TypeError(
-        `'${name}' dim vector must be a real-double tensor (got complex)`,
-        span
+        `'${name}' dim vector must be a real-double tensor (got complex)`
       );
     }
     const arr = exactRealArray(a);
     if (arr === undefined) {
       throw new UnsupportedConstruct(
-        `'${name}' dim vector must be a statically-known constant in v1`,
-        span
+        `'${name}' dim vector must be a statically-known constant in v1`
       );
     }
     if (arr.length < 1 || arr.length > MTOC2_MAX_NDIM) {
       throw new UnsupportedConstruct(
-        `'${name}' supports 1..${MTOC2_MAX_NDIM} output dims (got ${arr.length})`,
-        span
+        `'${name}' supports 1..${MTOC2_MAX_NDIM} output dims (got ${arr.length})`
       );
     }
     const axes: ResolvedAxis[] = [];
@@ -144,17 +134,11 @@ function resolveShape(
       const v = arr[i];
       if (!Number.isFinite(v) || !Number.isInteger(v) || v < 0) {
         throw new TypeError(
-          `'${name}' dim ${i + 1} must be a finite non-negative integer (got ${v})`,
-          span
+          `'${name}' dim ${i + 1} must be a finite non-negative integer (got ${v})`
         );
       }
       axes.push({ kind: "exact", value: v, argIndex: 0 });
     }
-    // Strip trailing exact-1 axes down to the 2-axis floor (mtoc2's
-    // lattice represents every tensor with at least 2 axes; `zeros([5])`
-    // == `zeros(5, 1)` per MATLAB), then pad up if shorter. Mirrors
-    // numbl's makeTensor canonicalization so e.g. `zeros([3 2 1])`
-    // surfaces as a 3×2, not a 3×2×1.
     const norm = normalizeAxes(axes);
     return { axes: norm, ndim: norm.length, isSquare: false };
   }
@@ -164,28 +148,22 @@ function resolveShape(
     const a = argTypes[i];
     if (!isNumeric(a) || a.elem !== "double" || a.isComplex) {
       throw new TypeError(
-        `'${name}' arg ${i + 1} must be a scalar real double (got ${a.kind})`,
-        span
+        `'${name}' arg ${i + 1} must be a scalar real double (got ${a.kind})`
       );
     }
     if (!isScalar(a)) {
       throw new TypeError(
-        `'${name}' arg ${i + 1} must be a scalar real double (got tensor)`,
-        span
+        `'${name}' arg ${i + 1} must be a scalar real double (got tensor)`
       );
     }
     const v = exactDouble(a);
     if (v === undefined) {
-      // Dynamic dim — runtime scalar. Defer all value-range checks
-      // (`mtoc2_tensor_alloc_nd` aborts on overflow / negative dims at
-      // runtime).
       axes.push({ kind: "dynamic", argIndex: i });
       continue;
     }
     if (!Number.isInteger(v) || v < 0) {
       throw new TypeError(
-        `'${name}' arg ${i + 1} must be a finite non-negative integer (got ${v})`,
-        span
+        `'${name}' arg ${i + 1} must be a finite non-negative integer (got ${v})`
       );
     }
     axes.push({ kind: "exact", value: v, argIndex: i });
@@ -261,39 +239,36 @@ export function defineShapeConstructor(
   const helperPrefix = cFillValue !== undefined ? `${cFillValue}, ` : "";
   return {
     name,
-    arity: { min: minArgs, max: MTOC2_MAX_NDIM },
-    transfer(argTypes, span) {
-      const resolved = resolveShape(name, argTypes, span);
+    transfer(argTypes, nargout) {
+      if (argTypes.length < minArgs || argTypes.length > MTOC2_MAX_NDIM) {
+        throw new UnsupportedConstruct(
+          `'${name}' supports ${minArgs}..${MTOC2_MAX_NDIM} arg(s), got ${argTypes.length}`
+        );
+      }
+      if (nargout !== 1) {
+        throw new UnsupportedConstruct(
+          `'${name}' does not support multi-output (nargout=${nargout})`
+        );
+      }
+      const resolved = resolveShape(name, argTypes);
       const shape = exactShapeOf(resolved);
       if (shape !== undefined) {
         const total = shapeNumel(shape);
-        // Empty result (any axis 0) keeps the shape but no exact data —
-        // there's no element to put in a Float64Array. Sign stays
-        // "unknown" (vacuously true; empty tensors don't constrain
-        // domain checks anyway).
         if (total === 0) {
-          return tensorDouble(shape);
+          return [tensorDouble(shape)];
         }
-        // Scalar result (every axis 1, e.g. `zeros(1,1)`): the type
-        // collapses to scalar double, keeping the exact value.
         if (shape.every(s => s === 1)) {
-          return scalarDouble(signFromNumber(fillValue), fillValue);
+          return [scalarDouble(signFromNumber(fillValue), fillValue)];
         }
         if (total <= EXACT_ARRAY_MAX_ELEMENTS) {
           const data = new Float64Array(total);
           if (fillValue !== 0) data.fill(fillValue);
-          // tensorDouble auto-derives sign from the exact data.
-          return tensorDouble(shape, data);
+          return [tensorDouble(shape, data)];
         }
-        // Too large to carry exact data, but the fill value is still
-        // known statically. Set the sign explicitly so domain checks
-        // (e.g. `sqrt(zeros(20,20))`) succeed.
         const t = tensorDouble(shape);
         t.sign = signFromNumber(fillValue);
-        return t;
+        return [t];
       }
-      // At least one axis is dynamic. Build a lattice-only type:
-      // exact axes pin their value, dynamic ones land as `unknown`.
       const dims: DimInfo[] = resolved.axes.map(a =>
         a.kind === "exact"
           ? a.value === 1
@@ -303,23 +278,17 @@ export function defineShapeConstructor(
       );
       const t: NumericType = tensorDoubleFromDims(dims);
       t.sign = signFromNumber(fillValue);
-      return t;
+      return [t];
     },
-    codegenC(argsC, argTypes) {
+    emit({ argsC, argTypes, useRuntime }) {
+      useRuntime(ndHelper);
+      useRuntime(squareHelper);
       // The transfer step has already validated every arg; reuse the
       // same resolution so codegen sees the same exact-vs-dynamic
-      // verdict per axis. codegenC is only called after transfer
-      // succeeded, so resolveShape can't throw here.
-      const resolved = resolveShape(name, argTypes, {
-        file: "<codegen>",
-        start: 0,
-        end: 0,
-      });
+      // verdict per axis.
+      const resolved = resolveShape(name, argTypes);
       const shape = exactShapeOf(resolved);
       if (shape !== undefined) {
-        // Scalar collapse (every axis 1, e.g. `zeros(1,1)`): the
-        // surrounding code expects a `double`-valued expression
-        // matching the scalar result type. Emit the literal directly.
         if (shape.every(s => s === 1)) {
           if (cFillValue !== undefined) return cFillValue;
           return Number.isInteger(fillValue)
@@ -329,10 +298,6 @@ export function defineShapeConstructor(
         const dimList = shape.map(d => `${d}L`).join(", ");
         return `${ndHelper}(${helperPrefix}${resolved.ndim}, (long[]){${dimList}})`;
       }
-      // Dynamic single-arg square form — evaluate the source arg once.
-      // (`isSquare` triggers regardless of whether the source value is
-      // exact, but the all-exact case is handled by the `shape !==
-      // undefined` branch above; only dynamic single-arg lands here.)
       if (resolved.isSquare) {
         const src = resolved.axes[0];
         return `${squareHelper}(${helperPrefix}(long)(${argsC[src.argIndex]}))`;
@@ -340,6 +305,5 @@ export function defineShapeConstructor(
       const dimList = resolved.axes.map(a => dimC(a, argsC)).join(", ");
       return `${ndHelper}(${helperPrefix}${resolved.ndim}, (long[]){${dimList}})`;
     },
-    runtimeDeps: [ndHelper, squareHelper],
   };
 }

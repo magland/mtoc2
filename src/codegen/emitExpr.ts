@@ -165,26 +165,32 @@ export function emitExpr(e: IRExpr, state: RuntimeState): string {
     case "Binary": {
       const b = getBuiltin(e.builtin);
       if (!b) throw new Error(`emit: builtin '${e.builtin}' not found`);
-      activateRuntimeDeps(b.runtimeDeps, state);
-      return b.codegenC(
-        [emitExpr(e.left, state), emitExpr(e.right, state)],
-        [e.left.ty, e.right.ty]
-      );
+      return b.emit({
+        argsC: [emitExpr(e.left, state), emitExpr(e.right, state)],
+        argTypes: [e.left.ty, e.right.ty],
+        nargout: 1,
+        useRuntime: name => useRuntimeByName(state, name),
+      });
     }
     case "Unary": {
       const b = getBuiltin(e.builtin);
       if (!b) throw new Error(`emit: builtin '${e.builtin}' not found`);
-      activateRuntimeDeps(b.runtimeDeps, state);
-      return b.codegenC([emitExpr(e.operand, state)], [e.operand.ty]);
+      return b.emit({
+        argsC: [emitExpr(e.operand, state)],
+        argTypes: [e.operand.ty],
+        nargout: 1,
+        useRuntime: name => useRuntimeByName(state, name),
+      });
     }
     case "Call": {
       const builtinB = getBuiltin(e.name);
       if (builtinB) {
-        activateRuntimeDeps(builtinB.runtimeDeps, state);
-        return builtinB.codegenC(
-          e.args.map(a => emitExpr(a, state)),
-          e.args.map(a => a.ty)
-        );
+        return builtinB.emit({
+          argsC: e.args.map(a => emitExpr(a, state)),
+          argTypes: e.args.map(a => a.ty),
+          nargout: 1,
+          useRuntime: name => useRuntimeByName(state, name),
+        });
       }
       // Lowerer-synthesized bare-`toc;` print form. Not registered as
       // a public builtin (the registry only knows about value-returning
@@ -301,14 +307,6 @@ export function emitExpr(e: IRExpr, state: RuntimeState): string {
     case "MakeRange":
       return emitMakeRange(e, state);
   }
-}
-
-export function activateRuntimeDeps(
-  deps: ReadonlyArray<string> | undefined,
-  state: RuntimeState
-): void {
-  if (!deps) return;
-  for (const d of deps) useRuntimeByName(state, d);
 }
 
 /** Emit a `MakeRange` expression. Activates the runtime helper. */

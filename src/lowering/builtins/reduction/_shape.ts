@@ -27,7 +27,6 @@
  * `[v, i] = min(x)` — all rejected with span.
  */
 
-import type { Span } from "../../../parser/index.js";
 import { UnsupportedConstruct, TypeError } from "../../errors.js";
 import {
   DIM_ONE,
@@ -115,44 +114,35 @@ type AxisChoice = AxisAll | AxisFixed | { kind: "default" };
 /** Inspect the parsed dim slot. Throws on rejection cases (non-
  *  exact, non-positive, non-integer, wrong type). Returns `default`
  *  if no dim slot was supplied. */
-function classifyDimArg(
-  name: string,
-  dimType: Type | undefined,
-  span: Span
-): AxisChoice {
+function classifyDimArg(name: string, dimType: Type | undefined): AxisChoice {
   if (dimType === undefined) return { kind: "default" };
   if (dimType.kind === "String" || dimType.kind === "Char") {
     const v = dimType.exact;
     if (v === "all") return { kind: "all" };
     if (v === undefined) {
       throw new UnsupportedConstruct(
-        `'${name}' dim arg: opaque text (only the literal 'all' is supported)`,
-        span
+        `'${name}' dim arg: opaque text (only the literal 'all' is supported)`
       );
     }
     throw new UnsupportedConstruct(
-      `'${name}' dim arg: text literal must be 'all' (got '${v}')`,
-      span
+      `'${name}' dim arg: text literal must be 'all' (got '${v}')`
     );
   }
   if (!isNumeric(dimType) || dimType.isComplex || !isScalar(dimType)) {
     throw new TypeError(
-      `'${name}' dim arg must be a scalar real integer or the string 'all'`,
-      span
+      `'${name}' dim arg must be a scalar real integer or the string 'all'`
     );
   }
   const v = exactDouble(dimType);
   if (v === undefined) {
     throw new UnsupportedConstruct(
       `'${name}' dim arg must be a statically-known integer in v1 ` +
-        `(runtime dim values can't be deduced into a result shape)`,
-      span
+        `(runtime dim values can't be deduced into a result shape)`
     );
   }
   if (!Number.isFinite(v) || !Number.isInteger(v) || v < 1) {
     throw new TypeError(
-      `'${name}' dim arg must be a finite positive integer (got ${v})`,
-      span
+      `'${name}' dim arg must be a finite positive integer (got ${v})`
     );
   }
   return { kind: "fixed", dim: v };
@@ -168,11 +158,7 @@ function classifyDimArg(
  *  scalar input), `fixed(k)` for a clearly chosen axis, or throws
  *  for the genuinely ambiguous case (`unknown` leading dim followed
  *  by at least one known-non-1 or another `unknown`). */
-function chooseDefaultAxis(
-  name: string,
-  t: NumericType,
-  span: Span
-): AxisAll | AxisFixed {
+function chooseDefaultAxis(name: string, t: NumericType): AxisAll | AxisFixed {
   // Concrete shape: numbl's firstReduceDim. If every dim is 1 ⇒
   // scalar collapse (treat as 'all'); else pick the first dim with
   // size > 1.
@@ -200,8 +186,7 @@ function chooseDefaultAxis(
         `'${name}' on a tensor with ambiguous lattice ` +
           `(${t.dims.map(d => (d.kind === "exact" ? String(d.value) : "?")).join("×")}): can't deduce the ` +
           `reduction axis — pass an explicit dim (e.g. ` +
-          `${name}(A, 1)) or 'all'`,
-        span
+          `${name}(A, 1)) or 'all'`
       );
     }
     // exact value 1: skip, no contribution.
@@ -461,54 +446,36 @@ function latticeTensorResult(
 
 // ── Public entry points ────────────────────────────────────────────────
 
-/** The transfer function. Returns the result type; throws with span
- *  on rejection cases. */
-export function reductionTransfer(
-  argTypes: Type[],
-  span: Span,
-  spec: KernelSpec
-): Type {
+/** The transfer function. Returns the result type; throws with no
+ *  span (framework's `withSpan` backfills at the call site). */
+export function reductionTransfer(argTypes: Type[], spec: KernelSpec): Type {
   const inputType = argTypes[0];
   if (!isNumeric(inputType)) {
     throw new TypeError(
-      `'${spec.name}' arg must be numeric (got ${inputType.kind})`,
-      span
+      `'${spec.name}' arg must be numeric (got ${inputType.kind})`
     );
   }
   if (inputType.elem !== "double" && inputType.elem !== "logical") {
     throw new TypeError(
-      `'${spec.name}' arg must be double or logical (got ${inputType.elem})`,
-      span
+      `'${spec.name}' arg must be double or logical (got ${inputType.elem})`
     );
   }
-  // Complex input: route through the complex reduction transfer so
-  // the per-op fold and result-type rules pick the right helper at
-  // codegen time.
   if (inputType.isComplex) {
-    return complexReductionTransfer(argTypes, span, spec);
+    return complexReductionTransfer(argTypes, spec);
   }
-  // min/max: 2-arg form is the elementwise slope (`max(a, b)`,
-  // `min(a, b)`), not a reduction. Route to a separate transfer.
-  // Scalar-scalar only for now; tensor / broadcast forms are deferred.
   if (spec.dimArgIndex === 2 && argTypes.length === 2) {
-    return elementwiseMinMaxTransfer(
-      argTypes,
-      span,
-      spec.name as "min" | "max"
-    );
+    return elementwiseMinMaxTransfer(argTypes, spec.name as "min" | "max");
   }
-  // 3-arg form for min/max requires the [] placeholder in slot 2.
   if (spec.dimArgIndex === 2 && argTypes.length === 3) {
     if (!isEmptyBracketLiteral(argTypes[1])) {
       throw new UnsupportedConstruct(
         `'${spec.name}(A, [], dim)' requires the second arg to be the ` +
-          `empty literal '[]' (got something else)`,
-        span
+          `empty literal '[]' (got something else)`
       );
     }
   }
   const dimType = argTypes[spec.dimArgIndex];
-  const axis = classifyDimArg(spec.name, dimType, span);
+  const axis = classifyDimArg(spec.name, dimType);
 
   // Scalar input: identity (or logical cast for any/all).
   if (isScalar(inputType)) {
@@ -529,7 +496,7 @@ export function reductionTransfer(
   // Pick the reduction axis.
   let resolved: AxisAll | AxisFixed;
   if (axis.kind === "default") {
-    resolved = chooseDefaultAxis(spec.name, inputType, span);
+    resolved = chooseDefaultAxis(spec.name, inputType);
   } else {
     resolved = axis;
   }
@@ -583,30 +550,26 @@ export function reductionTransfer(
  *  operand wins). Tensor and broadcast forms are deferred. */
 function elementwiseMinMaxTransfer(
   argTypes: Type[],
-  span: Span,
   name: "min" | "max"
 ): Type {
   const [a, b] = argTypes;
   if (!isNumeric(a) || a.isComplex || !isNumeric(b) || b.isComplex) {
-    throw new TypeError(`'${name}(a, b)' args must be real numeric`, span);
+    throw new TypeError(`'${name}(a, b)' args must be real numeric`);
   }
   if (a.elem !== "double" && a.elem !== "logical") {
     throw new TypeError(
-      `'${name}(a, b)' arg 1 must be double or logical (got ${a.elem})`,
-      span
+      `'${name}(a, b)' arg 1 must be double or logical (got ${a.elem})`
     );
   }
   if (b.elem !== "double" && b.elem !== "logical") {
     throw new TypeError(
-      `'${name}(a, b)' arg 2 must be double or logical (got ${b.elem})`,
-      span
+      `'${name}(a, b)' arg 2 must be double or logical (got ${b.elem})`
     );
   }
   if (!isScalar(a) || !isScalar(b)) {
     throw new UnsupportedConstruct(
       `'${name}(a, b)' tensor / broadcast form is not yet supported — ` +
-        `both args must be scalar`,
-      span
+        `both args must be scalar`
     );
   }
   const av = exactDouble(a);
@@ -635,25 +598,18 @@ function elementwiseMinMaxTransfer(
  *  on the `{re, im}` carrier still applies to other surfaces (literal
  *  build, elementwise arith), but reducing a small complex array to
  *  a scalar at translate time isn't load-bearing for the cross-runner. */
-function complexReductionTransfer(
-  argTypes: Type[],
-  span: Span,
-  spec: KernelSpec
-): Type {
+function complexReductionTransfer(argTypes: Type[], spec: KernelSpec): Type {
   const inputType = argTypes[0] as NumericType;
-  // 3-arg min/max placeholder check (the `[]` slot). Reuses the
-  // real-side check by inspecting the literal directly.
   if (spec.dimArgIndex === 2 && argTypes.length === 3) {
     if (!isEmptyBracketLiteral(argTypes[1])) {
       throw new UnsupportedConstruct(
         `'${spec.name}(A, [], dim)' requires the second arg to be the ` +
-          `empty literal '[]' (got something else)`,
-        span
+          `empty literal '[]' (got something else)`
       );
     }
   }
   const dimType = argTypes[spec.dimArgIndex];
-  const axis = classifyDimArg(spec.name, dimType, span);
+  const axis = classifyDimArg(spec.name, dimType);
 
   const isLogical = spec.outputElem === "logical";
 
@@ -672,7 +628,7 @@ function complexReductionTransfer(
   // Pick the reduction axis.
   let resolved: AxisAll | AxisFixed;
   if (axis.kind === "default") {
-    resolved = chooseDefaultAxis(spec.name, inputType, span);
+    resolved = chooseDefaultAxis(spec.name, inputType);
   } else {
     resolved = axis;
   }
@@ -748,18 +704,16 @@ function elementwiseMinMaxSign(name: "min" | "max", sa: Sign, sb: Sign): Sign {
   return "unknown";
 }
 
-export function reductionCodegen(spec: {
+export function reductionEmit(spec: {
   name: string;
   dimArgIndex: 1 | 2;
   outputElem: "double" | "logical";
-}): (argsC: string[], argTypes: Type[]) => string {
-  return (argsC, argTypes) => {
-    // Elementwise 2-arg min/max: dispatch before the reduction logic
-    // (the surface form is the same `min`/`max` builtin, but the
-    // semantics — and the C side — are completely separate).
+}): Builtin["emit"] {
+  return ({ argsC, argTypes, useRuntime }) => {
+    useRuntime("mtoc2_tensor_reduce_real");
+    useRuntime("mtoc2_tensor_reduce_complex");
+    useRuntime("mtoc2_cscalar");
     if (spec.dimArgIndex === 2 && argTypes.length === 2) {
-      // Transfer already verified both args are scalar real numeric.
-      // C99 `fmax`/`fmin` match MATLAB's NaN-aware rule.
       return `${spec.name === "max" ? "fmax" : "fmin"}((double)(${argsC[0]}), (double)(${argsC[1]}))`;
     }
     const inputT = argTypes[0];
@@ -769,7 +723,6 @@ export function reductionCodegen(spec: {
     const isComplex = inputT.isComplex;
     const suffixAll = isComplex ? "_complex_all" : "_all";
     const suffixDim = isComplex ? "_complex_dim" : "_dim";
-    // Scalar fast path: identity (or `(x != 0)` for logical).
     if (isScalar(inputT)) {
       if (spec.outputElem === "logical") {
         if (isComplex) {
@@ -779,16 +732,10 @@ export function reductionCodegen(spec: {
       }
       return argsC[0];
     }
-    // Tensor path. Determine axis the same way transfer did.
     const dimType: Type | undefined = argTypes[spec.dimArgIndex];
     let axis: AxisAll | AxisFixed;
     if (dimType === undefined) {
-      const a = chooseDefaultAxis(spec.name, inputT, {
-        file: "<codegen>",
-        start: 0,
-        end: 0,
-      });
-      axis = a;
+      axis = chooseDefaultAxis(spec.name, inputT);
     } else if (
       (dimType.kind === "String" || dimType.kind === "Char") &&
       dimType.exact === "all"
@@ -808,9 +755,6 @@ export function reductionCodegen(spec: {
     if (axis.kind === "all") {
       return `mtoc2_${spec.name}${suffixAll}(${argsC[0]})`;
     }
-    // AxisFixed. If the lattice shows the result is scalar (every
-    // surviving dim collapses to one), prefer `_all` — it's the same
-    // result and skips the per-fiber loop.
     if (inputT.shape !== undefined) {
       const r = reduceConcreteShape(inputT.shape, axis.dim);
       if (r.scalar) {
@@ -831,22 +775,28 @@ export function reductionCodegen(spec: {
 /** Build a complete `Builtin` registration from a `KernelSpec`. */
 export function defineReducer(spec: KernelSpec): Builtin {
   const isMinMax = spec.dimArgIndex === 2;
+  const minArgs = 1;
+  const maxArgs = isMinMax ? 3 : 2;
   return {
     name: spec.name,
-    arity: isMinMax ? { min: 1, max: 3 } : { min: 1, max: 2 },
-    transfer(argTypes, span) {
-      return reductionTransfer(argTypes, span, spec);
+    transfer(argTypes, nargout) {
+      if (argTypes.length < minArgs || argTypes.length > maxArgs) {
+        throw new TypeError(
+          `'${spec.name}' expects ${minArgs}..${maxArgs} arg(s), got ${argTypes.length}`
+        );
+      }
+      if (nargout !== 1) {
+        throw new UnsupportedConstruct(
+          `'${spec.name}' does not support multi-output (nargout=${nargout})`
+        );
+      }
+      return [reductionTransfer(argTypes, spec)];
     },
-    codegenC: reductionCodegen({
+    emit: reductionEmit({
       name: spec.name,
       dimArgIndex: spec.dimArgIndex,
       outputElem: spec.outputElem,
     }),
-    runtimeDeps: [
-      "mtoc2_tensor_reduce_real",
-      "mtoc2_tensor_reduce_complex",
-      "mtoc2_cscalar",
-    ],
   };
 }
 

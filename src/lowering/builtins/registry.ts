@@ -1,87 +1,85 @@
 /**
- * Builtin registry. Each builtin is a fused (transfer + codegenC) pair:
+ * Builtin registry — the contract every mtoc2 builtin (and future user
+ * `.mtoc2.js` function) implements.
  *
- *   transfer(argTypes, span) — given input types, return the output
- *     type. When all inputs are exact, return a type whose `exact` is
- *     populated (the lowerer then emits a literal IR node instead of
- *     a call). transfer is the single source of truth for type rules
- *     AND compile-time evaluation for this builtin.
+ *   transfer(argTypes, nargout) — given input types and the number of
+ *     outputs the call site wants, return one Type per output. When
+ *     every input is exact, set `exact` on the returned type(s) so the
+ *     lowerer can key specialization on the value (and fold `if`
+ *     conditions). Throws plain `Error` / `TypeError` /
+ *     `UnsupportedConstruct` on bad input — no source span; the
+ *     framework attaches the call-site span via `withSpan`.
  *
- *   codegenC(argsC, argTypes) — return the C expression that evaluates
- *     this builtin at runtime. Not invoked when transfer returned an
- *     exact-tagged type (the lowerer short-circuits to a literal).
+ *   emit({argsC, argTypes, nargout, outArgsC?, useRuntime}) — emit the
+ *     full C call string. For nargout=1 that's a C expression
+ *     (`(a + b)`, `mtoc2_tensor_plus_tt(a, b)`); for nargout≥2 it's
+ *     the complete helper invocation including out-pointer args
+ *     (`mtoc2_sort_real_2(a, &v, &i)`). Activate any runtime snippets
+ *     this emit-output references by calling `useRuntime(name)`.
+ *
+ *   elementwise? — when true, `emit` must also produce a correct
+ *     scalar C expression when called with scalar-form argsC and
+ *     scalar argTypes. The framework uses this for same-shape tensor
+ *     fusion (and, later, broadcasting / reduction-inner / mask /
+ *     stencil fusion). Absence = "do not fuse me; use my regular
+ *     emit on the full tensor types."
  */
 
-import type { Span } from "../../parser/index.js";
 import type { Type } from "../types.js";
 
-/** Builtin arity. Most builtins have a single exact arity; a few
- *  (`zeros`, `ones`) take a variable count of shape arguments, for
- *  which `{ min, max }` is supplied. Either bound may be -1 for "no
- *  bound on this side" but in practice both are concrete today. */
-export type BuiltinArity = number | { min: number; max: number };
-
 export interface Builtin {
-  /** Source-level name. */
+  /** Source-level name (registry key). */
   name: string;
-  /** Arity (exact match, or a min/max range for variadic builtins). */
-  arity: BuiltinArity;
-  /** Transfer function: returns output type (with exact when fold-able). */
-  transfer(argTypes: Type[], span: Span): Type;
-  /** Emit C expression. The caller wraps it as a statement when needed. */
-  codegenC(argsC: string[], argTypes: Type[]): string;
-  /** Optional: per-slot C expression for the elementwise-fused emit
-   *  path (`src/codegen/emitTensorFused.ts`). Given the per-slot C
-   *  expression for each argument (scalar operands stay as-is; a
-   *  tensor operand is `<var>.real[i]`), return the per-slot C
-   *  expression for this builtin's result. The fused emitter only
-   *  calls this when *every* argument shape is compatible with the
-   *  enclosing iter loop's shape, so the builtin doesn't need to
-   *  reason about broadcasting. Builtins without this hook stay on
-   *  the helper-call path (the un-fused emit). */
-  perSlotC?(argsC: string[], argTypes: Type[]): string;
-  /** Runtime-snippet names this builtin's codegenC output calls into.
-   *  Registered names live in `src/codegen/runtime.ts`'s REGISTRY.
-   *  The emitter activates each on every codegenC site so deps are
-   *  pulled into the final output in topological order. */
-  runtimeDeps?: ReadonlyArray<string>;
-  /** Multi-output ABI hook. Optional — only builtins like `sort` that
-   *  legitimately return more than one value via `[a, b] = f(x)` set
-   *  this. The lowerer (`lowerMultiAssign`) routes the call through
-   *  here and emits a `MultiAssignCall` whose `cName` is the helper
-   *  returned below; codegen passes args by value followed by one
-   *  out-pointer per requested output (same C ABI as user-function
-   *  N≥2-output specializations). The single-output form `b = f(x)`
-   *  still runs through `transfer` / `codegenC` exactly as before. */
-  multiOutput?: MultiOutputBuiltin;
+
+  /** Output type(s) for an `nargout`-output call. Returned array
+   *  length must equal `nargout`. Throws on bad arg count, bad arg
+   *  types, or unsupported nargout (plain Error / TypeError /
+   *  UnsupportedConstruct — no source span). Pure: safe to invoke as
+   *  a probe (the framework calls this for bare-identifier 0-arg
+   *  detection). */
+  transfer(argTypes: Type[], nargout: number): Type[];
+
+  /** Emit C for this call. Returns the full string ready to splice
+   *  into the surrounding context:
+   *    - nargout=1: a C *expression*
+   *    - nargout≥2: a full call including out-pointer args, e.g.
+   *      `mtoc2_sort_real_2(a, &v, &i)`. `outArgsC` holds those
+   *      pre-built `&v`, `&i` strings in the order the call site
+   *      requested. */
+  emit(args: EmitArgs): string;
+
+  /** Elementwise = result is computed pointwise from corresponding
+   *  slots of each input. Implies `emit`, called with scalar
+   *  `argTypes` and scalar-form `argsC`, returns a scalar C
+   *  expression suitable for inlining at one slot of a fused loop.
+   *  The framework uses this to fuse tensor-Assign elementwise ops
+   *  (and, later, broadcasting and other fusion modes). */
+  elementwise?: boolean;
 }
 
-/** Optional multi-output ABI for a builtin. See `Builtin.multiOutput`. */
-export interface MultiOutputBuiltin {
-  /** Inclusive lower bound on the number of outputs the multi-output
-   *  form accepts. */
-  minNargout: number;
-  /** Inclusive upper bound on the number of outputs. */
-  maxNargout: number;
-  /** Returns the output-slot types for an `nargout`-output call.
-   *  Length must equal `nargout`. Slot types must satisfy
-   *  `isMultiOutputSlotType` (scalar real numeric or any owned type). */
-  transfer(argTypes: Type[], nargout: number, span: Span): Type[];
-  /** C helper name for the `nargout` form. The emitted call is
-   *  `<cName>(<args>, &<out_1>, ..., &<out_nargout>)`. */
-  cName(argTypes: Type[], nargout: number): string;
+export interface EmitArgs {
+  /** Per-arg C expression. In fused contexts this is scalar form
+   *  (e.g. `<var>.real[i]`); in the regular path it's whatever the
+   *  framework's `emitExpr` produced. */
+  argsC: string[];
+  /** Per-arg type. In fused contexts the framework supplies the
+   *  scalar version of each tensor operand's type; `emit` reads
+   *  these to pick its branch the same way it does for a scalar call
+   *  site. */
+  argTypes: Type[];
+  /** Number of outputs requested at the call site. */
+  nargout: number;
+  /** Out-pointer C expressions for multi-output calls (length =
+   *  nargout when nargout≥2; otherwise empty/undefined). The
+   *  framework pre-builds these as `&v`, `&i`, … so `emit` just
+   *  splices them in. */
+  outArgsC?: string[];
+  /** Activate a runtime C snippet by name. Idempotent; the framework
+   *  dedupes and orders deps automatically. */
+  useRuntime(name: string): void;
 }
 
-export function arityAccepts(arity: BuiltinArity, n: number): boolean {
-  if (typeof arity === "number") return n === arity;
-  return n >= arity.min && n <= arity.max;
-}
-
-export function arityDescribe(arity: BuiltinArity): string {
-  if (typeof arity === "number") return `${arity}`;
-  if (arity.min === arity.max) return `${arity.min}`;
-  return `${arity.min}..${arity.max}`;
-}
+// ── Registry ────────────────────────────────────────────────────────────
 
 const REGISTRY = new Map<string, Builtin>();
 

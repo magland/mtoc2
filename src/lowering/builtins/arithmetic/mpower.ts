@@ -9,25 +9,25 @@
  * entirely for now.
  */
 
-import { UnsupportedConstruct } from "../../errors.js";
+import { TypeError, UnsupportedConstruct } from "../../errors.js";
 import { isMultiElement } from "../../types.js";
 import type { Builtin } from "../registry.js";
 import { power } from "./power.js";
 
 export const mpower: Builtin = {
   name: "mpower",
-  arity: 2,
-  transfer(argTypes, span) {
+  transfer(argTypes, nargout) {
+    if (argTypes.length !== 2) {
+      throw new TypeError(`'mpower' expects 2 arg(s), got ${argTypes.length}`);
+    }
     if (isMultiElement(argTypes[0]) || isMultiElement(argTypes[1])) {
       throw new UnsupportedConstruct(
-        `'^' on matrices (matrix power) is not yet supported; use '.^' for elementwise power`,
-        span
+        `'^' on matrices (matrix power) is not yet supported; use '.^' for elementwise power`
       );
     }
-    return power.transfer(argTypes, span);
+    return power.transfer(argTypes, nargout);
   },
-  codegenC(argsC, argTypes) {
-    return power.codegenC(argsC, argTypes);
+  emit(args) {
+    return power.emit(args);
   },
-  runtimeDeps: power.runtimeDeps,
 };

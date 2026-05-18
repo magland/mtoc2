@@ -91,7 +91,7 @@ import {
   binaryOpBuiltin,
   unaryOpBuiltin,
 } from "./builtins/index.js";
-import { arityAccepts } from "./builtins/registry.js";
+import { withSpan } from "./errors.js";
 import { exactComplex } from "./builtins/_shared.js";
 import { isSliceArg } from "./indexResolve.js";
 import { lowerTensorLit } from "./lowerTensorLit.js";
@@ -1399,16 +1399,28 @@ export class Lowerer {
     // (`figure;`, `hold;`, `drawnow;`, …). User-function
     // ident-as-call and class references are left to dedicated paths.
     const b = getBuiltin(e.name);
-    if (b !== undefined && arityAccepts(b.arity, 0)) {
-      const ty = b.transfer([], e.span);
-      return {
-        kind: "Call",
-        cName: e.name,
-        name: e.name,
-        args: [],
-        ty,
-        span: e.span,
-      };
+    if (b !== undefined) {
+      // Probe: try `transfer([], 1)`. If the builtin accepts 0 args,
+      // return the lowered Call; otherwise fall through to the
+      // undefined-variable error (matches MATLAB behavior of treating
+      // bare `sqrt` as an undefined identifier read rather than a
+      // missing-args call).
+      let tys: ReturnType<typeof b.transfer> | undefined;
+      try {
+        tys = b.transfer([], 1);
+      } catch {
+        tys = undefined;
+      }
+      if (tys !== undefined) {
+        return {
+          kind: "Call",
+          cName: e.name,
+          name: e.name,
+          args: [],
+          ty: tys[0],
+          span: e.span,
+        };
+      }
     }
     throw new UnsupportedConstruct(
       `undefined variable '${e.name}' (or unsupported reference)`,
@@ -1451,7 +1463,7 @@ export class Lowerer {
         e.span
       );
     }
-    const ty = b.transfer([left.ty, right.ty], e.span);
+    const ty = withSpan(e.span, () => b.transfer([left.ty, right.ty], 1))[0];
     return {
       kind: "Binary",
       builtin: name,
@@ -1483,7 +1495,7 @@ export class Lowerer {
           e.span
         );
       }
-      const conjTy = conjB.transfer([operand.ty], e.span);
+      const conjTy = withSpan(e.span, () => conjB.transfer([operand.ty], 1))[0];
       const conjCall: IRExpr = {
         kind: "Call",
         cName: "conj",
@@ -1492,7 +1504,7 @@ export class Lowerer {
         ty: conjTy,
         span: e.span,
       };
-      const transTy = transB.transfer([conjTy], e.span);
+      const transTy = withSpan(e.span, () => transB.transfer([conjTy], 1))[0];
       return {
         kind: "Call",
         cName: "transpose",
@@ -1510,7 +1522,7 @@ export class Lowerer {
         e.span
       );
     }
-    const ty = b.transfer([operand.ty], e.span);
+    const ty = withSpan(e.span, () => b.transfer([operand.ty], 1))[0];
     return {
       kind: "Unary",
       builtin: name,

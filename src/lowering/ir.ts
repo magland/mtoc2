@@ -444,19 +444,22 @@ export interface TypeComment {
  *  per `null` slot so those temporaries stay scoped to the call. */
 export interface MultiAssignCall {
   kind: "MultiAssignCall";
-  /** Resolved C identifier of the callee. Two interpretations,
-   *  matching `Call.cName`:
-   *  - **User-function specialization** — the mangled spec name from
-   *    `specializeUserFunction` (e.g. `apply__a1b2c3d4`); codegen
-   *    emits a direct call.
-   *  - **Multi-output builtin** — the C helper name returned by the
-   *    builtin's `multiOutput.cName(argTypes, nargout)` hook (e.g.
-   *    `mtoc2_sort_real_with_indices`). Codegen emits a direct call
-   *    to that helper; the builtin author is responsible for the
-   *    sret out-pointer ABI. */
+  /** Resolved C identifier of the callee. Two interpretations:
+   *  - **User-function specialization** (`isBuiltin === false`) — the
+   *    mangled spec name from `specializeUserFunction` (e.g.
+   *    `apply__a1b2c3d4`); codegen emits a direct call.
+   *  - **Multi-output builtin** (`isBuiltin === true`) — purely
+   *    informational at this point; codegen routes through the
+   *    builtin's `emit` hook for the full call string. */
   cName: string;
-  /** Source-level name (for diagnostics). */
+  /** Source-level name (for diagnostics and for builtin lookup at
+   *  codegen when `isBuiltin === true`). */
   name: string;
+  /** When true, `name` resolves to a registered builtin and codegen
+   *  invokes its `emit` hook with `nargout = outputs.length` and the
+   *  built `outArgsC` list. When false (or omitted), `cName` is a
+   *  user-function spec and codegen emits a direct call. */
+  isBuiltin?: boolean;
   args: IRExpr[];
   /** One entry per output slot of the callee. `ty` is the slot's
    *  static type (always populated so codegen can declare a typed

@@ -11,45 +11,55 @@ import {
   isMultiElement,
   signFromNumber,
 } from "../../types.js";
+import { TypeError, UnsupportedConstruct } from "../../errors.js";
 import type { Builtin } from "../registry.js";
 import { requireRealOrComplex, exactDouble, exactComplex } from "../_shared.js";
 
 export const real: Builtin = {
   name: "real",
-  arity: 1,
-  transfer(argTypes, span) {
-    requireRealOrComplex(argTypes[0], `'real' arg`, span);
+  transfer(argTypes, nargout) {
+    if (argTypes.length !== 1) {
+      throw new TypeError(`'real' expects 1 arg(s), got ${argTypes.length}`);
+    }
+    if (nargout !== 1) {
+      throw new UnsupportedConstruct(
+        `'real' does not support multi-output (nargout=${nargout})`
+      );
+    }
+    requireRealOrComplex(argTypes[0], `'real' arg`);
     const a = argTypes[0] as NumericType;
     if (isMultiElement(a)) {
       const out = tensorDoubleFromDims(a.dims.slice());
       if (!a.isComplex) out.sign = a.sign;
-      return out;
+      return [out];
     }
     if (a.isComplex) {
       const cx = exactComplex(a);
       if (cx !== undefined) {
-        return scalarDouble(signFromNumber(cx.re), cx.re);
+        return [scalarDouble(signFromNumber(cx.re), cx.re)];
       }
-      return scalarDouble();
+      return [scalarDouble()];
     }
-    // Real scalar input — identity.
     const v = exactDouble(a);
-    if (v !== undefined) return scalarDouble(signFromNumber(v), v);
-    return scalarDouble(a.sign);
+    if (v !== undefined) return [scalarDouble(signFromNumber(v), v)];
+    return [scalarDouble(a.sign)];
   },
-  codegenC(argsC, argTypes) {
+  emit({ argsC, argTypes, useRuntime }) {
     const a = argTypes[0] as NumericType;
     if (isMultiElement(a)) {
-      if (a.isComplex) return `mtoc2_tensor_real_complex(${argsC[0]})`;
-      // Real tensor — identity (copy, since this returns a fresh owned value).
+      if (a.isComplex) {
+        useRuntime("mtoc2_tensor_unary_complex_math");
+        useRuntime("mtoc2_cscalar");
+        return `mtoc2_tensor_real_complex(${argsC[0]})`;
+      }
+      useRuntime("mtoc2_tensor_copy");
       return `mtoc2_tensor_copy(${argsC[0]})`;
     }
-    if (a.isComplex) return `mtoc2_creal(${argsC[0]})`;
+    if (a.isComplex) {
+      useRuntime("mtoc2_cscalar");
+      return `mtoc2_creal(${argsC[0]})`;
+    }
     return `(${argsC[0]})`;
   },
-  runtimeDeps: [
-    "mtoc2_cscalar",
-    "mtoc2_tensor_unary_complex_math",
-    "mtoc2_tensor_copy",
-  ],
+  elementwise: true,
 };

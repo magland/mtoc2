@@ -35,7 +35,7 @@ disp(s.a);`);
     const e = caught as UnsupportedConstruct;
     expect(e.message).toMatch(/cannot reassign 's'/);
     expect(e.message).toMatch(/incompatible/);
-    expect(e.span.file).toBe("test.m");
+    expect(e.span?.file).toBe("test.m");
   });
 
   it("still rejects scalar↔tensor reassignment with the boundary message", () => {

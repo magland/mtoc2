@@ -9,6 +9,7 @@ import {
   signFromNumber,
   EXACT_ARRAY_MAX_ELEMENTS,
 } from "../../types.js";
+import { TypeError, UnsupportedConstruct } from "../../errors.js";
 import type { Builtin } from "../registry.js";
 import {
   requireRealOrComplex,
@@ -37,18 +38,25 @@ const absReal = defineUnaryRealMath({
  *  family). */
 export const abs: Builtin = {
   name: "abs",
-  arity: 1,
-  transfer(argTypes, span) {
-    requireRealOrComplex(argTypes[0], `'abs' arg`, span);
+  transfer(argTypes, nargout) {
+    if (argTypes.length !== 1) {
+      throw new TypeError(`'abs' expects 1 arg(s), got ${argTypes.length}`);
+    }
+    if (nargout !== 1) {
+      throw new UnsupportedConstruct(
+        `'abs' does not support multi-output (nargout=${nargout})`
+      );
+    }
+    requireRealOrComplex(argTypes[0], `'abs' arg`);
     const a = argTypes[0] as NumericType;
     if (a.isComplex) {
       if (isScalar(a)) {
         const cx = exactComplex(a);
         if (cx !== undefined) {
           const v = Math.hypot(cx.re, cx.im);
-          if (Number.isFinite(v)) return scalarDouble(signFromNumber(v), v);
+          if (Number.isFinite(v)) return [scalarDouble(signFromNumber(v), v)];
         }
-        return scalarDouble("nonneg");
+        return [scalarDouble("nonneg")];
       }
       // Complex tensor → real tensor (magnitude per element). Fold
       // via the split-buffer `{re, im}` exact carrier when present
@@ -61,31 +69,27 @@ export const abs: Builtin = {
           for (let i = 0; i < total; i++) {
             out[i] = Math.hypot(cx.re[i], cx.im[i]);
           }
-          return tensorDouble(a.shape, out);
+          return [tensorDouble(a.shape, out)];
         }
       }
       const out = tensorDoubleFromDims(a.dims.slice());
       out.sign = "nonneg";
-      return out;
+      return [out];
     }
-    return absReal.transfer(argTypes, span);
+    return absReal.transfer(argTypes, nargout);
   },
-  codegenC(argsC, argTypes) {
+  emit(args) {
+    const { argsC, argTypes, useRuntime } = args;
     const a = argTypes[0] as NumericType;
     if (a.isComplex) {
-      if (isMultiElement(a)) return `mtoc2_tensor_abs_complex(${argsC[0]})`;
+      useRuntime("mtoc2_cscalar");
+      if (isMultiElement(a)) {
+        useRuntime("mtoc2_tensor_unary_complex_math");
+        return `mtoc2_tensor_abs_complex(${argsC[0]})`;
+      }
       return `mtoc2_cabs(${argsC[0]})`;
     }
-    return absReal.codegenC(argsC, argTypes);
+    return absReal.emit(args);
   },
-  perSlotC(argsC, argTypes) {
-    const a = argTypes[0] as NumericType;
-    if (a.isComplex) return `mtoc2_cabs(${argsC[0]})`;
-    return absReal.perSlotC!(argsC, argTypes);
-  },
-  runtimeDeps: [
-    ...(absReal.runtimeDeps ?? []),
-    "mtoc2_cscalar",
-    "mtoc2_tensor_unary_complex_math",
-  ],
+  elementwise: true,
 };

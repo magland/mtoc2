@@ -29,11 +29,29 @@
  */
 
 import type { Assign, IRExpr } from "../lowering/ir.js";
-import type { NumericType } from "../lowering/types.js";
-import { isMultiElement, isNumeric } from "../lowering/types.js";
+import type { NumericType, Type } from "../lowering/types.js";
+import { DIM_ONE, isMultiElement, isNumeric } from "../lowering/types.js";
 import { getBuiltin } from "../lowering/builtins/index.js";
 import { useRuntimeByName, type RuntimeState } from "./runtime.js";
 import { formatDouble } from "./cHelpers.js";
+
+/** Strip multi-element shape from a type, leaving a scalar variant
+ *  (same elem / isComplex / sign). Used to feed builtin `emit` the
+ *  scalar-form types it expects when the framework is requesting the
+ *  per-slot expression from inside a fused loop. Non-numeric and
+ *  already-scalar types pass through unchanged. */
+function scalarVersionOf(t: Type): Type {
+  if (!isNumeric(t)) return t;
+  if (!isMultiElement(t)) return t;
+  return {
+    kind: "Numeric",
+    elem: t.elem,
+    isComplex: t.isComplex,
+    dims: [DIM_ONE, DIM_ONE],
+    shape: [1, 1],
+    sign: t.sign,
+  };
+}
 
 /** True iff `e` is a pure-elementwise expression — only NumLit / Var /
  *  Binary / Unary / Call to a builtin that has a `perSlotC` hook. No
@@ -50,13 +68,13 @@ export function isPureElementwiseExpr(e: IRExpr): boolean {
       return true;
     case "Binary": {
       // `Binary` covers more than elementwise ops — `mtimes` /
-      // `mrdivide` are matrix ops that need a runtime helper, not a
-      // per-slot template. Check the builtin's `perSlotC` hook.
+      // `mrdivide` are matrix ops that need a runtime helper. Gate
+      // on the builtin's `elementwise` flag.
       const b = getBuiltin(e.builtin);
-      if (!b || !b.perSlotC) return false;
-      // `mtimes`/`mrdivide` define `perSlotC` only for the
-      // at-least-one-scalar case (where they degenerate to elementwise
-      // `times`/`rdivide`). Reject the both-tensor case here.
+      if (!b || !b.elementwise) return false;
+      // `mtimes`/`mrdivide` declare elementwise but only the
+      // at-least-one-scalar case actually degenerates to elementwise
+      // `times`/`rdivide`. Reject the both-tensor case here.
       if (e.builtin === "mtimes" || e.builtin === "mrdivide") {
         if (
           isNumeric(e.left.ty) &&
@@ -71,19 +89,17 @@ export function isPureElementwiseExpr(e: IRExpr): boolean {
     }
     case "Unary": {
       const b = getBuiltin(e.builtin);
-      if (!b || !b.perSlotC) return false;
+      if (!b || !b.elementwise) return false;
       return isPureElementwiseExpr(e.operand);
     }
     case "Call": {
       const b = getBuiltin(e.name);
-      if (!b || !b.perSlotC) return false;
-      // perSlotC only makes sense for Calls whose result is a scalar
-      // value the per-slot loop can stamp into each output slot. A
+      if (!b || !b.elementwise) return false;
+      // The fused-loop contract requires a scalar result per slot. A
       // tensor-producing Call (e.g. the shape-constructor form of
-      // `nan(2,3)`) defines perSlotC for its 0-arg scalar branch but
-      // returns a fresh tensor when invoked with shape args — that
-      // doesn't fit the fused-loop contract, so route through the
-      // standard runtime-helper path instead.
+      // `nan(2,3)`) flags `elementwise` for its 0-arg scalar branch
+      // but returns a fresh tensor when invoked with shape args —
+      // route those through the standard helper path instead.
       if (isNumeric(e.ty) && isMultiElement(e.ty)) return false;
       return e.args.every(isPureElementwiseExpr);
     }
@@ -182,53 +198,54 @@ function emitPerSlotExpr(e: IRExpr, state: RuntimeState): string {
       return e.cName;
     case "Binary": {
       const b = getBuiltin(e.builtin);
-      if (!b || !b.perSlotC) {
+      if (!b || !b.elementwise) {
         throw new Error(
-          `emitTensorFused internal: builtin '${e.builtin}' has no perSlotC`
+          `emitTensorFused internal: builtin '${e.builtin}' is not elementwise`
         );
       }
-      activate(b.runtimeDeps, state);
-      return b.perSlotC(
-        [emitPerSlotExpr(e.left, state), emitPerSlotExpr(e.right, state)],
-        [e.left.ty, e.right.ty]
-      );
+      return b.emit({
+        argsC: [
+          emitPerSlotExpr(e.left, state),
+          emitPerSlotExpr(e.right, state),
+        ],
+        argTypes: [scalarVersionOf(e.left.ty), scalarVersionOf(e.right.ty)],
+        nargout: 1,
+        useRuntime: name => useRuntimeByName(state, name),
+      });
     }
     case "Unary": {
       const b = getBuiltin(e.builtin);
-      if (!b || !b.perSlotC) {
+      if (!b || !b.elementwise) {
         throw new Error(
-          `emitTensorFused internal: builtin '${e.builtin}' has no perSlotC`
+          `emitTensorFused internal: builtin '${e.builtin}' is not elementwise`
         );
       }
-      activate(b.runtimeDeps, state);
-      return b.perSlotC([emitPerSlotExpr(e.operand, state)], [e.operand.ty]);
+      return b.emit({
+        argsC: [emitPerSlotExpr(e.operand, state)],
+        argTypes: [scalarVersionOf(e.operand.ty)],
+        nargout: 1,
+        useRuntime: name => useRuntimeByName(state, name),
+      });
     }
     case "Call": {
       const b = getBuiltin(e.name);
-      if (!b || !b.perSlotC) {
+      if (!b || !b.elementwise) {
         throw new Error(
-          `emitTensorFused internal: builtin '${e.name}' has no perSlotC`
+          `emitTensorFused internal: builtin '${e.name}' is not elementwise`
         );
       }
-      activate(b.runtimeDeps, state);
-      return b.perSlotC(
-        e.args.map(a => emitPerSlotExpr(a, state)),
-        e.args.map(a => a.ty)
-      );
+      return b.emit({
+        argsC: e.args.map(a => emitPerSlotExpr(a, state)),
+        argTypes: e.args.map(a => scalarVersionOf(a.ty)),
+        nargout: 1,
+        useRuntime: name => useRuntimeByName(state, name),
+      });
     }
     default:
       throw new Error(
         `emitTensorFused internal: unexpected IR node '${e.kind}'`
       );
   }
-}
-
-function activate(
-  deps: ReadonlyArray<string> | undefined,
-  state: RuntimeState
-): void {
-  if (!deps) return;
-  for (const d of deps) useRuntimeByName(state, d);
 }
 
 /** Emit the fused inline iter loop. Pre-condition:

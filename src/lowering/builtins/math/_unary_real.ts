@@ -12,7 +12,7 @@
  * element is finite, attach the result as `exact` on the returned
  * type. Anything else drops the exact and the C side does the work.
  */
-import type { Span } from "../../../parser/index.js";
+import { TypeError, UnsupportedConstruct } from "../../errors.js";
 import {
   type NumericType,
   type Sign,
@@ -52,14 +52,12 @@ export interface UnaryRealMathOpts {
   /** Optional input-domain validator (used by `sqrt`, `log`, `log2`,
    *  `log10`). Called with the input `NumericType`; throws on
    *  out-of-domain input. `undefined` means "any real input is fine". */
-  requireDomain?: (t: NumericType, span: Span) => void;
+  requireDomain?: (t: NumericType) => void;
   /** Optional complex-input support. When set, complex scalars route
    *  through `cFnComplex` (a `mtoc2_c*` helper); complex tensors
    *  route through `mtoc2_tensor_<name>_complex`. `jsFnComplex`
    *  folds at the type-system layer when the input has an exact
-   *  `{re, im}` carrier. The result is a complex value of the same
-   *  shape as the input (except `abs`, which overrides via its own
-   *  builtin). */
+   *  `{re, im}` carrier. */
   complex?: {
     cFnComplex: string;
     jsFnComplex: (z: { re: number; im: number }) => { re: number; im: number };
@@ -70,17 +68,7 @@ export interface UnaryRealMathOpts {
  *  `floor`). Captures the "may collapse to zero" pattern: if a side of
  *  the number line can land on 0, its strict-sign input weakens to the
  *  corresponding non-strict sign. The flags say whether the operation's
- *  rounding direction can reach 0 from that side.
- *
- *  - `positive` weakens to `nonneg` when `positiveCanLand` is true.
- *  - `negative` weakens to `nonpositive` when `negativeCanLand` is true.
- *  - `nonzero` weakens to `unknown` whenever EITHER flag is true (a
- *    nonzero input could now be a zero output).
- *  - every other sign passes through.
- *
- *  `fix` / `round` set both flags; `floor` sets only positive; `ceil`
- *  sets only negative.
- */
+ *  rounding direction can reach 0 from that side. */
 export function roundingSignRule(
   positiveCanLand: boolean,
   negativeCanLand: boolean
@@ -99,27 +87,33 @@ export function defineUnaryRealMath(opts: UnaryRealMathOpts): Builtin {
   const { name, cFnReal, jsFn, signRule, requireDomain, complex } = opts;
   return {
     name,
-    arity: 1,
-    transfer(argTypes, span) {
+    transfer(argTypes, nargout) {
+      if (argTypes.length !== 1) {
+        throw new TypeError(
+          `'${name}' expects 1 arg(s), got ${argTypes.length}`
+        );
+      }
+      if (nargout !== 1) {
+        throw new UnsupportedConstruct(
+          `'${name}' does not support multi-output (nargout=${nargout})`
+        );
+      }
       if (complex !== undefined) {
-        requireRealOrComplex(argTypes[0], `'${name}' arg`, span);
+        requireRealOrComplex(argTypes[0], `'${name}' arg`);
       } else {
-        requireRealDouble(argTypes[0], `'${name}' arg`, span);
+        requireRealDouble(argTypes[0], `'${name}' arg`);
       }
       const a = argTypes[0] as NumericType;
       if (a.isComplex) {
-        // Complex input: result is complex (same shape). Fold scalar
-        // exact `{re, im}`; fold complex-tensor exact via the
-        // split-buffer carrier when present and small enough.
         if (isScalar(a)) {
           const cx = exactComplex(a);
           if (cx !== undefined) {
             const v = complex!.jsFnComplex(cx);
             if (Number.isFinite(v.re) && Number.isFinite(v.im)) {
-              return scalarComplex(v);
+              return [scalarComplex(v)];
             }
           }
-          return scalarComplex();
+          return [scalarComplex()];
         }
         const cx = exactComplexArray(a);
         if (cx !== undefined && a.shape !== undefined) {
@@ -137,25 +131,22 @@ export function defineUnaryRealMath(opts: UnaryRealMathOpts): Builtin {
               re[i] = v.re;
               im[i] = v.im;
             }
-            if (allFinite) return tensorComplex(a.shape, { re, im });
+            if (allFinite) return [tensorComplex(a.shape, { re, im })];
           }
         }
-        return tensorComplexFromDims(a.dims.slice());
+        return [tensorComplexFromDims(a.dims.slice())];
       }
-      if (requireDomain !== undefined) requireDomain(a, span);
+      if (requireDomain !== undefined) requireDomain(a);
 
       if (isScalar(a)) {
         const ax = exactDouble(a);
         if (ax !== undefined) {
           const v = jsFn(ax);
-          if (Number.isFinite(v)) return scalarDouble(signFromNumber(v), v);
+          if (Number.isFinite(v)) return [scalarDouble(signFromNumber(v), v)];
         }
-        return scalarDouble(signRule(a));
+        return [scalarDouble(signRule(a))];
       }
 
-      // Tensor input. The C helper walks `prod(dims)` regardless of
-      // static shape knowledge, so unknown-dim tensors are fine — we
-      // just can't fold their values.
       if (a.shape !== undefined) {
         const arr = exactRealArray(a);
         const total = shapeNumel(a.shape);
@@ -170,39 +161,29 @@ export function defineUnaryRealMath(opts: UnaryRealMathOpts): Builtin {
             }
             out[i] = v;
           }
-          if (allFinite) return tensorDouble(a.shape, out);
+          if (allFinite) return [tensorDouble(a.shape, out)];
         }
       }
       const out = tensorDoubleFromDims(a.dims.slice());
       out.sign = signRule(a);
-      return out;
+      return [out];
     },
-    codegenC(argsC, argTypes) {
+    emit({ argsC, argTypes, useRuntime }) {
       const ty = argTypes[0] as NumericType;
       if (isNumeric(ty) && ty.isComplex) {
+        useRuntime("mtoc2_cscalar");
         if (isMultiElement(ty)) {
+          useRuntime("mtoc2_tensor_unary_complex_math");
           return `mtoc2_tensor_${name}_complex(${argsC[0]})`;
         }
         return `${complex!.cFnComplex}(${argsC[0]})`;
       }
       if (isMultiElement(ty)) {
+        useRuntime("mtoc2_tensor_unary_real_math");
         return `mtoc2_tensor_${name}(${argsC[0]})`;
       }
       return `${cFnReal}(${argsC[0]})`;
     },
-    perSlotC(argsC, argTypes) {
-      const ty = argTypes[0] as NumericType;
-      if (isNumeric(ty) && ty.isComplex) {
-        return `${complex!.cFnComplex}(${argsC[0]})`;
-      }
-      return `${cFnReal}(${argsC[0]})`;
-    },
-    runtimeDeps: complex
-      ? [
-          "mtoc2_tensor_unary_real_math",
-          "mtoc2_tensor_unary_complex_math",
-          "mtoc2_cscalar",
-        ]
-      : ["mtoc2_tensor_unary_real_math"],
+    elementwise: true,
   };
 }

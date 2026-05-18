@@ -3,8 +3,7 @@
  * (`plus`, `minus`, `times`, `rdivide`).
  */
 
-import type { Span } from "../../../parser/index.js";
-import { UnsupportedConstruct } from "../../errors.js";
+import { UnsupportedConstruct, TypeError } from "../../errors.js";
 import {
   type DimInfo,
   DIM_ONE,
@@ -47,13 +46,13 @@ type ResolvedShape = {
 
 /** Shape resolution for elementwise binary. Returns `null` for scalar+
  *  scalar; otherwise computes the broadcast output shape and whether
- *  broadcasting is required. Throws on statically incompatible axes.
- *  Exported for `power.ts`, which shares the same broadcast rules. */
+ *  broadcasting is required. Throws on statically incompatible axes
+ *  (no span — the framework's `withSpan` wrapper attaches the call-site
+ *  span). Exported for `power.ts`, which shares the same broadcast rules. */
 export function elemwiseResultShape(
   a: NumericType,
   b: NumericType,
-  name: string,
-  span: Span
+  name: string
 ): ResolvedShape | null {
   const aMulti = isMultiElement(a);
   const bMulti = isMultiElement(b);
@@ -87,8 +86,7 @@ export function elemwiseResultShape(
     if (da.kind === "exact" && db.kind === "exact") {
       if (da.value !== db.value) {
         throw new UnsupportedConstruct(
-          `'${name}' shape mismatch (${dimsToStr(a.dims)} vs ${dimsToStr(b.dims)}); axis ${i + 1} is ${da.value} vs ${db.value} — incompatible for implicit expansion`,
-          span
+          `'${name}' shape mismatch (${dimsToStr(a.dims)} vs ${dimsToStr(b.dims)}); axis ${i + 1} is ${da.value} vs ${db.value} — incompatible for implicit expansion`
         );
       }
       outDims[i] = da;
@@ -308,15 +306,23 @@ function buildElemwiseRealBinary(opts: {
     complexScalarExpr,
     complexRuntimeDeps,
   } = opts;
-  const allDeps = [runtimeDep, ...(complexRuntimeDeps ?? [])];
   return {
     name,
-    arity: 2,
-    transfer(argTypes, span) {
+    transfer(argTypes, nargout) {
+      if (argTypes.length !== 2) {
+        throw new TypeError(
+          `'${name}' expects 2 arg(s), got ${argTypes.length}`
+        );
+      }
+      if (nargout !== 1) {
+        throw new UnsupportedConstruct(
+          `'${name}' does not support multi-output (nargout=${nargout})`
+        );
+      }
       const a = argTypes[0];
       const b = argTypes[1];
-      requireRealOrComplex(a, `'${name}' arg 1`, span);
-      requireRealOrComplex(b, `'${name}' arg 2`, span);
+      requireRealOrComplex(a, `'${name}' arg 1`);
+      requireRealOrComplex(b, `'${name}' arg 2`);
       const aN = a as NumericType;
       const bN = b as NumericType;
       // Complex contamination: any complex operand makes the result
@@ -329,8 +335,7 @@ function buildElemwiseRealBinary(opts: {
       if (anyComplex) {
         if (complexFold === undefined) {
           throw new UnsupportedConstruct(
-            `'${name}' is not defined for complex scalars`,
-            span
+            `'${name}' is not defined for complex scalars`
           );
         }
         if (!isMultiElement(aN) && !isMultiElement(bN)) {
@@ -340,24 +345,24 @@ function buildElemwiseRealBinary(opts: {
           if (ax !== undefined && bx !== undefined) {
             const v = complexFold(ax, bx);
             if (Number.isFinite(v.re) && Number.isFinite(v.im)) {
-              return scalarComplex(v);
+              return [scalarComplex(v)];
             }
           }
-          return scalarComplex();
+          return [scalarComplex()];
         }
         // At least one is a complex tensor (the all-real-tensor +
         // complex-scalar case is also here). Build the result shape
         // via the same broadcast logic; the result is a complex
         // tensor (or scalar if both are scalar — handled above).
-        const resolved = elemwiseResultShape(aN, bN, name, span);
+        const resolved = elemwiseResultShape(aN, bN, name);
         if (resolved === null) {
           // Unreachable: at least one is multi-element by the check
           // above. Defensive.
-          return scalarComplex();
+          return [scalarComplex()];
         }
-        return tensorComplexFromDims(resolved.outDims);
+        return [tensorComplexFromDims(resolved.outDims)];
       }
-      const resolved = elemwiseResultShape(aN, bN, name, span);
+      const resolved = elemwiseResultShape(aN, bN, name);
 
       if (resolved === null) {
         // Pure scalar op — fold if exact.
@@ -365,9 +370,9 @@ function buildElemwiseRealBinary(opts: {
         const bx = exactDouble(bN);
         if (ax !== undefined && bx !== undefined) {
           const v = fold(ax, bx);
-          if (Number.isFinite(v)) return scalarDouble(signFromNumber(v), v);
+          if (Number.isFinite(v)) return [scalarDouble(signFromNumber(v), v)];
         }
-        return scalarDouble(signRule(aN, bN));
+        return [scalarDouble(signRule(aN, bN))];
       }
 
       // Build the result NumericType (carries `shape` automatically when
@@ -386,15 +391,13 @@ function buildElemwiseRealBinary(opts: {
         outTy.shape !== undefined &&
         shapeNumel(outTy.shape) <= EXACT_ARRAY_MAX_ELEMENTS
       ) {
-        // Reuse the constructor so shape/exact get validated and sign
-        // is derived from the actual values.
         const data = broadcastFoldExact(aN, bN, outTy.shape, fold);
-        return tensorDouble(outTy.shape, data);
+        return [tensorDouble(outTy.shape, data)];
       }
       outTy.sign = signRule(aN, bN);
-      return outTy;
+      return [outTy];
     },
-    codegenC(argsC, argTypes) {
+    emit({ argsC, argTypes, useRuntime }) {
       const aN = argTypes[0] as NumericType;
       const bN = argTypes[1] as NumericType;
       const aMulti = isMultiElement(aN);
@@ -407,10 +410,15 @@ function buildElemwiseRealBinary(opts: {
               `internal: '${name}' missing complexScalarExpr but reached complex codegen`
             );
           }
+          if (complexRuntimeDeps) {
+            for (const d of complexRuntimeDeps) useRuntime(d);
+          }
           return complexScalarExpr(argsC[0], argsC[1]);
         }
         return scalarExpr(argsC[0], argsC[1]);
       }
+      // Tensor paths — activate the runtime helper for this op.
+      useRuntime(runtimeDep);
       if (anyComplex) {
         // Tensor + scalar / scalar + tensor with at least one
         // complex operand. The runtime helpers take a `double _Complex`
@@ -418,6 +426,8 @@ function buildElemwiseRealBinary(opts: {
         // `mtoc2_cmake(re, 0.0)` at emit. The receiver tensor is
         // already complex (we reject mixed real-tensor + complex-
         // tensor at the transfer layer).
+        useRuntime("mtoc2_tensor_elemwise_complex");
+        useRuntime("mtoc2_cscalar");
         const base = `mtoc2_tensor_${helperBase}_complex`;
         const promote = (c: string, isComplexArg: boolean): string =>
           isComplexArg ? c : `mtoc2_cmake(${c}, 0.0)`;
@@ -449,25 +459,7 @@ function buildElemwiseRealBinary(opts: {
       }
       return `mtoc2_tensor_${helperBase}_st(${argsC[0]}, ${argsC[1]})`;
     },
-    /** Per-slot template for the elementwise-fused emitter. The same
-     *  `scalarExpr` the scalar codegen path already uses — the fused
-     *  emitter feeds in `<var>.real[i]` for each tensor operand and a
-     *  bare C expression for each scalar operand. */
-    perSlotC(argsC, argTypes) {
-      const anyComplex =
-        (argTypes[0] as NumericType).isComplex ||
-        (argTypes[1] as NumericType).isComplex;
-      if (anyComplex) {
-        if (complexScalarExpr === undefined) {
-          throw new Error(
-            `internal: '${name}' missing complexScalarExpr in perSlotC`
-          );
-        }
-        return complexScalarExpr(argsC[0], argsC[1]);
-      }
-      return scalarExpr(argsC[0], argsC[1]);
-    },
-    runtimeDeps: [...allDeps, "mtoc2_tensor_elemwise_complex", "mtoc2_cscalar"],
+    elementwise: true,
   };
 }
 

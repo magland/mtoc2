@@ -7,17 +7,15 @@ import {
   typeToString,
   type Type,
 } from "../../types.js";
-import type { Span } from "../../../parser/index.js";
 
 /** Validate that args at positions [from..) are legal `mtoc2_fprintf_arg_t`
  *  slots — scalar real numeric, text, or real multi-element tensor.
- *  Throws TypeError / UnsupportedConstruct with a span on rejection.
- *  Shared by `fprintf`, `error`, future `sprintf`. */
+ *  Throws TypeError / UnsupportedConstruct (no span — framework attaches
+ *  via `withSpan`). Shared by `fprintf`, `error`, future `sprintf`. */
 export function validateFormatArgs(
   builtinName: string,
   argTypes: ReadonlyArray<Type>,
-  from: number,
-  span: Span
+  from: number
 ): void {
   for (let i = from; i < argTypes.length; i++) {
     const a = argTypes[i];
@@ -25,21 +23,18 @@ export function validateFormatArgs(
     if (isNumeric(a)) {
       if (a.isComplex) {
         throw new UnsupportedConstruct(
-          `'${builtinName}' on a complex arg is not yet supported`,
-          span
+          `'${builtinName}' on a complex arg is not yet supported`
         );
       }
       if (a.elem !== "double" && a.elem !== "logical") {
         throw new UnsupportedConstruct(
-          `'${builtinName}' on a '${a.elem}' arg is not yet supported`,
-          span
+          `'${builtinName}' on a '${a.elem}' arg is not yet supported`
         );
       }
       continue;
     }
     throw new TypeError(
-      `'${builtinName}' arg ${i + 1} must be numeric or text (got ${typeToString(a)})`,
-      span
+      `'${builtinName}' arg ${i + 1} must be numeric or text (got ${typeToString(a)})`
     );
   }
 }

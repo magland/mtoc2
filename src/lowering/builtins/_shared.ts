@@ -15,7 +15,7 @@ import {
 export function requireScalarRealDouble(
   t: Type,
   what: string,
-  span: Span
+  span?: Span
 ): void {
   if (!isScalarRealDouble(t)) {
     throw new TypeError(
@@ -27,7 +27,7 @@ export function requireScalarRealDouble(
 
 /** Like `requireScalarRealDouble` but accepts non-scalar real doubles
  *  (the elemwise path). Logical also accepted (stored as double in C). */
-export function requireRealDouble(t: Type, what: string, span: Span): void {
+export function requireRealDouble(t: Type, what: string, span?: Span): void {
   if (!isNumeric(t) || t.isComplex) {
     throw new TypeError(`${what} must be a real numeric (got ${t.kind})`, span);
   }
@@ -42,7 +42,7 @@ export function requireRealDouble(t: Type, what: string, span: Span): void {
 /** Accepts a real or complex numeric (double / logical). Used by the
  *  unary math builtins and the scalar/tensor arithmetic paths that
  *  contaminate to complex when either operand is complex. */
-export function requireRealOrComplex(t: Type, what: string, span: Span): void {
+export function requireRealOrComplex(t: Type, what: string, span?: Span): void {
   if (!isNumeric(t)) {
     throw new TypeError(`${what} must be a numeric (got ${t.kind})`, span);
   }
@@ -58,7 +58,7 @@ export function requireRealOrComplex(t: Type, what: string, span: Span): void {
 export function requireScalarRealOrComplex(
   t: Type,
   what: string,
-  span: Span
+  span?: Span
 ): void {
   if (!isNumeric(t) || !isScalar(t)) {
     throw new TypeError(

@@ -4,7 +4,7 @@
  * negative; complex input yields `carg(z)`.
  */
 
-import { UnsupportedConstruct } from "../../errors.js";
+import { TypeError, UnsupportedConstruct } from "../../errors.js";
 import {
   type NumericType,
   scalarDouble,
@@ -16,35 +16,43 @@ import { requireRealOrComplex, exactDouble, exactComplex } from "../_shared.js";
 
 export const angle: Builtin = {
   name: "angle",
-  arity: 1,
-  transfer(argTypes, span) {
-    requireRealOrComplex(argTypes[0], `'angle' arg`, span);
+  transfer(argTypes, nargout) {
+    if (argTypes.length !== 1) {
+      throw new TypeError(`'angle' expects 1 arg(s), got ${argTypes.length}`);
+    }
+    if (nargout !== 1) {
+      throw new UnsupportedConstruct(
+        `'angle' does not support multi-output (nargout=${nargout})`
+      );
+    }
+    requireRealOrComplex(argTypes[0], `'angle' arg`);
     const a = argTypes[0] as NumericType;
     if (isMultiElement(a)) {
       throw new UnsupportedConstruct(
-        `'angle' on a tensor is not yet supported`,
-        span
+        `'angle' on a tensor is not yet supported`
       );
     }
     if (a.isComplex) {
       const cx = exactComplex(a);
       if (cx !== undefined) {
         const v = Math.atan2(cx.im, cx.re);
-        if (Number.isFinite(v)) return scalarDouble(signFromNumber(v), v);
+        if (Number.isFinite(v)) return [scalarDouble(signFromNumber(v), v)];
       }
-      return scalarDouble();
+      return [scalarDouble()];
     }
     const v = exactDouble(a);
     if (v !== undefined) {
       const r = Math.atan2(0, v);
-      if (Number.isFinite(r)) return scalarDouble(signFromNumber(r), r);
+      if (Number.isFinite(r)) return [scalarDouble(signFromNumber(r), r)];
     }
-    return scalarDouble();
+    return [scalarDouble()];
   },
-  codegenC(argsC, argTypes) {
+  emit({ argsC, argTypes, useRuntime }) {
     const a = argTypes[0] as NumericType;
-    if (a.isComplex) return `mtoc2_cangle(${argsC[0]})`;
+    if (a.isComplex) {
+      useRuntime("mtoc2_cscalar");
+      return `mtoc2_cangle(${argsC[0]})`;
+    }
     return `atan2(0.0, ${argsC[0]})`;
   },
-  runtimeDeps: ["mtoc2_cscalar"],
 };

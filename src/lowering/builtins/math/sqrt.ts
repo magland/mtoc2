@@ -20,14 +20,13 @@ export const sqrt = defineUnaryRealMath({
   cFnReal: "sqrt",
   jsFn: x => Math.sqrt(x),
   signRule: t => (signIsPositive(t.sign) ? "positive" : "nonneg"),
-  requireDomain: (t, span) => {
+  requireDomain: t => {
     if (!signIsNonneg(t.sign)) {
       throw new TypeError(
         `'sqrt' of input that may be negative is not yet supported ` +
           `for real-typed input (would produce a complex result). ` +
           `Either guard upstream or make the input complex (e.g. ` +
-          `'sqrt(x + 0i)').`,
-        span
+          `'sqrt(x + 0i)').`
       );
     }
   },

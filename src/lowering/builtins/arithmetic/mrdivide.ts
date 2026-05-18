@@ -1,35 +1,37 @@
-import { UnsupportedConstruct } from "../../errors.js";
+import { TypeError, UnsupportedConstruct } from "../../errors.js";
 import { isMultiElement } from "../../types.js";
-import { type Builtin, getBuiltin } from "../registry.js";
+import type { Builtin } from "../registry.js";
 import { requireRealOrComplex } from "../_shared.js";
+import { rdivide } from "./rdivide.js";
 
-// `mrdivide` (matrix /): mirrors `rdivide` when at least one arg is scalar;
-// rejects the both-tensor case until matrix right-division is implemented.
+/** `mrdivide` (matrix /): mirrors `rdivide` when at least one arg is
+ *  scalar; rejects the both-tensor case until matrix right-division
+ *  is implemented. */
 export const mrdivide: Builtin = {
   name: "mrdivide",
-  arity: 2,
-  transfer(argTypes, span) {
-    const a = argTypes[0];
-    const b = argTypes[1];
-    requireRealOrComplex(a, `'mrdivide' arg 1`, span);
-    requireRealOrComplex(b, `'mrdivide' arg 2`, span);
-    if (isMultiElement(a) && isMultiElement(b)) {
-      throw new UnsupportedConstruct(
-        `matrix right-division (a/b on two tensors) is not yet supported; use './' for elementwise`,
-        span
+  transfer(argTypes, nargout) {
+    if (argTypes.length !== 2) {
+      throw new TypeError(
+        `'mrdivide' expects 2 arg(s), got ${argTypes.length}`
       );
     }
-    return getBuiltin("rdivide")!.transfer(argTypes, span);
+    const a = argTypes[0];
+    const b = argTypes[1];
+    requireRealOrComplex(a, `'mrdivide' arg 1`);
+    requireRealOrComplex(b, `'mrdivide' arg 2`);
+    if (isMultiElement(a) && isMultiElement(b)) {
+      throw new UnsupportedConstruct(
+        `matrix right-division (a/b on two tensors) is not yet supported; use './' for elementwise`
+      );
+    }
+    return rdivide.transfer(argTypes, nargout);
   },
-  codegenC(argsC, argTypes) {
-    return getBuiltin("rdivide")!.codegenC(argsC, argTypes);
+  emit(args) {
+    return rdivide.emit(args);
   },
-  /** `mrdivide` between two tensors is rejected in `transfer`, so the
-   *  only case reaching codegen is at-least-one-scalar — identical to
-   *  elementwise `rdivide`. Forward to keep the fused emitter able to
-   *  render `t / scalar` as one inline loop. */
-  perSlotC(argsC, argTypes) {
-    return getBuiltin("rdivide")!.perSlotC!(argsC, argTypes);
-  },
-  runtimeDeps: ["mtoc2_tensor_elemwise_real", "mtoc2_cdiv"],
+  // `mrdivide` between two tensors is rejected in `transfer`; the only
+  // case reaching emit is at-least-one-scalar — identical to elementwise
+  // `rdivide`. Mark elementwise so the fused emitter can render
+  // `t / scalar` as one inline loop.
+  elementwise: true,
 };

@@ -8,6 +8,7 @@
  *     imaginary part is dropped. (numbl matches.)
  */
 
+import { TypeError, UnsupportedConstruct } from "../../errors.js";
 import { isNumeric, isScalar, scalarLogical, type Type } from "../../types.js";
 import type { Builtin } from "../registry.js";
 import {
@@ -30,35 +31,45 @@ export function defineCompare(
 ): Builtin {
   return {
     name,
-    arity: 2,
-    transfer(argTypes, span) {
-      requireScalarRealOrComplex(argTypes[0], `'${name}' arg 1`, span);
-      requireScalarRealOrComplex(argTypes[1], `'${name}' arg 2`, span);
+    transfer(argTypes, nargout) {
+      if (argTypes.length !== 2) {
+        throw new TypeError(
+          `'${name}' expects 2 arg(s), got ${argTypes.length}`
+        );
+      }
+      if (nargout !== 1) {
+        throw new UnsupportedConstruct(
+          `'${name}' does not support multi-output (nargout=${nargout})`
+        );
+      }
+      requireScalarRealOrComplex(argTypes[0], `'${name}' arg 1`);
+      requireScalarRealOrComplex(argTypes[1], `'${name}' arg 2`);
       if (isScalarComplex(argTypes[0]) || isScalarComplex(argTypes[1])) {
         const ax = exactScalarAsComplex(argTypes[0]);
         const bx = exactScalarAsComplex(argTypes[1]);
         if (ax !== undefined && bx !== undefined) {
           if (kind === "eq") {
-            return scalarLogical(ax.re === bx.re && ax.im === bx.im);
+            return [scalarLogical(ax.re === bx.re && ax.im === bx.im)];
           }
           if (kind === "ne") {
-            return scalarLogical(ax.re !== bx.re || ax.im !== bx.im);
+            return [scalarLogical(ax.re !== bx.re || ax.im !== bx.im)];
           }
-          return scalarLogical(fold(ax.re, bx.re));
+          return [scalarLogical(fold(ax.re, bx.re))];
         }
-        return scalarLogical();
+        return [scalarLogical()];
       }
       const ax = exactDouble(argTypes[0]);
       const bx = exactDouble(argTypes[1]);
       if (ax !== undefined && bx !== undefined) {
-        return scalarLogical(fold(ax, bx));
+        return [scalarLogical(fold(ax, bx))];
       }
-      return scalarLogical();
+      return [scalarLogical()];
     },
-    codegenC(argsC, argTypes) {
+    emit({ argsC, argTypes, useRuntime }) {
       const aCx = isScalarComplex(argTypes[0]);
       const bCx = isScalarComplex(argTypes[1]);
       if (aCx || bCx) {
+        useRuntime("mtoc2_cscalar");
         // Materialize re/im for the operands; project a real-typed
         // operand to (re, 0) inline so the C expression doesn't have
         // to branch on which side is complex.
@@ -78,6 +89,6 @@ export function defineCompare(
       }
       return `((${argsC[0]} ${cOp} ${argsC[1]}) ? 1.0 : 0.0)`;
     },
-    runtimeDeps: ["mtoc2_cscalar"],
+    elementwise: true,
   };
 }

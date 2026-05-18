@@ -11,13 +11,12 @@ export const log = defineUnaryRealMath({
   cFnReal: "log",
   jsFn: Math.log,
   signRule: () => "unknown",
-  requireDomain: (t, span) => {
+  requireDomain: t => {
     if (!signIsPositive(t.sign)) {
       throw new TypeError(
         `'log' of input that is not statically positive is not yet supported ` +
           `for real-typed input (produces -Inf or complex). Guard upstream ` +
-          `or make the input complex (e.g. 'log(x + 0i)').`,
-        span
+          `or make the input complex (e.g. 'log(x + 0i)').`
       );
     }
   },
