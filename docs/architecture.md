@@ -297,7 +297,7 @@ to per-kind C representations sharing one four-helper contract:
 - Class instances → `mtoc2_class_<safeName>__<8hex>` typedef,
   helpers program-emitted per shape.
 
-`ownedHelpersFor(ty)` in `emit.ts` is the single dispatch point —
+`ownedHelpersFor(ty)` in `src/codegen/cHelpers.ts` is the single dispatch point —
 returns the helper-name family + a flag noting whether the helpers
 come from the runtime-snippet registry (tensor) or from the
 program-emitted typedef block (struct/class). Memory model is
@@ -477,7 +477,15 @@ produces distinct C specs.
 
 ## Stage 3: emit
 
-`src/codegen/emit.ts` walks the IR and produces a single C string.
+The emit pass walks the IR and produces a single C source string.
+Its body is split across a handful of files under `src/codegen/` —
+`emit.ts` is the program-level entry point (`emitProgram`) and
+named-typedef topo sort; `emitStmt.ts` carries the function shape and
+the statement switch; `emitExpr.ts` carries the expression switch;
+`emitIndex.ts` and `emitTensorConcat.ts` carry the longer specialized
+emit blocks (IndexSlice / IndexSliceStore / scalar offset / slot
+setup, and TensorConcat respectively); `cFormat.ts` holds the pure
+C-string utilities.
 
 Every emitted function carries a block-comment header
 (`src/codegen/prettyIR.ts:irFuncDocComment`) with the source name, the
