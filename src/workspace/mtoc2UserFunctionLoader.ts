@@ -43,6 +43,36 @@ interface UserExports {
   }) => string;
   cBody: (args: { prefix: string }) => string;
   cHeaders?: ReadonlyArray<string>;
+  /** Sibling files (relative to the .mtoc2.js) that mtoc2 makes
+   *  available to the C build. `.c` files are compiled along with
+   *  the main translation unit; `.h` files just sit in the include
+   *  path so the user's `.c` and the inline `cBody` can `#include`
+   *  them. Paths are resolved relative to the `.mtoc2.js`'s
+   *  directory. */
+  cSources?: ReadonlyArray<string>;
+  /** mtoc2 runtime snippet names that `cBody` references (e.g.
+   *  `"mtoc2_tensor_alloc_nd"` when the wrapper allocates an output
+   *  tensor). Each name is activated alongside the user's cBody so
+   *  the snippet's definition lands in the emitted C. */
+  runtimeDeps?: ReadonlyArray<string>;
+}
+
+/** Resolved sibling file: the relative path (used by the build to
+ *  pick a unique on-disk name) plus the file's text. */
+export interface ResolvedCSource {
+  /** Path as written by the user in `exports.cSources` (e.g.
+   *  `"impl.c"` or `"sub/helpers.h"`). */
+  relPath: string;
+  /** File text the build will write to disk. */
+  source: string;
+}
+
+/** Loader output: the assembled `Builtin` plus the user-supplied C
+ *  sibling files the framework needs to thread through to the build
+ *  pipeline. */
+export interface LoadedUserFunction {
+  builtin: Builtin;
+  cSources: ResolvedCSource[];
 }
 
 /** C-identifier-safe transform of a workspace function name. Dots in
@@ -130,28 +160,63 @@ function validateExports(
       `mtoc2 user function '${fileName}': 'cHeaders' must be a string[] when present`
     );
   }
+  const cSources = raw.cSources;
+  if (
+    cSources !== undefined &&
+    !(Array.isArray(cSources) && cSources.every(s => typeof s === "string"))
+  ) {
+    throw new UnsupportedConstruct(
+      `mtoc2 user function '${fileName}': 'cSources' must be a string[] when present`
+    );
+  }
+  const runtimeDeps = raw.runtimeDeps;
+  if (
+    runtimeDeps !== undefined &&
+    !(
+      Array.isArray(runtimeDeps) &&
+      runtimeDeps.every(s => typeof s === "string")
+    )
+  ) {
+    throw new UnsupportedConstruct(
+      `mtoc2 user function '${fileName}': 'runtimeDeps' must be a string[] when present`
+    );
+  }
   return {
     name: raw.name,
     transfer: requireFn("transfer") as UserExports["transfer"],
     emit: requireFn("emit") as UserExports["emit"],
     cBody: requireFn("cBody") as UserExports["cBody"],
     ...(headers !== undefined ? { cHeaders: headers as string[] } : {}),
+    ...(cSources !== undefined ? { cSources: cSources as string[] } : {}),
+    ...(runtimeDeps !== undefined
+      ? { runtimeDeps: runtimeDeps as string[] }
+      : {}),
   };
 }
 
-/** Evaluate a `.mtoc2.js` file and return its assembled `Builtin`.
- *  The `expectedName` is what numbl's workspace registered the file
- *  under (derived from the file's basename / package path); we
- *  validate the user's `exports.name` matches so a typo / rename
- *  surfaces here rather than at the first call site.
+/** Evaluate a `.mtoc2.js` file and return its assembled `Builtin`
+ *  plus the user-supplied sibling C files (`cSources`).
  *
- *  `relPath` is the workspace-relative path used for the prefix hash. */
+ *  - `fileName` — the .mtoc2.js's full path (used for diagnostics and
+ *    to resolve sibling paths).
+ *  - `expectedName` — what numbl's workspace registered the file
+ *    under (derived from the file's basename / package path); we
+ *    validate the user's `exports.name` matches so a typo / rename
+ *    surfaces here rather than at the first call site.
+ *  - `relPath` — workspace-relative path used for the prefix hash.
+ *  - `readSibling(p)` — given a path-key relative to the .mtoc2.js's
+ *    directory, return the sibling file's source text. Used to pull
+ *    `cSources` entries out of the workspace's file map (which is
+ *    the same regardless of CLI vs web IDE). Returns `undefined` if
+ *    the file is not in the workspace; the loader throws a clear
+ *    error pointing at the missing path. */
 export function loadMtoc2UserFunction(
   fileName: string,
   source: string,
   expectedName: string,
-  relPath: string
-): Builtin {
+  relPath: string,
+  readSibling: (siblingRelPath: string) => string | undefined
+): LoadedUserFunction {
   const raw = evalSource(fileName, source);
   const userExports = validateExports(fileName, raw);
   if (userExports.name !== expectedName) {
@@ -191,9 +256,38 @@ export function loadMtoc2UserFunction(
     name: snippetName,
     code: cBodyText,
     headers: userExports.cHeaders,
+    // Runtime deps the user's cBody references (e.g.
+    // `mtoc2_tensor_alloc_nd` for the common alloc-and-return
+    // pattern). Activation pulls each in along with the cBody so
+    // the definitions land in the emitted C.
+    deps: userExports.runtimeDeps,
   };
 
-  return {
+  // Resolve every `cSources` entry against the workspace's file map.
+  // A missing file is a clear-attribution error: the user wrote a
+  // path that we can't find on disk / in the workspace.
+  const resolvedCSources: ResolvedCSource[] = [];
+  if (userExports.cSources !== undefined) {
+    for (const rel of userExports.cSources) {
+      if (typeof rel !== "string") {
+        throw new UnsupportedConstruct(
+          `mtoc2 user function '${fileName}': every 'cSources' entry must ` +
+            `be a string path`
+        );
+      }
+      const src = readSibling(rel);
+      if (src === undefined) {
+        throw new UnsupportedConstruct(
+          `mtoc2 user function '${fileName}': 'cSources' entry '${rel}' ` +
+            `not found in the workspace (sibling path resolved relative ` +
+            `to the .mtoc2.js's directory)`
+        );
+      }
+      resolvedCSources.push({ relPath: rel, source: src });
+    }
+  }
+
+  const builtin: Builtin = {
     name: userExports.name,
     transfer(argTypes, nargout) {
       // Pass mtoc2's Type[] straight through to the user; they read
@@ -227,4 +321,6 @@ export function loadMtoc2UserFunction(
       return out;
     },
   };
+
+  return { builtin, cSources: resolvedCSources };
 }

@@ -37,6 +37,18 @@ export interface TranslateError {
 
 export interface TranslateResult {
   c?: string;
+  /** Sibling C/H files supplied by `.mtoc2.js` user functions via
+   *  `exports.cSources`. The build pipeline writes each `relPath` to
+   *  a per-owner subdirectory under the build root and adds the
+   *  subdir to `-I`; `.c` entries get compiled along with the main
+   *  output, `.h` entries just sit in the include path. Empty when
+   *  no user function declared `cSources`. */
+  extraCSources?: ReadonlyArray<{
+    ownerFunc: string;
+    ownerHash: string;
+    relPath: string;
+    source: string;
+  }>;
   error?: TranslateError;
 }
 
@@ -117,6 +129,7 @@ export function translateProject(
         threads: opts.threads,
         workspace,
       }),
+      extraCSources: workspace.getUserCSources(),
     };
   } catch (e) {
     if (e instanceof UnsupportedConstruct || e instanceof TypeError) {

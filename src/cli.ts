@@ -22,6 +22,7 @@ import {
   statSync,
   writeFileSync,
   mkdtempSync,
+  mkdirSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -106,7 +107,19 @@ function scanSiblings(dir: string, excludeAbs: string): SourceFile[] {
         continue;
       }
       if (!st.isFile()) continue;
-      if (!entry.endsWith(".m") && !entry.endsWith(".mtoc2.js")) continue;
+      // `.m` — workspace MATLAB sources.
+      // `.mtoc2.js` — user-function declarations (numbl-resolved).
+      // `.c` / `.h` — sibling files referenced by `.mtoc2.js`
+      //   `exports.cSources`. Loaded into the workspace map so the
+      //   loader can pull them by relative path; never parsed.
+      if (
+        !entry.endsWith(".m") &&
+        !entry.endsWith(".mtoc2.js") &&
+        !entry.endsWith(".c") &&
+        !entry.endsWith(".h")
+      ) {
+        continue;
+      }
       if (resolve(full) === excludeAbs) continue;
       out.push({ name: full, source: readFileSync(full, "utf8") });
     }
@@ -119,13 +132,26 @@ function scanSiblings(dir: string, excludeAbs: string): SourceFile[] {
  *  list and search paths; both `translateFile` and `cmdEval` route
  *  through here so the in-memory-source path doesn't accidentally
  *  diverge from the on-disk one. */
+/** Output of `translateFiles`: the main C source plus any `cSources`
+ *  user functions declared. `runCSource` writes the extras into the
+ *  build directory and threads them into the compile command. */
+interface TranslatedProject {
+  c: string;
+  extraCSources: ReadonlyArray<{
+    ownerFunc: string;
+    ownerHash: string;
+    relPath: string;
+    source: string;
+  }>;
+}
+
 function translateFiles(
   files: SourceFile[],
   mainName: string,
   searchPaths: string[],
   threads?: number | "auto",
   enableTempInlining?: boolean
-): string {
+): TranslatedProject {
   const result = translateProject(files, mainName, {
     searchPaths,
     threads,
@@ -139,7 +165,10 @@ function translateFiles(
     console.error(`${file}: ${e.kind}: ${e.message}${where}`);
     process.exit(1);
   }
-  return result.c ?? "";
+  return {
+    c: result.c ?? "",
+    extraCSources: result.extraCSources ?? [],
+  };
 }
 
 function translateFile(
@@ -147,7 +176,7 @@ function translateFile(
   extraPaths: string[] = [],
   threads?: number | "auto",
   enableTempInlining?: boolean
-): string {
+): TranslatedProject {
   const absScript = resolve(scriptPath);
   const source = readFileSync(absScript, "utf8");
   const dir = dirname(absScript);
@@ -177,7 +206,7 @@ function translateInline(
   extraPaths: string[] = [],
   threads?: number | "auto",
   enableTempInlining?: boolean
-): string {
+): TranslatedProject {
   // "eval.m" is the same synthetic name numbl uses (`cmdEval` in
   // numbl/src/cli.ts) so diagnostics from the cross-runner reference
   // the same file in both runners.
@@ -242,18 +271,49 @@ interface RunOptions {
  *  `eval` so both subcommands take the identical post-translate
  *  pipeline (compile via `cc`, spawn the binary, intercept plot
  *  records, wait for exit + plot server close). */
-async function runCSource(cSrc: string, opts: RunOptions): Promise<void> {
+async function runCSource(
+  translated: TranslatedProject,
+  opts: RunOptions
+): Promise<void> {
+  const cSrc = translated.c;
   if (opts.dumpC) writeFileSync(opts.dumpC, cSrc);
   const dir = mkdtempSync(join(tmpdir(), "mtoc2-"));
   const cFile = join(dir, "out.c");
   const exeFile = join(dir, "out");
   writeFileSync(cFile, cSrc);
 
+  // Stage every `.mtoc2.js`-supplied `cSources` entry into a per-owner
+  // subdirectory under the build root. Each subdir name embeds the
+  // owner's prefix hash (same one that mangles the in-language `cBody`
+  // helpers) so two user functions with same-basename sibling files
+  // can't collide. `.h` entries just sit in their subdir; `.c` entries
+  // get added to the `cc` command alongside the main source. We pass
+  // `-I<subdir>` for each so the user's `.c` can `#include "foo.h"`
+  // and so the main `out.c`'s inline `cBody` can include the same.
+  const extraCFiles: string[] = [];
+  const extraIncludeDirs = new Set<string>();
+  for (const cs of translated.extraCSources) {
+    const subdir = join(dir, "user_" + cs.ownerHash);
+    mkdirSync(subdir, { recursive: true });
+    const target = join(subdir, cs.relPath);
+    // Nested `relPath` (e.g. "sub/helpers.c") needs its dirs created.
+    mkdirSync(dirname(target), { recursive: true });
+    writeFileSync(target, cs.source);
+    extraIncludeDirs.add(subdir);
+    if (cs.relPath.endsWith(".c")) {
+      extraCFiles.push(target);
+    }
+  }
+
   const ccArgs = buildCcArgs(cFile, exeFile, {
     checkLeaks: opts.checkLeaks,
     fastMath: opts.opt.fastMath,
     threads: opts.opt.threads,
   });
+  for (const inc of extraIncludeDirs) {
+    ccArgs.push("-I", inc);
+  }
+  ccArgs.push(...extraCFiles);
   // mtoc2's elementwise loops live in macro-defined helpers; the
   // generated user code occasionally produces unused labels / static
   // helpers that the C compiler warns about at -O3. Silence those so
@@ -317,7 +377,20 @@ async function runCSource(cSrc: string, opts: RunOptions): Promise<void> {
  *  intercepted with the same line-splitter as `runCSource` — the JS
  *  runtime writes `printf` output to `process.stdout`, so the plot
  *  prefix is byte-for-byte identical to the C path. */
-async function runJsSource(cSrc: string, opts: RunOptions): Promise<void> {
+async function runJsSource(
+  translated: TranslatedProject,
+  opts: RunOptions
+): Promise<void> {
+  const cSrc = translated.c;
+  if (translated.extraCSources.length > 0) {
+    console.error(
+      `--js: '.mtoc2.js' user functions with 'cSources' are not yet ` +
+        `supported on the JS target (only the native and wasm targets ` +
+        `compile user .c files today). Run without --js, or remove the ` +
+        `cSources entry.`
+    );
+    process.exit(1);
+  }
   if (opts.dumpC) writeFileSync(opts.dumpC, cSrc);
   const jsSrc = translateCToJs(cSrc);
   if (opts.dumpJs) writeFileSync(opts.dumpJs, jsSrc);
@@ -490,7 +563,16 @@ async function main(): Promise<void> {
   if (cmd === "translate") {
     if (argv.length < 2) usage();
     const script = argv[1];
-    const c = translateFile(script);
+    const t = translateFile(script);
+    if (t.extraCSources.length > 0) {
+      console.error(
+        `'translate' produces a single C string and cannot represent ` +
+          `'.mtoc2.js' user functions that declare 'cSources'. Run via ` +
+          `'mtoc2 run <script>' instead (the run pipeline writes each ` +
+          `extra .c to the build directory and compiles them together).`
+      );
+      process.exit(1);
+    }
     let outPath: string | null = null;
     for (let i = 2; i < argv.length; i++) {
       if (argv[i] === "-o" && i + 1 < argv.length) {
@@ -499,9 +581,9 @@ async function main(): Promise<void> {
       }
     }
     if (outPath) {
-      writeFileSync(outPath, c);
+      writeFileSync(outPath, t.c);
     } else {
-      process.stdout.write(c);
+      process.stdout.write(t.c);
     }
     return;
   }

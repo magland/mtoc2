@@ -34,7 +34,19 @@ import {
   type ClassRegistration,
 } from "../lowering/classDefs.js";
 import type { Builtin } from "../lowering/builtins/registry.js";
+import { hashType } from "../lowering/types.js";
 import { loadMtoc2UserFunction } from "./mtoc2UserFunctionLoader.js";
+
+/** Slash-only path helpers — workspace file names use forward slashes
+ *  everywhere (CLI absolutifies before storing, web IDE is flat). */
+function dirnameOf(p: string): string {
+  const i = p.lastIndexOf("/");
+  return i >= 0 ? p.slice(0, i + 1) : "";
+}
+function joinPath(dir: string, rel: string): string {
+  if (dir === "") return rel;
+  return dir.endsWith("/") ? dir + rel : dir + "/" + rel;
+}
 
 type FuncStmt = Extract<Stmt, { type: "Function" }>;
 type ClassDefStmt = Extract<Stmt, { type: "ClassDef" }>;
@@ -131,6 +143,19 @@ export class Workspace {
    *  `mtoc2UserFunctionsByName` keys). Populated lazily by `finalize`. */
   private userBuiltins: Map<string, Builtin> = new Map();
 
+  /** Sibling C/H files pulled in by `.mtoc2.js` user functions via
+   *  `exports.cSources`. Each entry carries the originating
+   *  `.mtoc2.js` function name (for namespacing in the build dir),
+   *  the file's relative path (as the user wrote it), and the file
+   *  text. Populated lazily by `finalize`; exposed via
+   *  `getUserCSources()` for the build pipeline. */
+  private userCSources: Array<{
+    ownerFunc: string;
+    ownerHash: string;
+    relPath: string;
+    source: string;
+  }> = [];
+
   private finalized = false;
 
   constructor(mainFile: string, searchPaths: ReadonlyArray<string> = []) {
@@ -150,7 +175,15 @@ export class Workspace {
    *    and (later) evaluates the JS via `loadMtoc2UserFunctions`. No
    *    AST is required. */
   addFile(file: WorkspaceFile): void {
-    if (file.name.endsWith(".mtoc2.js")) {
+    if (
+      file.name.endsWith(".mtoc2.js") ||
+      file.name.endsWith(".c") ||
+      file.name.endsWith(".h")
+    ) {
+      // `.mtoc2.js` source text (read by the user-function loader).
+      // `.c` / `.h` are sibling files referenced via `cSources`;
+      // they live in `this.files` but never get an AST and never
+      // reach numbl's workspace registration.
       this.files.set(file.name, file);
       return;
     }
@@ -184,9 +217,13 @@ export class Workspace {
       }
     }
 
-    // Workspace files = everything except the main file.
+    // Workspace files = everything except the main file. `.c`/`.h`
+    // sibling files are kept on `this.files` for the user-function
+    // loader to read, but they're not workspace functions and never
+    // reach numbl's resolver.
     const wsFiles = [...this.files.values()]
       .filter(f => f.name !== this.mainFile)
+      .filter(f => !f.name.endsWith(".c") && !f.name.endsWith(".h"))
       .map(f => ({ name: f.name, source: f.source }));
     this.ctx.registerWorkspaceFiles(wsFiles);
     this.ctx.buildFunctionIndex();
@@ -252,13 +289,27 @@ export class Workspace {
     for (const [funcName, entry] of this.ctx.registry
       .mtoc2UserFunctionsByName) {
       const relPath = this.workspaceRelativePath(entry.fileName);
-      const b = loadMtoc2UserFunction(
+      const fileDir = dirnameOf(entry.fileName);
+      const loaded = loadMtoc2UserFunction(
         entry.fileName,
         entry.source,
         funcName,
-        relPath
+        relPath,
+        siblingRelPath => {
+          const f = this.files.get(joinPath(fileDir, siblingRelPath));
+          return f?.source;
+        }
       );
-      this.userBuiltins.set(funcName, b);
+      this.userBuiltins.set(funcName, loaded.builtin);
+      const ownerHash = hashType(relPath);
+      for (const cs of loaded.cSources) {
+        this.userCSources.push({
+          ownerFunc: funcName,
+          ownerHash,
+          relPath: cs.relPath,
+          source: cs.source,
+        });
+      }
     }
 
     this.finalized = true;
@@ -293,6 +344,24 @@ export class Workspace {
   getUserBuiltin(name: string): Builtin | undefined {
     this.finalize();
     return this.userBuiltins.get(name);
+  }
+
+  /** Sibling C/H files supplied by `.mtoc2.js` user functions via
+   *  `exports.cSources`. The build pipeline writes each file to a
+   *  per-owner subdirectory under the build root and adds `-I` for
+   *  that subdir; `.c` entries are compiled along with the main C,
+   *  `.h` entries just sit in the include path. Each entry's
+   *  `ownerHash` is the same FNV-1a hash that names the owner's
+   *  C-symbol prefix, so per-user-function subdirs stay collision-
+   *  free even if two files share a basename. */
+  getUserCSources(): ReadonlyArray<{
+    ownerFunc: string;
+    ownerHash: string;
+    relPath: string;
+    source: string;
+  }> {
+    this.finalize();
+    return this.userCSources;
   }
 
   /** Pull the primary Function AST from each `@ClassName/<methodName>.m`
@@ -525,7 +594,16 @@ export function parseFiles(
   files: ReadonlyArray<{ name: string; source: string }>
 ): WorkspaceFile[] {
   return files.map(f => {
-    if (f.name.endsWith(".mtoc2.js")) {
+    // `.mtoc2.js` files are JavaScript text — no MATLAB parse.
+    // `.c` / `.h` files are sibling files referenced via
+    // `exports.cSources`; they pass straight into the workspace
+    // map so the user-function loader can read them by relative
+    // path, but no parser ever touches them.
+    if (
+      f.name.endsWith(".mtoc2.js") ||
+      f.name.endsWith(".c") ||
+      f.name.endsWith(".h")
+    ) {
       return { name: f.name, source: f.source };
     }
     return {
