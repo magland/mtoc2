@@ -21,8 +21,8 @@ import {
   isMultiOutputSlotType,
   typeToString,
 } from "./types.js";
-import { getBuiltin } from "./builtins/index.js";
-import type { Builtin } from "./builtins/registry.js";
+import { getBuiltin } from "../builtins/index.js";
+import type { Builtin } from "../builtins/registry.js";
 import { withSpan } from "./errors.js";
 import type { Lowerer } from "./lower.js";
 import { tryExtractDottedName } from "./lower.js";

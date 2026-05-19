@@ -34,7 +34,7 @@ import {
   typeToString,
 } from "./types.js";
 import type { DimInfo, NumericType } from "./types.js";
-import { exactDouble, exactScalarAsComplex } from "./builtins/_shared.js";
+import { exactDouble, exactScalarAsComplex } from "../builtins/defs/_shared.js";
 import type { Lowerer } from "./lower.js";
 
 export function lowerTensorLit(

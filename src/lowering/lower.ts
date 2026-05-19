@@ -90,9 +90,9 @@ import {
   getBuiltin,
   binaryOpBuiltin,
   unaryOpBuiltin,
-} from "./builtins/index.js";
+} from "../builtins/index.js";
 import { withSpan } from "./errors.js";
-import { exactComplex } from "./builtins/_shared.js";
+import { exactComplex } from "../builtins/defs/_shared.js";
 import { isSliceArg } from "./indexResolve.js";
 import { lowerTensorLit } from "./lowerTensorLit.js";
 import { lowerMultiAssign } from "./lowerMultiAssign.js";

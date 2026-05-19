@@ -49,7 +49,7 @@ import type {
   MultiAssignCall,
 } from "../lowering/ir.js";
 import { UnsupportedConstruct } from "../lowering/errors.js";
-import { requireEmitJs } from "../lowering/builtins/registry.js";
+import { requireEmitJs } from "../builtins/registry.js";
 import {
   lookupBuiltin,
   newRuntimeState,

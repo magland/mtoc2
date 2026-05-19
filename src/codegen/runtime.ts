@@ -14,9 +14,9 @@
  * pulls dependencies in first.
  */
 
-import { C_SNIPPETS, JS_SNIPPETS } from "./runtime/snippets.gen.js";
-import { getBuiltin } from "../lowering/builtins/index.js";
-import type { Builtin } from "../lowering/builtins/registry.js";
+import { C_SNIPPETS, JS_SNIPPETS } from "../builtins/runtime/snippets.gen.js";
+import { getBuiltin } from "../builtins/index.js";
+import type { Builtin } from "../builtins/registry.js";
 
 /** Minimal Workspace shape consulted at emit time. Importing the
  *  concrete Workspace class would create a cycle (workspace ↔ codegen);

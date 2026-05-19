@@ -31,8 +31,8 @@
 import type { Assign, IRExpr } from "../lowering/ir.js";
 import type { NumericType, Type } from "../lowering/types.js";
 import { DIM_ONE, isMultiElement, isNumeric } from "../lowering/types.js";
-import { getBuiltin } from "../lowering/builtins/index.js";
-import { requireEmitC } from "../lowering/builtins/registry.js";
+import { getBuiltin } from "../builtins/index.js";
+import { requireEmitC } from "../builtins/registry.js";
 import {
   lookupBuiltin,
   makeEmitUseRuntime,

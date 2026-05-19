@@ -22,7 +22,7 @@ import {
   useRuntimeByName,
   type RuntimeState,
 } from "./runtime.js";
-import { requireEmitC } from "../lowering/builtins/registry.js";
+import { requireEmitC } from "../builtins/registry.js";
 import { cStringLiteral, dimsProductExpr } from "./cFormat.js";
 import { emitTensorConcat } from "./emitTensorConcat.js";
 import { emitIndexSliceProducer, emitNdScalarOffset } from "./emitIndex.js";

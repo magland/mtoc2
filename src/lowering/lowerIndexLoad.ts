@@ -27,7 +27,7 @@ import type { Lowerer } from "./lower.js";
 import { resolveIndexBase } from "./indexResolve.js";
 import { lowerIndexSlice } from "./lowerIndexSlice.js";
 import { columnMajorOffsetFromIndices } from "./indexFold.js";
-import { exactComplexArray, exactRealArray } from "./builtins/_shared.js";
+import { exactComplexArray, exactRealArray } from "../builtins/defs/_shared.js";
 
 /** Lower an index-read of an in-scope variable. */
 export function lowerIndexLoad(

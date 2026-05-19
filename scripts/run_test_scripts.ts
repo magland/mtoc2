@@ -74,7 +74,7 @@ const MAX_DIFF_LINES = 30;
  *
  *  Currently:
  *  - Plot dispatch records: `\x1emtoc2:plot\t{json}\n` per
- *    plotting builtin call. See `src/codegen/runtime/plot_dispatch.h`.
+ *    plotting builtin call. See `src/builtins/runtime/plot_dispatch.h`.
  */
 const GLOBAL_DROPS: ReadonlyArray<RegExp> = [
   // The \x1e (RS) sentinel is deliberate — see plot_dispatch.h.

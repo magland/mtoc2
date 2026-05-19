@@ -33,7 +33,7 @@ import {
   registerClassDef,
   type ClassRegistration,
 } from "../lowering/classDefs.js";
-import type { Builtin } from "../lowering/builtins/registry.js";
+import type { Builtin } from "../builtins/registry.js";
 import { hashType } from "../lowering/types.js";
 import { loadMtoc2UserFunction } from "./mtoc2UserFunctionLoader.js";
 

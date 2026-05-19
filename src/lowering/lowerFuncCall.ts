@@ -28,7 +28,7 @@ import {
   structType,
   typeToString,
 } from "./types.js";
-import { getBuiltin } from "./builtins/index.js";
+import { getBuiltin } from "../builtins/index.js";
 import { withSpan } from "./errors.js";
 import { isSliceArg } from "./indexResolve.js";
 import { lowerIndexLoad } from "./lowerIndexLoad.js";

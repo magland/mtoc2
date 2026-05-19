@@ -23,7 +23,7 @@ import {
   useRuntimeByName,
   type RuntimeState,
 } from "./runtime.js";
-import { requireEmitC } from "../lowering/builtins/registry.js";
+import { requireEmitC } from "../builtins/registry.js";
 import {
   computeFutureTouches,
   earlyFreeCandidates,

@@ -1,5 +1,5 @@
 import type * as monaco from "monaco-editor";
-import { allBuiltinNames } from "../lowering/builtins/index.js";
+import { allBuiltinNames } from "../builtins/index.js";
 
 export const numblLanguageConfig: monaco.languages.LanguageConfiguration = {
   comments: {

@@ -31,7 +31,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, join, resolve } from "node:path";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const runtimeDir = resolve(here, "..", "src", "codegen", "runtime");
+const runtimeDir = resolve(here, "..", "src", "builtins", "runtime");
 const outFile = join(runtimeDir, "snippets.gen.ts");
 
 function stripJsExportsAndImports(src: string): string {

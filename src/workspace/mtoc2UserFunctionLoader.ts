@@ -27,7 +27,7 @@
  * functions with overlapping internal names.
  */
 
-import type { Builtin, InlineSnippet } from "../lowering/builtins/registry.js";
+import type { Builtin, InlineSnippet } from "../builtins/registry.js";
 import { UnsupportedConstruct } from "../lowering/errors.js";
 import { hashType } from "../lowering/types.js";
 

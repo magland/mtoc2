@@ -17,7 +17,7 @@ import { TypeError, UnsupportedConstruct } from "./errors.js";
 import type { IRExpr } from "./ir.js";
 import { handleType, typeToString } from "./types.js";
 import type { HandleCapture, HandleType } from "./types.js";
-import { getBuiltin } from "./builtins/index.js";
+import { getBuiltin } from "../builtins/index.js";
 import type { EnvEntry, Lowerer } from "./lower.js";
 import { buildUserFunctionCall } from "./specialize.js";
 

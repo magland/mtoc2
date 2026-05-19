@@ -38,8 +38,8 @@ import {
   toScalarNumber,
   type RuntimeValue,
 } from "../runtime/value.js";
-import { getBuiltin } from "../lowering/builtins/index.js";
-import type { Builtin } from "../lowering/builtins/registry.js";
+import { getBuiltin } from "../builtins/index.js";
+import type { Builtin } from "../builtins/registry.js";
 import { inferTypeFromValue } from "../runtime/inferType.js";
 import { Workspace } from "../workspace/workspace.js";
 import { UnsupportedConstruct } from "../lowering/errors.js";
@@ -47,7 +47,7 @@ import {
   mtoc2_disp_double,
   mtoc2_format_double,
   mtoc2_tensor_make_range as jsMakeRange,
-} from "../codegen/runtime/snippets.gen.js";
+} from "../builtins/runtime/snippets.gen.js";
 
 class ReturnSignal {}
 class BreakSignal {}
