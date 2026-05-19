@@ -26,8 +26,8 @@
   "include": [
     "src/**/*.ts",
     "src/**/*.tsx",
-    "src/builtins/runtime/*.js",
-    "src/builtins/runtime/*.d.ts",
+    "src/builtins/runtime/**/*.js",
+    "src/builtins/runtime/**/*.d.ts",
     "scripts/**/*.ts",
     "tests/**/*.ts",
     "vite.config.ts"

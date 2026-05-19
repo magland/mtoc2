@@ -2,7 +2,7 @@
 // transpose. Mirrors `transposeCore` semantics: column-major in,
 // column-major out.
 
-import { mtoc2_tensor_alloc } from "./tensor_alloc.js";
+import { mtoc2_tensor_alloc } from "../tensor/tensor_alloc.js";
 
 export function mtoc2_tensor_transpose(a) {
   const m = a.shape[0];

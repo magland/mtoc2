@@ -126,7 +126,7 @@ mtoc2 is a _static_ translator. Anything outside the supported subset raises
   layout); and the literal `'all'` flag that collapses every axis
   to a single scalar. Shared transfer/codegen lives in
   `src/lowering/builtins/reduction/_shape.ts`; the C-side helpers
-  are macro-generated into `src/codegen/runtime/tensor_reduce_real.h`,
+  are macro-generated into `src/builtins/runtime/tensor_ops/tensor_reduce_real.h`,
   defining one `mtoc2_<name>_all` (scalar return) and one
   `mtoc2_<name>_dim` (tensor return) per op. The transfer folds
   exact tensors up to `EXACT_ARRAY_MAX_ELEMENTS`; above the cap (or
@@ -570,13 +570,17 @@ read the env at the lowering point.
 
 ## Runtime helpers
 
-Each helper lives in its own `.h` file under `src/codegen/runtime/`,
-edited with normal C tooling. `npm run build:snippets` inlines every
-`.h` into `snippets.gen.ts` so the translator bundles in the browser.
-Each `Builtin` declares its `runtimeDeps: string[]`; the emitter
-activates them transitively and dedupes headers. Adding an `.h` means
-re-running `build:snippets` and registering the snippet in
-`src/codegen/runtime.ts`.
+Each helper lives in its own `.h` file under `src/builtins/runtime/`
+(organized into topic subfolders: `tensor/`, `tensor_ops/`, `text/`,
+`io/`, `indexing/`, `plot/`, `system/`), edited with normal C tooling.
+`npm run build:snippets` inlines every `.h` (and every paired `.js`
+sibling) into `snippets.gen.ts` so the translator bundles in the
+browser. Each `Builtin` declares its `runtimeDeps: string[]`; the
+emitter activates them transitively and dedupes headers. Adding a
+helper means dropping the `.h`/`.js` into the topic folder that fits,
+re-running `build:snippets`, and registering the snippet in
+`src/codegen/runtime.ts`. The snippet registry keys by basename, so
+basenames must stay globally unique across the runtime tree.
 
 ## Numbl import paths
 

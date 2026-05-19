@@ -4,7 +4,7 @@
 // inner-product path that returns a bare number instead of a
 // freshly-allocated 1×1 tensor.
 
-import { mtoc2_tensor_alloc } from "./tensor_alloc.js";
+import { mtoc2_tensor_alloc } from "../tensor/tensor_alloc.js";
 
 export function mtoc2_tensor_mtimes_real(a, b) {
   if (a.shape.length !== 2 || b.shape.length !== 2) {

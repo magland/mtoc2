@@ -3,7 +3,7 @@
 // generate these; JS uses a single generic kernel + thin wrappers
 // to preserve the call-site shape the emitter produces.
 
-import { mtoc2_tensor_alloc_nd } from "./tensor_alloc_nd.js";
+import { mtoc2_tensor_alloc_nd } from "../tensor/tensor_alloc_nd.js";
 
 // uminus on a tensor — separate signature (unary). Kept here because
 // the C side groups it with the elemwise file.

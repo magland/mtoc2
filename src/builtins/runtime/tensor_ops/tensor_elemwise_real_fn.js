@@ -3,7 +3,7 @@
 // `rem`, `power`). Mirrors `tensor_elemwise_real.js`'s structure;
 // only the scalar fn differs.
 
-import { mtoc2_tensor_alloc_nd } from "./tensor_alloc_nd.js";
+import { mtoc2_tensor_alloc_nd } from "../tensor/tensor_alloc_nd.js";
 
 function tt(a, b, fn) {
   const r = mtoc2_tensor_alloc_nd(a.shape.length, a.shape);

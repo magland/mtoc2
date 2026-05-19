@@ -708,7 +708,7 @@ function elementwiseMinMaxSign(name: "min" | "max", sa: Sign, sb: Sign): Sign {
 // the `_all` (scalar return) and `_dim` (tensor return) kernels.
 // Names match `mtoc2_<name>_all` / `mtoc2_<name>_dim` on the C side
 // so the emitJs path and `call` path stay structurally aligned.
-import * as TENSOR_REDUCE from "../../runtime/tensor_reduce_real.js";
+import * as TENSOR_REDUCE from "../../runtime/tensor_ops/tensor_reduce_real.js";
 import type { RuntimeTensor } from "../../../runtime/value.js";
 
 type ReduceAll = (t: RuntimeTensor) => number;

@@ -3,7 +3,7 @@
 // behaviour as the C side: throws (instead of `abort()`) on bad
 // inputs.
 
-import { mtoc2_tensor_alloc_nd } from "./tensor_alloc_nd.js";
+import { mtoc2_tensor_alloc_nd } from "../tensor/tensor_alloc_nd.js";
 
 export function mtoc2_reshape_nd(input, ndim, dims) {
   let inTotal = 1;

@@ -164,8 +164,8 @@ Before landing a change:
 - `npx vitest run` (when there are vitest cases).
 - `npm run lint`.
 - `npm run format:check`.
-- `npm run build:snippets:check` if you touched `src/codegen/runtime/*.h`
-  (otherwise it'll drift).
+- `npm run build:snippets:check` if you touched any `.h` / `.js` under
+  `src/builtins/runtime/` (otherwise `snippets.gen.ts` will drift).
 
 The cross-runner is the slow gate — minutes to run a full sweep. Run
 it at checkpoints. For tight iteration, just use `tsc` + a targeted

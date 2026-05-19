@@ -1,34 +1,34 @@
 #!/usr/bin/env tsx
 /**
- * Generate src/codegen/runtime/snippets.gen.ts by inlining every .h
- * and .js file under src/codegen/runtime/ as a string literal. The
- * codegen runtime module imports from the generated file instead of
- * reading the source files at runtime, which lets the translator
- * bundle in the browser.
+ * Generate src/builtins/runtime/snippets.gen.ts by inlining every .h
+ * and .js file under src/builtins/runtime/ (recursing into the
+ * topic subdirectories) as a string literal. The codegen runtime
+ * module imports from the generated file instead of reading the
+ * source files at runtime, which lets the translator bundle in the
+ * browser.
  *
- * Pairing: a `disp_double.h` may be paired with an optional
- * `disp_double.js` (same basename). The C side is the primary
- * registration; the JS side is auxiliary, consumed by `emitJs`. A
- * snippet that has no `.js` sibling falls back to "no JS emit
- * support" — see `RuntimeSnippet.jsCode` in `runtime.ts`.
+ * The `C_SNIPPETS` and `JS_SNIPPETS` maps are keyed by basename
+ * (`disp_double.h`, `disp_double.js`) — the on-disk subdirectory
+ * structure is purely for organization. Basenames are globally
+ * unique across the runtime tree (enforced here).
  *
  * .js snippet contract:
  *   - A valid standalone ES module (so the interpreter side can
  *     `import { foo } from "./snippets.gen.js"`).
- *   - No `import` statements between snippet files (each snippet is
- *     self-contained; cross-snippet calls resolve via module scope
- *     once the codegen inlines them all into one emitted module).
- *   - References host hooks (e.g. `$write`) as free variables, which
- *     resolve to `globalThis.<name>` at call time. The host assigns
- *     them before any snippet runs.
+ *   - Cross-snippet imports must use relative paths to another `.js`
+ *     under the runtime tree (`./peer.js`, `../topic/peer.js`, …).
+ *     The interpreter resolves these via real ESM; the codegen path
+ *     strips them and inlines all snippets together.
+ *   - References host hooks (e.g. `$write`) as free variables that
+ *     resolve to `globalThis.<name>` at call time.
  *   - Top-level names must not collide across snippet files.
  *
  *   npx tsx scripts/build_runtime_snippets.ts          # write the file
  *   npx tsx scripts/build_runtime_snippets.ts --check  # exit 1 if drifted
  */
-import { readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { readFileSync, readdirSync, writeFileSync, statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, resolve, relative, basename } from "node:path";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const runtimeDir = resolve(here, "..", "src", "builtins", "runtime");
@@ -39,59 +39,98 @@ function stripJsExportsAndImports(src: string): string {
   // The inlined codegen text needs plain declarations so the surrounding
   // emitted module can reference them by bare name.
   let out = src.replace(/^export\s+(function|const|let|class)\b/gm, "$1");
-  // Drop `import { ... } from "./<sibling>.js";` lines. Sibling
-  // imports are kept in the source files so the *interpreter* can
-  // load snippets as real ES modules; for codegen all snippets get
-  // inlined into one emitted module, so cross-snippet calls resolve
-  // via module scope and the imports become redundant.
+  // Drop `import` lines from any relative path; the codegen path
+  // inlines every activated snippet into one module, so cross-snippet
+  // calls resolve via module scope and the imports become redundant.
   out = out.replace(/^\s*import\s+.*?from\s+["'][^"']+["'];?\s*$/gm, "");
   return out;
 }
 
-function assertImportsAreSiblings(src: string, file: string): void {
+function assertRelativeJsImport(src: string, file: string): void {
   const matches = src.matchAll(/^\s*import\s+.*?from\s+["']([^"']+)["']/gm);
   for (const m of matches) {
     const spec = m[1];
-    // Accept only relative same-directory imports referring to another
-    // `.js` snippet — the interpreter resolves these via real ESM, and
-    // the codegen path strips them and inlines all snippets together.
-    if (!/^\.\/[A-Za-z0-9_]+\.js$/.test(spec)) {
+    // Accept any relative path resolving to another `.js` under the
+    // runtime tree; reject bare-package or absolute imports.
+    if (!/^\.{1,2}\/[A-Za-z0-9_/]+\.js$/.test(spec)) {
       throw new Error(
-        `${file}: snippet 'import' must reference a sibling snippet ` +
-          `via "./<name>.js"; got "${spec}".`
+        `${file}: snippet 'import' must reference another runtime .js ` +
+          `via a relative path (e.g. "./peer.js" or "../topic/peer.js"); ` +
+          `got "${spec}".`
       );
     }
   }
 }
 
+/** Walk runtime/ recursively. Skips `snippets.gen.ts` (the generated
+ *  output) but otherwise picks up every `.h`, `.js`, and `.d.ts`
+ *  under any subdirectory. Returns each entry's path relative to
+ *  `runtimeDir` (e.g. `tensor/tensor_alloc.h`) so the build can keep
+ *  basename keys in the map but still re-export via accurate
+ *  relative-path strings. */
+function walkRuntime(dir: string): string[] {
+  const out: string[] = [];
+  for (const entry of readdirSync(dir).sort()) {
+    const p = join(dir, entry);
+    const st = statSync(p);
+    if (st.isDirectory()) {
+      for (const child of walkRuntime(p)) {
+        out.push(child);
+      }
+    } else if (st.isFile()) {
+      const rel = relative(runtimeDir, p).replace(/\\/g, "/");
+      if (rel === "snippets.gen.ts") continue;
+      out.push(rel);
+    }
+  }
+  return out;
+}
+
+function assertUniqueBasenames(paths: ReadonlyArray<string>): void {
+  const seen = new Map<string, string>();
+  for (const p of paths) {
+    const b = basename(p);
+    const prev = seen.get(b);
+    if (prev !== undefined) {
+      throw new Error(
+        `runtime snippet basename collision: '${b}' appears at both ` +
+          `'${prev}' and '${p}'. Basenames must be globally unique across ` +
+          `the runtime tree because the snippet registry keys by basename.`
+      );
+    }
+    seen.set(b, p);
+  }
+}
+
 function generate(): string {
-  const allFiles = readdirSync(runtimeDir)
-    .filter(f => f !== "snippets.gen.ts")
-    .sort();
+  const allPaths = walkRuntime(runtimeDir);
 
-  const hFiles = allFiles.filter(f => f.endsWith(".h"));
-  const jsFiles = allFiles.filter(f => f.endsWith(".js"));
-  const dtsFiles = allFiles.filter(f => f.endsWith(".d.ts"));
-  void dtsFiles; // ambient .d.ts files are typecheck-only; not inlined
+  const hPaths = allPaths.filter(p => p.endsWith(".h"));
+  const jsPaths = allPaths.filter(p => p.endsWith(".js"));
+  // `.d.ts` files (ambient declarations) are typecheck-only and not
+  // inlined; their presence on disk is enough.
+  assertUniqueBasenames([...hPaths, ...jsPaths]);
 
-  const cEntries = hFiles.map(f => {
-    const body = readFileSync(join(runtimeDir, f), "utf8");
-    return `  ${JSON.stringify(f)}: ${JSON.stringify(body)},`;
+  const cEntries = hPaths.map(p => {
+    const body = readFileSync(join(runtimeDir, p), "utf8");
+    const key = basename(p);
+    return `  ${JSON.stringify(key)}: ${JSON.stringify(body)},`;
   });
 
-  const jsEntries = jsFiles.map(f => {
-    const body = readFileSync(join(runtimeDir, f), "utf8");
-    assertImportsAreSiblings(body, f);
+  const jsEntries = jsPaths.map(p => {
+    const body = readFileSync(join(runtimeDir, p), "utf8");
+    assertRelativeJsImport(body, p);
     const stripped = stripJsExportsAndImports(body);
-    return `  ${JSON.stringify(f)}: ${JSON.stringify(stripped)},`;
+    const key = basename(p);
+    return `  ${JSON.stringify(key)}: ${JSON.stringify(stripped)},`;
   });
 
-  // Re-export every named export from each .js snippet so the
-  // interpreter (Phase 3) can `import { foo } from
-  // "./snippets.gen.js"` and call helpers directly — same source of
-  // truth the emitter inlines.
-  const reExports = jsFiles
-    .map(f => `export * from ${JSON.stringify("./" + f)};`)
+  // Re-export every named export from each .js snippet via its
+  // relative path so the interpreter (Phase 3) can `import { foo }
+  // from "./snippets.gen.js"` and call helpers directly — the same
+  // source of truth the emitter inlines.
+  const reExports = jsPaths
+    .map(p => `export * from ${JSON.stringify("./" + p)};`)
     .join("\n");
 
   return [
@@ -104,13 +143,13 @@ function generate(): string {
     "// directly and run the same code the emitters inline.",
     reExports,
     "",
-    "/** C snippet bodies, keyed by filename (e.g. `disp_double.h`). */",
+    "/** C snippet bodies, keyed by basename (e.g. `disp_double.h`). */",
     "export const C_SNIPPETS: Record<string, string> = {",
     ...cEntries,
     "};",
     "",
     "/** JS snippet bodies (with `export` keywords stripped), keyed by",
-    " *  filename (e.g. `disp_double.js`). Inlined into emitted JS. The",
+    " *  basename (e.g. `disp_double.js`). Inlined into emitted JS. The",
     " *  functions may reference host hooks (`$write`, …) as free",
     " *  variables that resolve to `globalThis.<name>` at call time. */",
     "export const JS_SNIPPETS: Record<string, string> = {",

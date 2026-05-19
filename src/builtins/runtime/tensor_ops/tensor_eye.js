@@ -1,6 +1,6 @@
 // JS sibling of `tensor_eye.h`. Build an m×n identity matrix.
 
-import { mtoc2_tensor_alloc } from "./tensor_alloc.js";
+import { mtoc2_tensor_alloc } from "../tensor/tensor_alloc.js";
 
 export function mtoc2_eye_rect(rows, cols) {
   const out = mtoc2_tensor_alloc(rows, cols);

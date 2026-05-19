@@ -2,7 +2,7 @@
 // real tensor. Returns `{v, i}` for the two-output form; the
 // single-output form just reads `.v`.
 
-import { mtoc2_tensor_alloc_nd } from "./tensor_alloc_nd.js";
+import { mtoc2_tensor_alloc_nd } from "../tensor/tensor_alloc_nd.js";
 
 function pair_sort_indices(a) {
   // Return sorted index permutation [0..n-1], stable on equal values.

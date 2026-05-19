@@ -1,6 +1,6 @@
 // JS sibling of `tensor_meshgrid.h`. MATLAB-style coordinate grid.
 
-import { mtoc2_tensor_alloc } from "./tensor_alloc.js";
+import { mtoc2_tensor_alloc } from "../tensor/tensor_alloc.js";
 
 function numel(t) {
   let n = 1;

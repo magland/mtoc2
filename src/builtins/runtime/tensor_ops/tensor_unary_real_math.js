@@ -2,7 +2,7 @@
 // kernels for tensors (`mtoc2_tensor_sin`, `_cos`, etc.). Matches
 // the per-op function names the codegen emits.
 
-import { mtoc2_tensor_alloc_nd } from "./tensor_alloc_nd.js";
+import { mtoc2_tensor_alloc_nd } from "../tensor/tensor_alloc_nd.js";
 
 function unary_kernel(a, fn) {
   const r = mtoc2_tensor_alloc_nd(a.shape.length, a.shape);

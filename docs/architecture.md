@@ -96,7 +96,7 @@ side-effecting bound is evaluated once).
 **Bounds checks** wrap every scalar index access in a runtime check
 that aborts with a numbl-style "Index exceeds array bounds"
 message; slice-slot accesses validate the full `[first, last]`
-range once per slot. Helpers live in `runtime/oob.h`. The empty-
+range once per slot. Helpers live in `runtime/tensor/oob.h`. The empty-
 range case (`v(5:4)`) skips the check, matching MATLAB. OOB
 regression coverage lives in vitest (`tests/oob.test.ts`) because
 the cross-runner can't diff stdouts when both runners error.
@@ -499,7 +499,9 @@ visible. They're a debugging aid for the translator, not a transcription
 of the user's source.
 
 Headers + runtime helpers live in `src/codegen/runtime.ts` (the
-registry/activator) backed by `.h` files under `src/codegen/runtime/`.
+registry/activator) backed by `.h` files under `src/builtins/runtime/`
+(organized into topic subfolders: `tensor/`, `tensor_ops/`, `text/`,
+`io/`, `indexing/`, `plot/`, `system/`).
 Each builtin's `runtimeDeps` activate snippets on every codegen site;
 the emitter:
 

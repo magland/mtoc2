@@ -7,7 +7,7 @@
 // Output shape rule for `_dim`: input dims with `dims[dim-1] = 1`,
 // then trailing singletons stripped subject to a 2-axis floor.
 
-import { mtoc2_tensor_alloc_nd } from "./tensor_alloc_nd.js";
+import { mtoc2_tensor_alloc_nd } from "../tensor/tensor_alloc_nd.js";
 
 function squeeze_trailing(dims) {
   while (dims.length > 2 && dims[dims.length - 1] === 1) dims.pop();

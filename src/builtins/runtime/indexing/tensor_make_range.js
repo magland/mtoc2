@@ -2,7 +2,7 @@
 // `start:step:end` range used as a value (outside an index slot and
 // outside a for-loop iterable).
 
-import { mtoc2_tensor_alloc_nd } from "./tensor_alloc_nd.js";
+import { mtoc2_tensor_alloc_nd } from "../tensor/tensor_alloc_nd.js";
 import { mtoc2_loop_count } from "./loop_count.js";
 import { mtoc2_range_value } from "./range_value.js";
 

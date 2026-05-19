@@ -2,7 +2,7 @@
 // freshly-owned tensor mirrored along axis `dimIdx` (0-based).
 // Out-of-range axis acts as a deep-copy no-op.
 
-import { mtoc2_tensor_alloc_nd } from "./tensor_alloc_nd.js";
+import { mtoc2_tensor_alloc_nd } from "../tensor/tensor_alloc_nd.js";
 
 export function mtoc2_tensor_flip(a, dimIdx) {
   const r = mtoc2_tensor_alloc_nd(a.shape.length, a.shape);
