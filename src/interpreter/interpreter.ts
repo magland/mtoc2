@@ -358,6 +358,53 @@ export class Interpreter {
         return this.callByName(name, [a], 1, e.span)[0];
       }
       case "FuncCall": {
+        // MATLAB parses `v(args)` the same whether `v` is a function
+        // or a tensor variable being indexed. The lowering layer
+        // disambiguates by checking the env first; mirror that here.
+        const envVal = this.env.get(e.name);
+        if (envVal !== undefined && isTensor(envVal)) {
+          // `end` inside the index list resolves to the size of the
+          // axis being indexed (or `numel` for linear single-slot).
+          const idxVals = e.args.map((a, i) => {
+            if (a.type === "EndKeyword") {
+              if (e.args.length === 1) return envVal.data.length;
+              return envVal.shape[i] ?? 1;
+            }
+            return this.evalExpr(a);
+          });
+          for (const v of idxVals) {
+            if (typeof v !== "number") {
+              throw new UnsupportedConstruct(
+                `interpreter: only scalar numeric indices are supported in the MVP`,
+                e.span
+              );
+            }
+          }
+          const ks = idxVals.map(v => Math.trunc(v as number));
+          let offset: number;
+          if (ks.length === 1) {
+            if (ks[0] < 1 || ks[0] > envVal.data.length) {
+              throw new RangeError(
+                `Index in position 1 (${ks[0]}) exceeds array bounds (${envVal.data.length})`
+              );
+            }
+            offset = ks[0] - 1;
+          } else {
+            offset = 0;
+            let stride = 1;
+            for (let i = 0; i < ks.length; i++) {
+              const dim = envVal.shape[i] ?? 1;
+              if (ks[i] < 1 || ks[i] > dim) {
+                throw new RangeError(
+                  `Index in position ${i + 1} (${ks[i]}) exceeds array bounds (${dim})`
+                );
+              }
+              offset += (ks[i] - 1) * stride;
+              stride *= dim;
+            }
+          }
+          return envVal.data[offset];
+        }
         const argVals = e.args.map(a => this.evalExpr(a));
         return this.callByName(e.name, argVals, 1, e.span)[0];
       }
@@ -412,7 +459,52 @@ export class Interpreter {
         return makeTensor([nRows, nCols], data);
       }
 
-      case "Index":
+      case "Index": {
+        // Scalar tensor read MVP: `v(i)` or `M(i, j)`. Range / colon /
+        // logical-mask / vector-of-indices land separately when the
+        // corresponding IR shapes get wired.
+        const baseVal = this.evalExpr(e.base);
+        if (!isTensor(baseVal)) {
+          throw new UnsupportedConstruct(
+            `interpreter: indexing into a non-tensor value is not yet wired`,
+            e.span
+          );
+        }
+        const idxVals = e.indices.map(ix => this.evalExpr(ix));
+        for (const v of idxVals) {
+          if (typeof v !== "number") {
+            throw new UnsupportedConstruct(
+              `interpreter: only scalar numeric indices are supported in the MVP`,
+              e.span
+            );
+          }
+        }
+        const ks = idxVals.map(v => Math.trunc(v as number));
+        let offset: number;
+        if (ks.length === 1) {
+          if (ks[0] < 1 || ks[0] > baseVal.data.length) {
+            throw new RangeError(
+              `Index in position 1 (${ks[0]}) exceeds array bounds (${baseVal.data.length})`
+            );
+          }
+          offset = ks[0] - 1;
+        } else {
+          offset = 0;
+          let stride = 1;
+          for (let i = 0; i < ks.length; i++) {
+            const dim = baseVal.shape[i] ?? 1;
+            if (ks[i] < 1 || ks[i] > dim) {
+              throw new RangeError(
+                `Index in position ${i + 1} (${ks[i]}) exceeds array bounds (${dim})`
+              );
+            }
+            offset += (ks[i] - 1) * stride;
+            stride *= dim;
+          }
+        }
+        return baseVal.data[offset];
+      }
+
       case "IndexCell":
       case "Member":
       case "MemberDynamic":

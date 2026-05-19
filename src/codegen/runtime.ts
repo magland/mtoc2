@@ -216,6 +216,13 @@ const REGISTRY: ReadonlyMap<string, RuntimeSnippet> = new Map<
     { headers: [], code: "", deps: ["mtoc2_sprintf_str"] },
   ],
 
+  // JS-only scalar-index bounds-check helpers (paired with a stub
+  // `.h`). The C path's scalar IndexLoad uses its own
+  // `mtoc2_idx_lin` / `mtoc2_idx_axis` in `oob.h`; this snippet
+  // exists so emitJs can activate the JS helpers without bringing
+  // the C side along (the .h body is empty).
+  ["mtoc2_scalar_index", loadSnippet("scalar_index.h")],
+
   // ── Tensor (real, multi-element) ──────────────────────────────────
   // Storage shape + alloc + the four "owned value" helpers (copy,
   // assign, free, plus the `from_row`/`from_matrix` literal builders).

@@ -410,14 +410,58 @@ function emitExpr(e: IRExpr, state: RuntimeState): string {
       return `mtoc2_tensor_from_matrix([${flat}], ${rows}, ${cols})`;
     }
 
+    case "IndexLoad": {
+      // Scalar tensor read: `v(i)` or `M(i, j)`. ANF guarantees the
+      // base is a bare Var; bounds-checking happens at runtime via
+      // the shared `scalar_index.js` helpers.
+      if (e.base.kind !== "Var") {
+        throw new Error(
+          `emitJs internal: IndexLoad base must be a Var after ANF (got ${e.base.kind})`
+        );
+      }
+      if (e.base.ty.kind === "Numeric" && e.base.ty.isComplex) {
+        throw new UnsupportedConstruct(
+          `emitJs: complex IndexLoad not yet wired (Phase 5)`,
+          e.span
+        );
+      }
+      useRuntimeByName(state, "mtoc2_scalar_index");
+      const baseName = e.base.cName;
+      const idxs = e.indices.map(ix => emitExpr(ix, state));
+      let offset: string;
+      if (idxs.length === 1) {
+        offset = `mtoc2_idx_lin_js(${baseName}, ${idxs[0]})`;
+      } else {
+        const terms: string[] = [];
+        for (let i = 0; i < idxs.length; i++) {
+          const checked = `mtoc2_idx_axis_js(${baseName}, ${i}, ${idxs[i]})`;
+          if (i === 0) {
+            terms.push(checked);
+          } else {
+            const strides: string[] = [];
+            for (let j = 0; j < i; j++) strides.push(`${baseName}.shape[${j}]`);
+            terms.push(`${checked} * ${strides.join(" * ")}`);
+          }
+        }
+        offset = terms.join(" + ");
+      }
+      return `${baseName}.data[${offset}]`;
+    }
+
+    case "EndRef": {
+      if (e.baseTy.kind !== "Numeric") {
+        throw new Error("emitJs internal: EndRef with non-numeric baseTy");
+      }
+      if (e.axis === "linear") return `${e.baseCName}.data.length`;
+      return `${e.baseCName}.shape[${e.axis}]`;
+    }
+
     case "TensorConcat":
     case "HandleLit":
     case "HandleCaptureLoad":
     case "StructLit":
     case "MemberLoad":
-    case "IndexLoad":
     case "IndexSlice":
-    case "EndRef":
       throw new UnsupportedConstruct(
         `emitJs: IR shape '${e.kind}' is not yet wired (Phase 2 minimal subset)`,
         e.span
