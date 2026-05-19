@@ -390,7 +390,26 @@ function emitExpr(e: IRExpr, state: RuntimeState): string {
       return `mtoc2_tensor_make_range(${startE}, ${stepE}, ${endE})`;
     }
 
-    case "TensorBuild":
+    case "TensorBuild": {
+      // Real-only path for now (complex would mirror the C side's
+      // split re/im arrays once the JS complex tensor runtime lands).
+      const [rows, cols] = e.shape;
+      const ty = e.ty;
+      if (ty.kind === "Numeric" && ty.isComplex) {
+        throw new UnsupportedConstruct(
+          `emitJs: complex TensorBuild not yet wired (Phase 5)`,
+          e.span
+        );
+      }
+      const flat = e.elements.map(el => emitExpr(el, state)).join(", ");
+      if (rows === 1) {
+        useRuntimeByName(state, "mtoc2_tensor_from_row");
+        return `mtoc2_tensor_from_row([${flat}], ${cols})`;
+      }
+      useRuntimeByName(state, "mtoc2_tensor_from_matrix");
+      return `mtoc2_tensor_from_matrix([${flat}], ${rows}, ${cols})`;
+    }
+
     case "TensorConcat":
     case "HandleLit":
     case "HandleCaptureLoad":

@@ -34,6 +34,7 @@ import {
   isTensor,
   isTruthy,
   makeChar,
+  makeTensor,
   toScalarNumber,
   type RuntimeValue,
 } from "../runtime/value.js";
@@ -370,6 +371,47 @@ export class Interpreter {
         return jsMakeRange(start, step, end) as unknown as RuntimeValue;
       }
 
+      case "Tensor": {
+        // `[a b c]` (single row) → 1×N tensor; `[a b; c d]` → R×C.
+        // MVP: every cell must evaluate to a scalar number (not a
+        // tensor — the bracket-concat case with tensor cells goes
+        // through TensorConcat on the C side and isn't wired here
+        // yet). 1×1 brackets `[x]` collapse to the inner scalar
+        // (matches MATLAB / mtoc2's lowerer).
+        const rows = e.rows;
+        if (rows.length === 0 || (rows.length === 1 && rows[0].length === 0)) {
+          return makeTensor([0, 0], new Float64Array(0));
+        }
+        const nRows = rows.length;
+        const nCols = rows[0].length;
+        if (nRows === 1 && nCols === 1) {
+          return this.evalExpr(rows[0][0]);
+        }
+        for (const row of rows) {
+          if (row.length !== nCols) {
+            throw new UnsupportedConstruct(
+              `interpreter: tensor literal rows have inconsistent lengths`,
+              e.span
+            );
+          }
+        }
+        const data = new Float64Array(nRows * nCols);
+        for (let c = 0; c < nCols; c++) {
+          for (let r = 0; r < nRows; r++) {
+            const v = this.evalExpr(rows[r][c]);
+            if (typeof v !== "number") {
+              throw new UnsupportedConstruct(
+                `interpreter: tensor literal cells must currently be scalar numbers (got ${typeof v}); ` +
+                  `tensor-cell concat is not yet wired`,
+                e.span
+              );
+            }
+            data[r + c * nRows] = v;
+          }
+        }
+        return makeTensor([nRows, nCols], data);
+      }
+
       case "Index":
       case "IndexCell":
       case "Member":
@@ -378,7 +420,6 @@ export class Interpreter {
       case "SuperMethodCall":
       case "AnonFunc":
       case "FuncHandle":
-      case "Tensor":
       case "Cell":
       case "ClassInstantiation":
       case "EndKeyword":
