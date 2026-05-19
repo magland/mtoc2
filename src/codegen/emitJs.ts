@@ -382,6 +382,14 @@ function emitExpr(e: IRExpr, state: RuntimeState): string {
       return `${e.cName}(${args})`;
     }
 
+    case "MakeRange": {
+      const startE = emitExpr(e.start, state);
+      const stepE = emitExpr(e.step, state);
+      const endE = emitExpr(e.end, state);
+      useRuntimeByName(state, "mtoc2_tensor_make_range");
+      return `mtoc2_tensor_make_range(${startE}, ${stepE}, ${endE})`;
+    }
+
     case "TensorBuild":
     case "TensorConcat":
     case "HandleLit":
@@ -391,7 +399,6 @@ function emitExpr(e: IRExpr, state: RuntimeState): string {
     case "IndexLoad":
     case "IndexSlice":
     case "EndRef":
-    case "MakeRange":
       throw new UnsupportedConstruct(
         `emitJs: IR shape '${e.kind}' is not yet wired (Phase 2 minimal subset)`,
         e.span

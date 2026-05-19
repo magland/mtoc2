@@ -45,6 +45,7 @@ import { UnsupportedConstruct } from "../lowering/errors.js";
 import {
   mtoc2_disp_double,
   mtoc2_format_double,
+  mtoc2_tensor_make_range as jsMakeRange,
 } from "../codegen/runtime/snippets.gen.js";
 
 class ReturnSignal {}
@@ -360,12 +361,13 @@ export class Interpreter {
         return this.callByName(e.name, argVals, 1, e.span)[0];
       }
       case "Range": {
-        // Range-as-value (not for-driver) requires tensor support —
-        // covered when the tensor runtime/interpreter combo lands.
-        throw new UnsupportedConstruct(
-          `interpreter: range as a value needs tensor runtime (Phase 5+)`,
-          e.span
-        );
+        // Range-as-value (not for-driver) → build a 1×N row tensor
+        // via the shared runtime snippet so cross-runner output
+        // matches numbl / c-aot byte-for-byte.
+        const start = toScalarNumber(this.evalExpr(e.start));
+        const end = toScalarNumber(this.evalExpr(e.end));
+        const step = e.step ? toScalarNumber(this.evalExpr(e.step)) : 1;
+        return jsMakeRange(start, step, end) as unknown as RuntimeValue;
       }
 
       case "Index":

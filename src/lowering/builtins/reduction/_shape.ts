@@ -831,8 +831,16 @@ export function reductionEmitJs(spec: {
     if (axis.kind === "all") {
       return `mtoc2_${spec.name}_all(${argsJs[0]})`;
     }
-    // If the chosen axis collapses to a scalar at the type level we
-    // still emit the dim call — same code path the C side takes.
+    // Mirror the C path's scalar-collapse check: if reducing on this
+    // axis squeezes the shape down to a scalar, route to `_all`
+    // (returning a number) instead of `_dim` (returning a 1×1 tensor).
+    if (inputT.shape !== undefined) {
+      const r = reduceConcreteShape(inputT.shape, axis.dim);
+      if (r.scalar) return `mtoc2_${spec.name}_all(${argsJs[0]})`;
+    } else {
+      const r = reduceLatticeDims(inputT.dims, axis.dim);
+      if (r.scalar) return `mtoc2_${spec.name}_all(${argsJs[0]})`;
+    }
     return `mtoc2_${spec.name}_dim(${argsJs[0]}, ${axis.dim})`;
   };
 }
@@ -873,6 +881,14 @@ export function reductionCall(spec: {
     const axis = resolveCallAxis(spec, args, argTypes, inputT);
     if (axis.kind === "all") {
       return [reducer.all(t)];
+    }
+    // Mirror the codegen scalar-collapse check (see reductionEmitJs).
+    if (inputT.shape !== undefined) {
+      const r = reduceConcreteShape(inputT.shape, axis.dim);
+      if (r.scalar) return [reducer.all(t)];
+    } else {
+      const r = reduceLatticeDims(inputT.dims, axis.dim);
+      if (r.scalar) return [reducer.all(t)];
     }
     return [reducer.dim(t, axis.dim)];
   };
