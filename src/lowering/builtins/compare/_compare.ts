@@ -65,7 +65,7 @@ export function defineCompare(
       }
       return [scalarLogical()];
     },
-    emit({ argsC, argTypes, useRuntime }) {
+    emitC({ argsC, argTypes, useRuntime }) {
       const aCx = isScalarComplex(argTypes[0]);
       const bCx = isScalarComplex(argTypes[1]);
       if (aCx || bCx) {
@@ -88,6 +88,33 @@ export function defineCompare(
         return `((${aReC} ${cOp} ${bReC}) ? 1.0 : 0.0)`;
       }
       return `((${argsC[0]} ${cOp} ${argsC[1]}) ? 1.0 : 0.0)`;
+    },
+    // Minimal scalar-real-only emitJs (Phase 2 smoke test). Logical
+    // result encoded as 1.0/0.0 to match the C side's
+    // `scalarLogical()` lattice (logical stored as a double).
+    emitJs({ argsJs, argTypes }) {
+      const aCx = isScalarComplex(argTypes[0]);
+      const bCx = isScalarComplex(argTypes[1]);
+      if (aCx || bCx) {
+        throw new UnsupportedConstruct(
+          `'${kind}' complex codegen is not yet wired in emitJs (Phase 5)`
+        );
+      }
+      return `((${argsJs[0]} ${cOp} ${argsJs[1]}) ? 1 : 0)`;
+    },
+    // Minimal scalar-real call hook for the interpreter. Returns
+    // 1/0 to mirror MATLAB's logical-as-double semantics.
+    call({ args, argTypes }) {
+      const aCx = isScalarComplex(argTypes[0]);
+      const bCx = isScalarComplex(argTypes[1]);
+      if (aCx || bCx) {
+        throw new UnsupportedConstruct(
+          `'${kind}' complex 'call' is not yet wired (Phase 5)`
+        );
+      }
+      const av = typeof args[0] === "number" ? args[0] : Number(args[0]);
+      const bv = typeof args[1] === "number" ? args[1] : Number(args[1]);
+      return [fold(av, bv) ? 1 : 0];
     },
     elementwise: true,
   };

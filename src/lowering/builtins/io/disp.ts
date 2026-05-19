@@ -7,6 +7,11 @@ import {
   structTypedefName,
 } from "../../types.js";
 import type { Builtin } from "../registry.js";
+import { isChar, isTensor } from "../../../runtime/value.js";
+import {
+  mtoc2_disp_double,
+  mtoc2_disp_tensor,
+} from "../../../codegen/runtime/snippets.gen.js";
 
 export const disp: Builtin = {
   name: "disp",
@@ -47,7 +52,7 @@ export const disp: Builtin = {
         `(got ${t.kind})`
     );
   },
-  emit({ argsC, argTypes, useRuntime }) {
+  emitC({ argsC, argTypes, useRuntime }) {
     useRuntime("mtoc2_disp_double");
     useRuntime("mtoc2_disp_tensor");
     useRuntime("mtoc2_disp_text");
@@ -73,5 +78,42 @@ export const disp: Builtin = {
       return `mtoc2_disp_tensor(${argsC[0]})`;
     }
     return `mtoc2_disp_double(${argsC[0]})`;
+  },
+  // Minimal scalar-real call hook for the interpreter. Text /
+  // tensor / complex paths land in Phase 5 alongside the JS-side
+  // runtime helpers.
+  emitJs({ argsJs, argTypes, useRuntime }) {
+    const t = argTypes[0];
+    if (isNumeric(t) && !t.isComplex && isScalar(t)) {
+      useRuntime("mtoc2_disp_double");
+      return `mtoc2_disp_double(${argsJs[0]})`;
+    }
+    if (isNumeric(t) && !t.isComplex && !isScalar(t)) {
+      useRuntime("mtoc2_disp_tensor");
+      return `mtoc2_disp_tensor(${argsJs[0]})`;
+    }
+    throw new UnsupportedConstruct(
+      `'disp' emitJs for complex / text / struct args is not yet wired (Phase 5)`
+    );
+  },
+  call({ args, ctx }) {
+    const v = args[0];
+    if (typeof v === "number") mtoc2_disp_double(v);
+    else if (typeof v === "boolean") mtoc2_disp_double(v ? 1 : 0);
+    else if (typeof v === "string") ctx.helpers.write(v + "\n");
+    else if (isChar(v)) ctx.helpers.write(v.value + "\n");
+    else if (isTensor(v)) {
+      // The tensor disp snippet writes via `$write` (free var) — make
+      // sure it's bound to the host's write before we call it. The
+      // interpreter's constructor already does this, but a builtin
+      // can also be called directly from a unit test.
+      globalThis.$write = ctx.helpers.write;
+      mtoc2_disp_tensor(v);
+    } else {
+      throw new UnsupportedConstruct(
+        `'disp' 'call' got an unsupported value shape (got ${typeof v})`
+      );
+    }
+    return [];
   },
 };

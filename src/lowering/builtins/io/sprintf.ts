@@ -28,7 +28,7 @@ export const sprintfBuiltin: Builtin = {
     validateFormatArgs("sprintf", argTypes, 1);
     return [fmt.kind === "String" ? { kind: "String" } : { kind: "Char" }];
   },
-  emit({ argsC, argTypes, useRuntime }) {
+  emitC({ argsC, argTypes, useRuntime }) {
     useRuntime("mtoc2_sprintf_str");
     useRuntime("mtoc2_sprintf_char");
     const fmt = argTypes[0];

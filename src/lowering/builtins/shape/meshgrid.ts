@@ -23,6 +23,12 @@ import {
 } from "../../types.js";
 import type { Builtin } from "../registry.js";
 import { exactRealArray, requireRealDouble } from "../_shared.js";
+import type { RuntimeTensor } from "../../../runtime/value.js";
+import {
+  mtoc2_meshgrid_x as jsMeshgridX,
+  mtoc2_meshgrid as jsMeshgrid,
+  mtoc2_meshgrid_1arg as jsMeshgrid1,
+} from "../../../codegen/runtime/snippets.gen.js";
 
 function requireVecInput(t: Type, what: string): NumericType {
   requireRealDouble(t, what);
@@ -128,7 +134,7 @@ export const meshgrid: Builtin = {
       `'meshgrid' supports 1..2 output(s); got nargout=${nargout}`
     );
   },
-  emit({ argsC, argTypes, nargout, outArgsC, useRuntime }) {
+  emitC({ argsC, argTypes, nargout, outArgsC, useRuntime }) {
     useRuntime("mtoc2_meshgrid");
     if (nargout === 1) {
       const x = argsC[0];
@@ -142,5 +148,38 @@ export const meshgrid: Builtin = {
       return `mtoc2_meshgrid_1arg(${argsC[0]}, ${outs.join(", ")})`;
     }
     return `mtoc2_meshgrid(${argsC[0]}, ${argsC[1]}, ${outs.join(", ")})`;
+  },
+  emitJs({ argsJs, argTypes, nargout, useRuntime }) {
+    useRuntime("mtoc2_meshgrid");
+    if (nargout === 1) {
+      const x = argsJs[0];
+      const y = argsJs.length >= 2 ? argsJs[1] : argsJs[0];
+      return `mtoc2_meshgrid_x(${x}, ${y})`;
+    }
+    // JS multi-output: helper returns `{X, Y}`; destructure inline so
+    // the emitJs multi-assign wrapper can spread it.
+    if (argTypes.length === 1) {
+      return `(o => [o.X, o.Y])(mtoc2_meshgrid_1arg(${argsJs[0]}))`;
+    }
+    return `(o => [o.X, o.Y])(mtoc2_meshgrid(${argsJs[0]}, ${argsJs[1]}))`;
+  },
+  call({ args, argTypes, nargout }) {
+    const xv = args[0] as RuntimeTensor;
+    if (nargout === 1) {
+      const y = argTypes.length >= 2 ? (args[1] as RuntimeTensor) : xv;
+      return [jsMeshgridX(xv, y) as unknown as RuntimeTensor];
+    }
+    if (argTypes.length === 1) {
+      const o = jsMeshgrid1(xv) as unknown as {
+        X: RuntimeTensor;
+        Y: RuntimeTensor;
+      };
+      return [o.X, o.Y];
+    }
+    const o = jsMeshgrid(
+      xv,
+      args[1] as RuntimeTensor
+    ) as unknown as { X: RuntimeTensor; Y: RuntimeTensor };
+    return [o.X, o.Y];
   },
 };

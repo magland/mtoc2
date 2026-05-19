@@ -38,14 +38,61 @@ import {
   exactComplex,
   exactComplexArray,
 } from "../_shared.js";
+import {
+  mtoc2_tensor_cos,
+  mtoc2_tensor_sin,
+  mtoc2_tensor_tan,
+  mtoc2_tensor_atan,
+  mtoc2_tensor_exp,
+  mtoc2_tensor_log,
+  mtoc2_tensor_log2,
+  mtoc2_tensor_log10,
+  mtoc2_tensor_sqrt,
+  mtoc2_tensor_abs,
+  mtoc2_tensor_floor,
+  mtoc2_tensor_ceil,
+  mtoc2_tensor_fix,
+  mtoc2_tensor_round,
+  mtoc2_tensor_sign,
+} from "../../../codegen/runtime/snippets.gen.js";
+import type { RuntimeTensor } from "../../../runtime/value.js";
+
+/** JS-side tensor kernels keyed by builtin name. Matches the C
+ *  side's `mtoc2_tensor_<name>` pattern; activations land via the
+ *  `mtoc2_tensor_unary_real_math` snippet. */
+type TensorUnary = (t: RuntimeTensor) => RuntimeTensor;
+const JS_TENSOR_UNARY: Record<string, TensorUnary> = {
+  cos: mtoc2_tensor_cos as unknown as TensorUnary,
+  sin: mtoc2_tensor_sin as unknown as TensorUnary,
+  tan: mtoc2_tensor_tan as unknown as TensorUnary,
+  atan: mtoc2_tensor_atan as unknown as TensorUnary,
+  exp: mtoc2_tensor_exp as unknown as TensorUnary,
+  log: mtoc2_tensor_log as unknown as TensorUnary,
+  log2: mtoc2_tensor_log2 as unknown as TensorUnary,
+  log10: mtoc2_tensor_log10 as unknown as TensorUnary,
+  sqrt: mtoc2_tensor_sqrt as unknown as TensorUnary,
+  abs: mtoc2_tensor_abs as unknown as TensorUnary,
+  floor: mtoc2_tensor_floor as unknown as TensorUnary,
+  ceil: mtoc2_tensor_ceil as unknown as TensorUnary,
+  fix: mtoc2_tensor_fix as unknown as TensorUnary,
+  round: mtoc2_tensor_round as unknown as TensorUnary,
+  sign: mtoc2_tensor_sign as unknown as TensorUnary,
+};
 
 export interface UnaryRealMathOpts {
   /** Source-level builtin name (also the runtime helper suffix). */
   name: string;
   /** C `<math.h>` function name for the scalar path (e.g. `"cos"`). */
   cFnReal: string;
-  /** JS-side scalar fn for compile-time fold. */
+  /** JS-side scalar fn for compile-time fold (and for the interpreter's
+   *  `call` hook). */
   jsFn: (x: number) => number;
+  /** Optional JS expression form (textual) for `emitJs`'s scalar real
+   *  path. Defaults to `Math.${name}(arg)` which works for most names
+   *  (sin/cos/tan/sqrt/exp/log/log2/log10/abs/atan/floor/ceil/sign).
+   *  Override for `fix` (`Math.trunc`) and `round`
+   *  (custom half-away-from-zero form). */
+  jsExpr?: (arg: string) => string;
   /** Sign refinement on the result type. Called with the (validated)
    *  real-numeric input type. */
   signRule: (t: NumericType) => Sign;
@@ -85,6 +132,7 @@ export function roundingSignRule(
 
 export function defineUnaryRealMath(opts: UnaryRealMathOpts): Builtin {
   const { name, cFnReal, jsFn, signRule, requireDomain, complex } = opts;
+  const jsExpr = opts.jsExpr ?? ((a: string) => `Math.${name}(${a})`);
   return {
     name,
     transfer(argTypes, nargout) {
@@ -168,7 +216,7 @@ export function defineUnaryRealMath(opts: UnaryRealMathOpts): Builtin {
       out.sign = signRule(a);
       return [out];
     },
-    emit({ argsC, argTypes, useRuntime }) {
+    emitC({ argsC, argTypes, useRuntime }) {
       const ty = argTypes[0] as NumericType;
       if (isNumeric(ty) && ty.isComplex) {
         useRuntime("mtoc2_cscalar");
@@ -183,6 +231,43 @@ export function defineUnaryRealMath(opts: UnaryRealMathOpts): Builtin {
         return `mtoc2_tensor_${name}(${argsC[0]})`;
       }
       return `${cFnReal}(${argsC[0]})`;
+    },
+    emitJs({ argsJs, argTypes, useRuntime }) {
+      const ty = argTypes[0] as NumericType;
+      if (isNumeric(ty) && ty.isComplex) {
+        throw new UnsupportedConstruct(
+          `'${name}' complex emitJs not yet wired (needs JS complex runtime)`
+        );
+      }
+      if (isMultiElement(ty)) {
+        if (JS_TENSOR_UNARY[name] === undefined) {
+          throw new UnsupportedConstruct(
+            `'${name}' tensor emitJs has no JS kernel registered`
+          );
+        }
+        useRuntime("mtoc2_tensor_unary_real_math");
+        return `mtoc2_tensor_${name}(${argsJs[0]})`;
+      }
+      return jsExpr(argsJs[0]);
+    },
+    call({ args, argTypes }) {
+      const ty = argTypes[0] as NumericType;
+      if (isNumeric(ty) && ty.isComplex) {
+        throw new UnsupportedConstruct(
+          `'${name}' complex 'call' not yet wired`
+        );
+      }
+      if (isMultiElement(ty)) {
+        const kernel = JS_TENSOR_UNARY[name];
+        if (kernel === undefined) {
+          throw new UnsupportedConstruct(
+            `'${name}' tensor 'call' has no JS kernel registered`
+          );
+        }
+        return [kernel(args[0] as RuntimeTensor)];
+      }
+      const v = typeof args[0] === "number" ? args[0] : Number(args[0]);
+      return [jsFn(v)];
     },
     elementwise: true,
   };

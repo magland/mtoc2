@@ -704,11 +704,185 @@ function elementwiseMinMaxSign(name: "min" | "max", sa: Sign, sb: Sign): Sign {
   return "unknown";
 }
 
+// JS-side tensor reducers: keyed by builtin name. Each entry holds
+// the `_all` (scalar return) and `_dim` (tensor return) kernels.
+// Names match `mtoc2_<name>_all` / `mtoc2_<name>_dim` on the C side
+// so the emitJs path and `call` path stay structurally aligned.
+import * as TENSOR_REDUCE from "../../../codegen/runtime/tensor_reduce_real.js";
+import type { RuntimeTensor } from "../../../runtime/value.js";
+
+type ReduceAll = (t: RuntimeTensor) => number;
+type ReduceDim = (t: RuntimeTensor, d: number) => RuntimeTensor;
+
+const TENSOR_REDUCERS: Record<string, { all: ReduceAll; dim: ReduceDim }> = {
+  sum: {
+    all: TENSOR_REDUCE.mtoc2_sum_all as unknown as ReduceAll,
+    dim: TENSOR_REDUCE.mtoc2_sum_dim as unknown as ReduceDim,
+  },
+  prod: {
+    all: TENSOR_REDUCE.mtoc2_prod_all as unknown as ReduceAll,
+    dim: TENSOR_REDUCE.mtoc2_prod_dim as unknown as ReduceDim,
+  },
+  mean: {
+    all: TENSOR_REDUCE.mtoc2_mean_all as unknown as ReduceAll,
+    dim: TENSOR_REDUCE.mtoc2_mean_dim as unknown as ReduceDim,
+  },
+  min: {
+    all: TENSOR_REDUCE.mtoc2_min_all as unknown as ReduceAll,
+    dim: TENSOR_REDUCE.mtoc2_min_dim as unknown as ReduceDim,
+  },
+  max: {
+    all: TENSOR_REDUCE.mtoc2_max_all as unknown as ReduceAll,
+    dim: TENSOR_REDUCE.mtoc2_max_dim as unknown as ReduceDim,
+  },
+  any: {
+    all: TENSOR_REDUCE.mtoc2_any_all as unknown as ReduceAll,
+    dim: TENSOR_REDUCE.mtoc2_any_dim as unknown as ReduceDim,
+  },
+  all: {
+    all: TENSOR_REDUCE.mtoc2_all_all as unknown as ReduceAll,
+    dim: TENSOR_REDUCE.mtoc2_all_dim as unknown as ReduceDim,
+  },
+};
+
+/** Resolve the dim arg into a concrete axis verdict for the call
+ *  hook. Mirrors `reductionEmit`'s branching but reads runtime
+ *  values rather than `argTypes[..].exact`. */
+function resolveCallAxis(
+  spec: { name: string; dimArgIndex: 1 | 2 },
+  args: ReadonlyArray<unknown>,
+  argTypes: ReadonlyArray<Type>,
+  inputT: NumericType
+): { kind: "all" } | { kind: "fixed"; dim: number } {
+  const dimArg = args[spec.dimArgIndex];
+  const dimType = argTypes[spec.dimArgIndex];
+  if (dimArg === undefined) {
+    return chooseDefaultAxis(spec.name, inputT);
+  }
+  if (
+    dimType !== undefined &&
+    (dimType.kind === "String" || dimType.kind === "Char") &&
+    dimType.exact === "all"
+  ) {
+    return { kind: "all" };
+  }
+  if (typeof dimArg === "string" && dimArg === "all") {
+    return { kind: "all" };
+  }
+  const n =
+    typeof dimArg === "number"
+      ? dimArg
+      : Number(dimArg as { toString: () => string });
+  return { kind: "fixed", dim: Math.trunc(n) };
+}
+
+export function reductionEmitJs(spec: {
+  name: string;
+  dimArgIndex: 1 | 2;
+  outputElem: "double" | "logical";
+}): Builtin["emitJs"] {
+  return ({ argsJs, argTypes, useRuntime }) => {
+    if (spec.dimArgIndex === 2 && argTypes.length === 2) {
+      const fn = spec.name === "max" ? "Math.max" : "Math.min";
+      return `${fn}(${argsJs[0]}, ${argsJs[1]})`;
+    }
+    const inputT = argTypes[0];
+    if (!isNumeric(inputT)) {
+      throw new Error(`internal: ${spec.name} emitJs got non-numeric arg`);
+    }
+    if (inputT.isComplex) {
+      throw new UnsupportedConstruct(
+        `'${spec.name}' complex emitJs not yet wired (Phase 5)`
+      );
+    }
+    if (isScalar(inputT)) {
+      if (spec.outputElem === "logical") {
+        return `((${argsJs[0]}) !== 0 ? 1 : 0)`;
+      }
+      return argsJs[0];
+    }
+    // Tensor path. Mirror `reductionEmit`'s axis resolution exactly
+    // so the emitted JS call shape matches the C side per case.
+    useRuntime("mtoc2_tensor_reduce_real");
+    const dimType: Type | undefined = argTypes[spec.dimArgIndex];
+    let axis: { kind: "all" } | { kind: "fixed"; dim: number };
+    if (dimType === undefined) {
+      axis = chooseDefaultAxis(spec.name, inputT);
+    } else if (
+      (dimType.kind === "String" || dimType.kind === "Char") &&
+      dimType.exact === "all"
+    ) {
+      axis = { kind: "all" };
+    } else if (isNumeric(dimType)) {
+      const v = exactDouble(dimType);
+      if (v === undefined) {
+        throw new UnsupportedConstruct(
+          `'${spec.name}' tensor emitJs requires a statically-known dim ` +
+            `(non-exact dim args aren't wired yet)`
+        );
+      }
+      axis = { kind: "fixed", dim: v };
+    } else {
+      throw new UnsupportedConstruct(
+        `'${spec.name}' tensor emitJs got an unexpected dim type ` +
+          `'${dimType.kind}'`
+      );
+    }
+    if (axis.kind === "all") {
+      return `mtoc2_${spec.name}_all(${argsJs[0]})`;
+    }
+    // If the chosen axis collapses to a scalar at the type level we
+    // still emit the dim call — same code path the C side takes.
+    return `mtoc2_${spec.name}_dim(${argsJs[0]}, ${axis.dim})`;
+  };
+}
+
+export function reductionCall(spec: {
+  name: string;
+  dimArgIndex: 1 | 2;
+  outputElem: "double" | "logical";
+}): Builtin["call"] {
+  return ({ args, argTypes }) => {
+    if (spec.dimArgIndex === 2 && argTypes.length === 2) {
+      const av = typeof args[0] === "number" ? args[0] : Number(args[0]);
+      const bv = typeof args[1] === "number" ? args[1] : Number(args[1]);
+      return [spec.name === "max" ? Math.max(av, bv) : Math.min(av, bv)];
+    }
+    const inputT = argTypes[0];
+    if (!isNumeric(inputT)) {
+      throw new Error(`internal: ${spec.name} call got non-numeric arg`);
+    }
+    if (inputT.isComplex) {
+      throw new UnsupportedConstruct(
+        `'${spec.name}' complex 'call' not yet wired (Phase 5)`
+      );
+    }
+    if (isScalar(inputT)) {
+      const v = typeof args[0] === "number" ? args[0] : Number(args[0]);
+      if (spec.outputElem === "logical") return [v !== 0 ? 1 : 0];
+      return [v];
+    }
+    // Tensor input — dispatch through the JS reduce table.
+    const reducer = TENSOR_REDUCERS[spec.name];
+    if (!reducer) {
+      throw new UnsupportedConstruct(
+        `'${spec.name}' tensor 'call' has no JS reducer registered`
+      );
+    }
+    const t = args[0] as RuntimeTensor;
+    const axis = resolveCallAxis(spec, args, argTypes, inputT);
+    if (axis.kind === "all") {
+      return [reducer.all(t)];
+    }
+    return [reducer.dim(t, axis.dim)];
+  };
+}
+
 export function reductionEmit(spec: {
   name: string;
   dimArgIndex: 1 | 2;
   outputElem: "double" | "logical";
-}): Builtin["emit"] {
+}): Builtin["emitC"] {
   return ({ argsC, argTypes, useRuntime }) => {
     useRuntime("mtoc2_tensor_reduce_real");
     useRuntime("mtoc2_tensor_reduce_complex");
@@ -792,7 +966,17 @@ export function defineReducer(spec: KernelSpec): Builtin {
       }
       return [reductionTransfer(argTypes, spec)];
     },
-    emit: reductionEmit({
+    emitC: reductionEmit({
+      name: spec.name,
+      dimArgIndex: spec.dimArgIndex,
+      outputElem: spec.outputElem,
+    }),
+    emitJs: reductionEmitJs({
+      name: spec.name,
+      dimArgIndex: spec.dimArgIndex,
+      outputElem: spec.outputElem,
+    }),
+    call: reductionCall({
       name: spec.name,
       dimArgIndex: spec.dimArgIndex,
       outputElem: spec.outputElem,

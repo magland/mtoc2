@@ -50,7 +50,7 @@ export const errorBuiltin: Builtin = {
     validateFormatArgs("error", argTypes, fmtIdx + 1);
     return [{ kind: "Void" }];
   },
-  emit({ argsC, argTypes, useRuntime }) {
+  emitC({ argsC, argTypes, useRuntime }) {
     useRuntime("mtoc2_error_fmt");
     const first = argTypes[0];
     const firstExact =

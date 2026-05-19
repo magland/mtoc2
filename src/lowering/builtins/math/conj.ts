@@ -74,7 +74,7 @@ export const conj: Builtin = {
     out.sign = a.sign;
     return [out];
   },
-  emit({ argsC, argTypes, useRuntime }) {
+  emitC({ argsC, argTypes, useRuntime }) {
     const a = argTypes[0] as NumericType;
     if (isMultiElement(a)) {
       if (a.isComplex) {

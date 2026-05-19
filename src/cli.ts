@@ -30,6 +30,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { createInterface } from "node:readline";
 
 import { translateProject, type SourceFile } from "./translate.js";
+import { Workspace, parseFiles } from "./workspace/workspace.js";
 import { translateCToJs } from "./cjs/index.js";
 import { applyPlotRecord, newPlotDispatchState } from "./utils/plotAdapter.js";
 import { PLOT_PREFIX } from "./utils/plotProtocol.js";
@@ -49,13 +50,19 @@ function usage(): never {
   console.error(
     [
       "usage:",
-      "  mtoc2 run [--js] [--plot] [--check-leaks] [--dump-c <path>] [--dump-js <path>]",
+      "  mtoc2 run [--exec MODE] [--js] [--plot] [--check-leaks] [--dump-c <path>] [--dump-js <path>]",
       "    [--opt PROFILE] [--fast-math|--no-fast-math] [--threads N|auto]",
       "    [--inline-temps|--no-inline-temps] [--path <dir>...] <script.m>",
-      "  mtoc2 eval [--js] [--plot] [--check-leaks] [--dump-c <path>] [--dump-js <path>]",
+      "  mtoc2 eval [--exec MODE] [--js] [--plot] [--check-leaks] [--dump-c <path>] [--dump-js <path>]",
       "    [--opt PROFILE] [--fast-math|--no-fast-math] [--threads N|auto]",
       '    [--inline-temps|--no-inline-temps] [--path <dir>...] "<code>"',
       "  mtoc2 translate <script.m> [-o out.c]",
+      "",
+      "--exec MODE: one of interpreter | js-aot | js-jit | c-aot (default: c-aot).",
+      "    interpreter — tree-walk the AST via builtin.call hooks (always available)",
+      "    js-aot      — lower to IR, emit JS via builtin.emitJs, run via 'new Function'",
+      "    js-jit      — placeholder, currently falls back to interpreter",
+      "    c-aot       — translate to C, compile via 'cc', execute the binary (default)",
       "",
       `--opt PROFILE: one of ${OPT_PROFILES.join(", ")}.`,
       "    none       — fast-math off, threads 1, inline-temps off (single-threaded baseline)",
@@ -229,7 +236,18 @@ function translateInline(
   );
 }
 
+type ExecMode = "interpreter" | "js-aot" | "js-jit" | "c-aot";
+
 interface RunOptions {
+  /** Which execution backend to use. Default `c-aot` matches the
+   *  pre-existing behaviour (translate to C, compile via `cc`, run
+   *  the binary). `js-aot` uses the new `emitJs` path (no `cc`
+   *  involved; runs in this process via `new Function`).
+   *  `interpreter` walks the AST via the tree-walking interpreter
+   *  (no codegen at all). `js-jit` is a placeholder — it currently
+   *  falls back to the interpreter (real JIT specialization will
+   *  arrive when liveness/spec data threads through). */
+  exec?: ExecMode;
   /** Build the C output with `-fsanitize=address -g`. AddressSanitizer
    *  pulls in LeakSanitizer at exit on Linux, so any unfreed
    *  `mtoc2_tensor_t` (or other owned buffer) is reported on stderr
@@ -446,6 +464,7 @@ function parseRunEvalArgs(argv: string[]): {
   let checkLeaks = false;
   let plot = false;
   let js = false;
+  let exec: ExecMode | undefined;
   let dumpC: string | undefined;
   let dumpJs: string | undefined;
   let profile: OptProfile | undefined;
@@ -457,6 +476,16 @@ function parseRunEvalArgs(argv: string[]): {
     if (a === "--check-leaks") checkLeaks = true;
     else if (a === "--plot") plot = true;
     else if (a === "--js") js = true;
+    else if (a === "--exec") {
+      const v = argv[++i];
+      if (v !== "interpreter" && v !== "js-aot" && v !== "js-jit" && v !== "c-aot") {
+        console.error(
+          `Error: --exec requires one of 'interpreter' | 'js-aot' | 'js-jit' | 'c-aot' (got '${v ?? ""}')`
+        );
+        process.exit(2);
+      }
+      exec = v;
+    }
     else if (a === "--path") {
       if (i + 1 >= argv.length) {
         console.error("Error: --path requires a directory argument");
@@ -524,7 +553,15 @@ function parseRunEvalArgs(argv: string[]): {
   return {
     positional,
     extraPaths,
-    opts: { checkLeaks, plot, js, dumpC, dumpJs, opt },
+    opts: {
+      checkLeaks,
+      plot,
+      js,
+      dumpC,
+      dumpJs,
+      opt,
+      ...(exec !== undefined ? { exec } : {}),
+    },
   };
 }
 
@@ -534,12 +571,149 @@ function defaultRunOptions(): RunOptions {
   return { opt: resolveOptSettings() };
 }
 
+/** Build a Workspace from the script + sibling discovery, mirroring
+ *  the layout `translateFile` uses but without translating to C.
+ *  Shared by the interpreter and js-aot paths. */
+function buildProjectWorkspaceFromScript(
+  scriptPath: string,
+  extraPaths: string[]
+): { workspace: Workspace; mainName: string } {
+  const absScript = resolve(scriptPath);
+  const source = readFileSync(absScript, "utf8");
+  const dir = dirname(absScript);
+  const files: SourceFile[] = [
+    { name: absScript, source },
+    ...scanSiblings(dir, absScript),
+  ];
+  const searchPaths = [dir];
+  for (const p of extraPaths) {
+    const abs = resolve(p);
+    if (searchPaths.indexOf(abs) === -1) {
+      searchPaths.push(abs);
+      files.push(...scanSiblings(abs, absScript));
+    }
+  }
+  return buildWorkspaceFromFiles(files, absScript, searchPaths);
+}
+
+function buildProjectWorkspaceFromInline(
+  code: string,
+  extraPaths: string[]
+): { workspace: Workspace; mainName: string } {
+  const evalName = "eval.m";
+  const files: SourceFile[] = [{ name: evalName, source: code }];
+  const searchPaths: string[] = [];
+  for (const p of extraPaths) {
+    const abs = resolve(p);
+    if (searchPaths.indexOf(abs) === -1) {
+      searchPaths.push(abs);
+      files.push(...scanSiblings(abs, evalName));
+    }
+  }
+  return buildWorkspaceFromFiles(files, evalName, searchPaths);
+}
+
+function buildWorkspaceFromFiles(
+  files: SourceFile[],
+  mainName: string,
+  searchPaths: string[]
+): { workspace: Workspace; mainName: string } {
+  const parsed = parseFiles(files);
+  const ws = new Workspace(mainName, searchPaths);
+  for (const f of parsed) ws.addFile(f);
+  ws.finalize();
+  return { workspace: ws, mainName };
+}
+
+/** Execute via the tree-walking interpreter. No codegen, no `cc`. */
+async function runInterpreter(
+  workspace: Workspace,
+  mainName: string
+): Promise<void> {
+  // Lazy import to avoid pulling the interpreter (and its snippet
+  // bindings) into the C-only fast path.
+  const { Interpreter } = await import("./interpreter/interpreter.js");
+  const ctx = {
+    helpers: { write: (s: string) => process.stdout.write(s) },
+  };
+  const mainAst = workspace.files.get(mainName)?.ast;
+  if (!mainAst) {
+    console.error(`internal: main file '${mainName}' has no parsed AST`);
+    process.exit(1);
+  }
+  try {
+    new Interpreter(ctx, {
+      workspace,
+      currentFile: mainName,
+    }).runProgram(mainAst.body);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    console.error(`interpreter: ${msg}`);
+    process.exit(1);
+  }
+}
+
+/** Execute via `emitJs`. Lowers to IR, emits JS source, runs in this
+ *  process via `new Function`. */
+async function runJsAot(
+  workspace: Workspace,
+  mainName: string,
+  dumpJs?: string
+): Promise<void> {
+  const { Lowerer } = await import("./lowering/lower.js");
+  const { emitJsProgram } = await import("./codegen/emitJs.js");
+  const mainAst = workspace.files.get(mainName)?.ast;
+  if (!mainAst) {
+    console.error(`internal: main file '${mainName}' has no parsed AST`);
+    process.exit(1);
+  }
+  let prog;
+  try {
+    prog = new Lowerer(workspace).lowerProgram(mainAst);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    console.error(`lowering: ${msg}`);
+    process.exit(1);
+  }
+  const result = emitJsProgram(prog, { workspace });
+  if (dumpJs) writeFileSync(dumpJs, result.source);
+  const ctx = {
+    write: (s: string) => process.stdout.write(s),
+  };
+  try {
+    const run = new Function(result.source)();
+    run(ctx);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    console.error(`js-aot: ${msg}`);
+    process.exit(1);
+  }
+}
+
 async function main(): Promise<void> {
   const argv = process.argv.slice(2);
   if (argv.length === 0) usage();
   const cmd = argv[0];
   if (cmd === "run") {
     const { positional, extraPaths, opts } = parseRunEvalArgs(argv.slice(1));
+    const exec = opts.exec ?? "c-aot";
+    if (exec === "interpreter" || exec === "js-jit") {
+      // js-jit currently falls back to the interpreter (placeholder).
+      const { workspace, mainName } = buildProjectWorkspaceFromScript(
+        positional,
+        extraPaths
+      );
+      await runInterpreter(workspace, mainName);
+      return;
+    }
+    if (exec === "js-aot") {
+      const { workspace, mainName } = buildProjectWorkspaceFromScript(
+        positional,
+        extraPaths
+      );
+      await runJsAot(workspace, mainName, opts.dumpJs);
+      return;
+    }
     const cSrc = translateFile(
       positional,
       extraPaths,
@@ -551,6 +725,23 @@ async function main(): Promise<void> {
   }
   if (cmd === "eval") {
     const { positional, extraPaths, opts } = parseRunEvalArgs(argv.slice(1));
+    const exec = opts.exec ?? "c-aot";
+    if (exec === "interpreter" || exec === "js-jit") {
+      const { workspace, mainName } = buildProjectWorkspaceFromInline(
+        positional,
+        extraPaths
+      );
+      await runInterpreter(workspace, mainName);
+      return;
+    }
+    if (exec === "js-aot") {
+      const { workspace, mainName } = buildProjectWorkspaceFromInline(
+        positional,
+        extraPaths
+      );
+      await runJsAot(workspace, mainName, opts.dumpJs);
+      return;
+    }
     const cSrc = translateInline(
       positional,
       extraPaths,

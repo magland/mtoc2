@@ -54,6 +54,8 @@ import {
 } from "../../types.js";
 import type { DimInfo, Type } from "../../types.js";
 import type { Builtin } from "../registry.js";
+import type { RuntimeTensor } from "../../../runtime/value.js";
+import { mtoc2_reshape_nd as jsReshape } from "../../../codegen/runtime/snippets.gen.js";
 
 const MAX_DIM_ARGS = MTOC2_MAX_NDIM;
 import {
@@ -350,7 +352,7 @@ export const reshape: Builtin = {
       ? [tensorComplexFromDims(dims)]
       : [tensorDoubleFromDims(dims)];
   },
-  emit({ argsC, argTypes, useRuntime }) {
+  emitC({ argsC, argTypes, useRuntime }) {
     useRuntime("mtoc2_reshape_nd");
     useRuntime("mtoc2_reshape_nd_complex");
     const resolved = resolveNewShape(argTypes.slice(1));
@@ -366,5 +368,59 @@ export const reshape: Builtin = {
     const dimArgsC = argsC.slice(1);
     const dimList = resolved.axes.map(axis => dimC(axis, dimArgsC)).join(", ");
     return `${fn}(${argsC[0]}, ${resolved.axes.length}, (long[]){${dimList}})`;
+  },
+  emitJs({ argsJs, argTypes, useRuntime }) {
+    useRuntime("mtoc2_reshape_nd");
+    const resolved = resolveNewShape(argTypes.slice(1));
+    const newShape = exactShape(resolved);
+    if (newShape !== undefined && newShape.every(d => d === 1)) {
+      return argsJs[0];
+    }
+    const a = argTypes[0];
+    if (isNumeric(a) && a.isComplex) {
+      throw new UnsupportedConstruct(
+        `'reshape' complex emitJs not yet wired (Phase 5)`
+      );
+    }
+    const dimArgsJs = argsJs.slice(1);
+    const dimList = resolved.axes
+      .map(axis =>
+        axis.kind === "exact"
+          ? String(axis.value)
+          : axis.kind === "infer"
+            ? "-1"
+            : `Math.trunc(${dimArgsJs[axis.argIndex]})`
+      )
+      .join(", ");
+    return `mtoc2_reshape_nd(${argsJs[0]}, ${resolved.axes.length}, [${dimList}])`;
+  },
+  call({ args, argTypes }) {
+    const resolved = resolveNewShape(argTypes.slice(1));
+    const a = argTypes[0];
+    if (isNumeric(a) && a.isComplex) {
+      throw new UnsupportedConstruct(
+        `'reshape' complex 'call' not yet wired (Phase 5)`
+      );
+    }
+    const dims: number[] = [];
+    for (const axis of resolved.axes) {
+      if (axis.kind === "exact") {
+        dims.push(axis.value);
+      } else if (axis.kind === "infer") {
+        dims.push(-1);
+      } else {
+        const v = args[axis.argIndex + 1];
+        dims.push(
+          Math.trunc(typeof v === "number" ? v : Number(v as object))
+        );
+      }
+    }
+    return [
+      jsReshape(
+        args[0] as RuntimeTensor,
+        resolved.axes.length,
+        dims
+      ) as unknown as RuntimeTensor,
+    ];
   },
 };

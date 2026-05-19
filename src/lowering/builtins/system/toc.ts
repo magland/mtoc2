@@ -5,6 +5,10 @@
 import { TypeError, UnsupportedConstruct } from "../../errors.js";
 import { isScalarRealNumeric, scalarDouble } from "../../types.js";
 import type { Builtin } from "../registry.js";
+import {
+  mtoc2_toc,
+  mtoc2_toc_handle,
+} from "../../../codegen/runtime/snippets.gen.js";
 
 export const toc: Builtin = {
   name: "toc",
@@ -25,9 +29,21 @@ export const toc: Builtin = {
     }
     return [scalarDouble("nonneg")];
   },
-  emit({ argsC, useRuntime }) {
+  emitC({ argsC, useRuntime }) {
     useRuntime("mtoc2_tic_toc");
     if (argsC.length === 1) return `mtoc2_toc_handle(${argsC[0]})`;
     return "mtoc2_toc()";
+  },
+  emitJs({ argsJs, useRuntime }) {
+    useRuntime("mtoc2_tic_toc");
+    if (argsJs.length === 1) return `mtoc2_toc_handle(${argsJs[0]})`;
+    return "mtoc2_toc()";
+  },
+  call({ args }) {
+    if (args.length === 1) {
+      const s = typeof args[0] === "number" ? args[0] : Number(args[0]);
+      return [mtoc2_toc_handle(s)];
+    }
+    return [mtoc2_toc()];
   },
 };

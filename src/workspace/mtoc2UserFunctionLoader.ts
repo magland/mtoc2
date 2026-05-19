@@ -303,7 +303,7 @@ export function loadMtoc2UserFunction(
         ? R
         : never;
     },
-    emit({ argsC, argTypes, nargout, outArgsC, useRuntime }) {
+    emitC({ argsC, argTypes, nargout, outArgsC, useRuntime }) {
       useRuntime(snippet);
       const out = userExports.emit({
         argsC,

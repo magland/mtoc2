@@ -1,101 +1,143 @@
 /**
- * Builtin registry — the contract every mtoc2 builtin (and future user
- * `.mtoc2.js` function) implements.
+ * Builtin registry — the contract every mtoc2 builtin (and future
+ * user `.mtoc2.js` function) implements.
  *
- *   transfer(argTypes, nargout) — given input types and the number of
- *     outputs the call site wants, return one Type per output. When
- *     every input is exact, set `exact` on the returned type(s) so the
- *     lowerer can key specialization on the value (and fold `if`
- *     conditions). Throws plain `Error` / `TypeError` /
- *     `UnsupportedConstruct` on bad input — no source span; the
- *     framework attaches the call-site span via `withSpan`.
+ * Each builtin can supply up to three mirrored hooks plus the
+ * always-required `transfer`:
  *
- *   emit({argsC, argTypes, nargout, outArgsC?, useRuntime}) — emit the
- *     full C call string. For nargout=1 that's a C expression
- *     (`(a + b)`, `mtoc2_tensor_plus_tt(a, b)`); for nargout≥2 it's
- *     the complete helper invocation including out-pointer args
- *     (`mtoc2_sort_real_2(a, &v, &i)`). Activate any runtime snippets
- *     this emit-output references by calling `useRuntime(name)`.
+ *   transfer(argTypes, nargout) — required. Given input types and
+ *     the number of outputs the call site wants, return one Type
+ *     per output. When every input is exact, set `exact` on the
+ *     returned type(s) so the lowerer can key specialization on the
+ *     value (and fold `if` conditions). Throws plain `Error` /
+ *     `TypeError` / `UnsupportedConstruct` on bad input — no source
+ *     span; the framework attaches the call-site span via `withSpan`.
  *
- *   elementwise? — when true, `emit` must also produce a correct
- *     scalar C expression when called with scalar-form argsC and
- *     scalar argTypes. The framework uses this for same-shape tensor
- *     fusion (and, later, broadcasting / reduction-inner / mask /
- *     stencil fusion). Absence = "do not fuse me; use my regular
- *     emit on the full tensor types."
+ *   emitC({argsC, argTypes, nargout, outArgsC?, useRuntime}) —
+ *     optional. C codegen. Returns the full string ready to splice
+ *     into the surrounding context:
+ *       - nargout=1: a C expression (`(a + b)`,
+ *         `mtoc2_tensor_plus_tt(a, b)`)
+ *       - nargout≥2: a full call including out-pointer args
+ *         (`mtoc2_sort_real_2(a, &v, &i)`). `outArgsC` holds those
+ *         pre-built `&v`, `&i` strings in the order the call site
+ *         requested.
+ *     Activate any runtime snippets this emit-output references by
+ *     calling `useRuntime(name)`.
+ *
+ *   emitJs({argsJs, argTypes, nargout, outTargetsJs?, useRuntime}) —
+ *     optional. JS codegen. Returns a JS expression (or call
+ *     sequence) ready to splice. Multi-output calls receive
+ *     `outTargetsJs` pre-built as `o1`, `o2`, … the secondary
+ *     outputs land in these locals via the framework's destructuring
+ *     wrapper. Activates JS-side runtime snippets via `useRuntime`.
+ *
+ *   call({args, argTypes, nargout, ctx}) — optional. Direct JS
+ *     function used by the interpreter and as a JIT bailout target.
+ *     Returns one runtime value per output slot. The args shape
+ *     mirrors the emit hooks' shape so dispatch on `argTypes` /
+ *     `nargout` stays parallel across all three.
+ *
+ *   elementwise? — when true, every defined emit hook (and `call`)
+ *     must also produce a correct scalar output when called with
+ *     scalar argTypes and scalar argsC/argsJs/args. The framework
+ *     uses this for same-shape tensor fusion (and, later, broadcast
+ *     / reduction-inner / mask / stencil fusion). Absence = "do not
+ *     fuse me; use the regular emit on the full tensor types."
+ *
+ * Each backend selector requires the matching hook to be defined on
+ * every builtin in the call's transitive reach; the framework
+ * computes the maximum compatible backend per call site.
  */
 
 import type { Type } from "../types.js";
+import type { RuntimeValue } from "../../runtime/value.js";
+import type { RuntimeContext } from "../../runtime/context.js";
+
+// ── Shared arg-shape ────────────────────────────────────────────────────
+
+/** Common across every hook — the type-level call descriptor. */
+interface CommonArgs {
+  /** Per-arg type (after lowering / inference). */
+  argTypes: Type[];
+  /** Number of outputs requested at the call site. */
+  nargout: number;
+}
+
+export interface EmitCArgs extends CommonArgs {
+  /** Per-arg C expression. In fused contexts this is scalar form
+   *  (e.g. `<var>.real[i]`); in the regular path it's whatever the
+   *  framework's `emitExpr` produced. */
+  argsC: string[];
+  /** Out-pointer C expressions for multi-output calls (length =
+   *  nargout when nargout≥2; otherwise undefined). The framework
+   *  pre-builds these as `&v`, `&i`, … so `emit` just splices them
+   *  in. */
+  outArgsC?: string[];
+  /** Activate a runtime C snippet on the current translation unit.
+   *  See `runtime.ts` for the registry and `InlineSnippet` for the
+   *  user-supplied form. */
+  useRuntime(spec: string | InlineSnippet): void;
+}
+
+export interface EmitJsArgs extends CommonArgs {
+  /** Per-arg JS expression. */
+  argsJs: string[];
+  /** Out-target JS expressions for multi-output calls. The
+   *  framework pre-builds these as `o1`, `o2`, … and destructures
+   *  the call's return into them. Length equals `nargout-1` when
+   *  `nargout≥2` (the primary output is the expression's value).
+   *  Undefined for `nargout≤1`. */
+  outTargetsJs?: string[];
+  /** Activate a JS-side runtime snippet. Snippets are inlined once
+   *  per build at the top of the emitted module, so the call site
+   *  invokes them by bare name. Mirrors the C-side `useRuntime` —
+   *  same registry, paired `.h`/`.js` source files. */
+  useRuntime(name: string): void;
+}
+
+export interface CallArgs extends CommonArgs {
+  /** Per-arg runtime values, evaluated by the interpreter at the
+   *  call site. */
+  args: RuntimeValue[];
+  /** Host bag — `helpers.write` for stdout, future hooks for plot /
+   *  error / time. */
+  ctx: RuntimeContext;
+}
+
+// ── Builtin ──────────────────────────────────────────────────────────────
 
 export interface Builtin {
   /** Source-level name (registry key). */
   name: string;
 
-  /** Output type(s) for an `nargout`-output call. Returned array
-   *  length must equal `nargout`. Throws on bad arg count, bad arg
-   *  types, or unsupported nargout (plain Error / TypeError /
-   *  UnsupportedConstruct — no source span). Pure: safe to invoke as
-   *  a probe (the framework calls this for bare-identifier 0-arg
+  /** Required: output Type per output slot. Pure — safe to invoke
+   *  as a probe (the framework calls this for bare-identifier 0-arg
    *  detection). */
   transfer(argTypes: Type[], nargout: number): Type[];
 
-  /** Emit C for this call. Returns the full string ready to splice
-   *  into the surrounding context:
-   *    - nargout=1: a C *expression*
-   *    - nargout≥2: a full call including out-pointer args, e.g.
-   *      `mtoc2_sort_real_2(a, &v, &i)`. `outArgsC` holds those
-   *      pre-built `&v`, `&i` strings in the order the call site
-   *      requested. */
-  emit(args: EmitArgs): string;
+  /** Optional: C codegen. */
+  emitC?(args: EmitCArgs): string;
 
-  /** Elementwise = result is computed pointwise from corresponding
-   *  slots of each input. Implies `emit`, called with scalar
-   *  `argTypes` and scalar-form `argsC`, returns a scalar C
-   *  expression suitable for inlining at one slot of a fused loop.
-   *  The framework uses this to fuse tensor-Assign elementwise ops
-   *  (and, later, broadcasting and other fusion modes). */
+  /** Optional: JS codegen. */
+  emitJs?(args: EmitJsArgs): string;
+
+  /** Optional: direct JS function — interpreter / JIT bailout. */
+  call?(args: CallArgs): RuntimeValue[];
+
+  /** Elementwise = result is computed pointwise. */
   elementwise?: boolean;
 }
 
-export interface EmitArgs {
-  /** Per-arg C expression. In fused contexts this is scalar form
-   *  (e.g. `<var>.real[i]`); in the regular path it's whatever the
-   *  framework's `emitExpr` produced. */
-  argsC: string[];
-  /** Per-arg type. In fused contexts the framework supplies the
-   *  scalar version of each tensor operand's type; `emit` reads
-   *  these to pick its branch the same way it does for a scalar call
-   *  site. */
-  argTypes: Type[];
-  /** Number of outputs requested at the call site. */
-  nargout: number;
-  /** Out-pointer C expressions for multi-output calls (length =
-   *  nargout when nargout≥2; otherwise empty/undefined). The
-   *  framework pre-builds these as `&v`, `&i`, … so `emit` just
-   *  splices them in. */
-  outArgsC?: string[];
-  /** Activate a runtime C snippet. Accepts either:
-   *
-   *   - A `string` name resolving to a snippet registered in mtoc2's
-   *     global `runtime.ts` registry. Used by every built-in.
-   *
-   *   - An `InlineSnippet` `{ name, code, headers?, deps? }`. The
-   *     framework registers the snippet on the current translation
-   *     unit's state and activates it. Used by `.mtoc2.js` user
-   *     builtins to inject their C function bodies. Subsequent
-   *     activations of the same `name` are idempotent.
-   *
-   *  Dependency ordering and header deduplication are handled by the
-   *  framework. */
-  useRuntime(spec: string | InlineSnippet): void;
-}
-
 /** Inline-defined runtime snippet supplied by a user `.mtoc2.js`
- *  builtin's `emit`. Re-exported from `runtime.ts` — kept here for
- *  doc-locality with the `Builtin` contract. */
+ *  builtin's `emitC` / `emitJs`. Re-exported from `runtime.ts` — kept
+ *  here for doc-locality with the `Builtin` contract. */
 export interface InlineSnippet {
   name: string;
+  /** C body (required for `emitC` consumers; ignored on the JS path). */
   code: string;
+  /** Optional JS body (required for `emitJs` consumers). */
+  jsCode?: string;
   headers?: ReadonlyArray<string>;
   deps?: ReadonlyArray<string>;
 }
@@ -119,4 +161,55 @@ export function getBuiltin(name: string): Builtin | undefined {
 /** Names of every registered builtin. Drives Monaco syntax highlighting. */
 export function allBuiltinNames(): readonly string[] {
   return Array.from(REGISTRY.keys());
+}
+
+// ── Backend capability probes ───────────────────────────────────────────
+
+export type Backend = "c" | "js" | "interpreter";
+
+export function builtinSupports(b: Builtin, backend: Backend): boolean {
+  switch (backend) {
+    case "c":
+      return b.emitC !== undefined;
+    case "js":
+      return b.emitJs !== undefined;
+    case "interpreter":
+      return b.call !== undefined;
+  }
+}
+
+// ── Internal accessors (post-backend-selection) ─────────────────────────
+//
+// After the framework has selected a backend and validated that every
+// builtin in the call's transitive reach supports it, codegen / runtime
+// dispatch sites use these to fetch the hook without the optional-chain
+// dance. If the assertion fails it's a framework bug (we missed a
+// backend-capability check upstream), not a user error — surface it as
+// such.
+
+export function requireEmitC(b: Builtin): (args: EmitCArgs) => string {
+  if (!b.emitC) {
+    throw new Error(
+      `internal: builtin '${b.name}' has no emitC hook (backend selection should have rejected this earlier)`
+    );
+  }
+  return b.emitC.bind(b);
+}
+
+export function requireEmitJs(b: Builtin): (args: EmitJsArgs) => string {
+  if (!b.emitJs) {
+    throw new Error(
+      `internal: builtin '${b.name}' has no emitJs hook (backend selection should have rejected this earlier)`
+    );
+  }
+  return b.emitJs.bind(b);
+}
+
+export function requireCall(b: Builtin): (args: CallArgs) => RuntimeValue[] {
+  if (!b.call) {
+    throw new Error(
+      `internal: builtin '${b.name}' has no call hook (backend selection should have rejected this earlier)`
+    );
+  }
+  return b.call.bind(b);
 }

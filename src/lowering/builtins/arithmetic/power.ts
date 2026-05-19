@@ -54,6 +54,13 @@ import {
   elemwiseResultShape,
   needsBroadcast,
 } from "./_elemwise.js";
+import type { RuntimeTensor } from "../../../runtime/value.js";
+import {
+  mtoc2_tensor_power_tt,
+  mtoc2_tensor_power_ts,
+  mtoc2_tensor_power_st,
+  mtoc2_tensor_power_bcast_tt,
+} from "../../../codegen/runtime/snippets.gen.js";
 
 function isExactInteger(t: NumericType): boolean {
   const v = exactDouble(t);
@@ -229,7 +236,7 @@ export const power: Builtin = {
     outTy.sign = powerSign(a, b);
     return [outTy];
   },
-  emit({ argsC, argTypes, useRuntime }) {
+  emitC({ argsC, argTypes, useRuntime }) {
     const aN = argTypes[0] as NumericType;
     const bN = argTypes[1] as NumericType;
     const aMulti = isMultiElement(aN);
@@ -252,6 +259,61 @@ export const power: Builtin = {
     }
     // scalar .^ tensor — not commutative.
     return `mtoc2_tensor_power_st(${argsC[0]}, ${argsC[1]})`;
+  },
+  emitJs({ argsJs, argTypes, useRuntime }) {
+    const aN = argTypes[0] as NumericType;
+    const bN = argTypes[1] as NumericType;
+    if (aN.isComplex || bN.isComplex) {
+      throw new UnsupportedConstruct(
+        `'power' complex emitJs not yet wired (Phase 5)`
+      );
+    }
+    const aMulti = isMultiElement(aN);
+    const bMulti = isMultiElement(bN);
+    if (!aMulti && !bMulti) return `Math.pow(${argsJs[0]}, ${argsJs[1]})`;
+    useRuntime("mtoc2_tensor_elemwise_real_fn");
+    if (aMulti && bMulti) {
+      return needsBroadcast(aN, bN)
+        ? `mtoc2_tensor_power_bcast_tt(${argsJs[0]}, ${argsJs[1]})`
+        : `mtoc2_tensor_power_tt(${argsJs[0]}, ${argsJs[1]})`;
+    }
+    if (aMulti) {
+      return `mtoc2_tensor_power_ts(${argsJs[0]}, ${argsJs[1]})`;
+    }
+    // scalar .^ tensor — non-commutative.
+    return `mtoc2_tensor_power_st(${argsJs[0]}, ${argsJs[1]})`;
+  },
+  call({ args, argTypes }) {
+    const aN = argTypes[0] as NumericType;
+    const bN = argTypes[1] as NumericType;
+    if (aN.isComplex || bN.isComplex) {
+      throw new UnsupportedConstruct(
+        `'power' complex 'call' not yet wired (Phase 5)`
+      );
+    }
+    const aMulti = isMultiElement(aN);
+    const bMulti = isMultiElement(bN);
+    if (!aMulti && !bMulti) {
+      const av = typeof args[0] === "number" ? args[0] : Number(args[0]);
+      const bv = typeof args[1] === "number" ? args[1] : Number(args[1]);
+      return [Math.pow(av, bv)];
+    }
+    if (aMulti && bMulti) {
+      const at = args[0] as RuntimeTensor;
+      const bt = args[1] as RuntimeTensor;
+      const op = needsBroadcast(aN, bN)
+        ? mtoc2_tensor_power_bcast_tt
+        : mtoc2_tensor_power_tt;
+      return [op(at, bt) as unknown as RuntimeTensor];
+    }
+    if (aMulti) {
+      const at = args[0] as RuntimeTensor;
+      const bv = typeof args[1] === "number" ? args[1] : Number(args[1]);
+      return [mtoc2_tensor_power_ts(at, bv) as unknown as RuntimeTensor];
+    }
+    const av = typeof args[0] === "number" ? args[0] : Number(args[0]);
+    const bt = args[1] as RuntimeTensor;
+    return [mtoc2_tensor_power_st(av, bt) as unknown as RuntimeTensor];
   },
   elementwise: true,
 };

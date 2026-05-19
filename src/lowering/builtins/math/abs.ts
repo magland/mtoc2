@@ -10,7 +10,7 @@ import {
   EXACT_ARRAY_MAX_ELEMENTS,
 } from "../../types.js";
 import { TypeError, UnsupportedConstruct } from "../../errors.js";
-import type { Builtin } from "../registry.js";
+import { type Builtin, requireEmitC, requireEmitJs, requireCall } from "../registry.js";
 import {
   requireRealOrComplex,
   exactComplex,
@@ -78,7 +78,7 @@ export const abs: Builtin = {
     }
     return absReal.transfer(argTypes, nargout);
   },
-  emit(args) {
+  emitC(args) {
     const { argsC, argTypes, useRuntime } = args;
     const a = argTypes[0] as NumericType;
     if (a.isComplex) {
@@ -89,7 +89,27 @@ export const abs: Builtin = {
       }
       return `mtoc2_cabs(${argsC[0]})`;
     }
-    return absReal.emit(args);
+    return requireEmitC(absReal)(args);
+  },
+  // Complex paths land alongside the JS complex runtime later. Real
+  // paths delegate to `absReal`'s factory-supplied emitJs/call.
+  emitJs(args) {
+    const a = args.argTypes[0] as NumericType;
+    if (a.isComplex) {
+      throw new UnsupportedConstruct(
+        `'abs' complex emitJs not yet wired (needs JS complex runtime)`
+      );
+    }
+    return requireEmitJs(absReal)(args);
+  },
+  call(args) {
+    const a = args.argTypes[0] as NumericType;
+    if (a.isComplex) {
+      throw new UnsupportedConstruct(
+        `'abs' complex 'call' not yet wired`
+      );
+    }
+    return requireCall(absReal)(args);
   },
   elementwise: true,
 };

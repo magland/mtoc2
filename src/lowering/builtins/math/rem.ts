@@ -8,6 +8,8 @@ export const rem = defineElemwiseRealBinaryFn({
   helperBase: "rem",
   commutative: false,
   fold: (a, b) => a % b,
+  // JS `%` matches C `fmod` semantics (result sign tracks `a`'s sign).
+  jsScalarExpr: (a, b) => `((${a}) % (${b}))`,
   signRule: a => a.sign,
   runtimeDep: "mtoc2_tensor_elemwise_real_fn",
 });

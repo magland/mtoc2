@@ -1,0 +1,98 @@
+/**
+ * Runtime value carrier for the interpreter backend. Mirrors nexl's
+ * `RuntimeValue` design: a discriminated-via-typeof union for the
+ * common cases plus tagged-object wrappers for the kinds JS can't
+ * distinguish natively.
+ *
+ * MVP scope (Phase 3): real-double scalars, booleans (logical),
+ * strings (double-quoted), chars (single-quoted), real-double tensors.
+ * Complex / structs / classes / handles / void / cells follow as the
+ * type lattice and interpreter coverage expand.
+ *
+ * Builtin `call` implementations narrow via `typeof` / `isTensor` /
+ * `isChar` and dispatch through the same `argTypes` shape that
+ * `emitC` / `emitJs` consume — keeping the three backends parallel.
+ */
+
+export type RuntimeValue =
+  | number
+  | boolean
+  | string
+  | RuntimeTensor
+  | RuntimeChar;
+
+/** Real-double tensor. `data` is column-major to match numbl's
+ *  `RuntimeTensor.data`. The shape array is owned by the value; do
+ *  not mutate. */
+export interface RuntimeTensor {
+  readonly mtoc2Tag: "tensor";
+  readonly shape: number[];
+  readonly data: Float64Array;
+}
+
+/** Single-quoted char-array (`'foo'`). Distinct from `"foo"` strings
+ *  because numbl treats them differently: `length('foo') === 3` but
+ *  `length("foo") === 1`. */
+export interface RuntimeChar {
+  readonly mtoc2Tag: "char";
+  readonly value: string;
+}
+
+export function makeTensor(shape: number[], data: Float64Array): RuntimeTensor {
+  let total = 1;
+  for (const s of shape) total *= s;
+  if (data.length !== total) {
+    throw new Error(
+      `makeTensor: shape [${shape.join(",")}] requires ${total} elements, got ${data.length}`
+    );
+  }
+  return { mtoc2Tag: "tensor", shape: shape.slice(), data };
+}
+
+export function makeChar(value: string): RuntimeChar {
+  return { mtoc2Tag: "char", value };
+}
+
+export function isTensor(v: RuntimeValue): v is RuntimeTensor {
+  return (
+    typeof v === "object" &&
+    v !== null &&
+    (v as RuntimeTensor).mtoc2Tag === "tensor"
+  );
+}
+
+export function isChar(v: RuntimeValue): v is RuntimeChar {
+  return (
+    typeof v === "object" &&
+    v !== null &&
+    (v as RuntimeChar).mtoc2Tag === "char"
+  );
+}
+
+/** Materialize a scalar value as a plain JS number. Used by builtins
+ *  that need to treat scalar tensors and scalar numbers uniformly. */
+export function toScalarNumber(v: RuntimeValue): number {
+  if (typeof v === "number") return v;
+  if (typeof v === "boolean") return v ? 1 : 0;
+  if (isTensor(v) && v.data.length === 1) return v.data[0];
+  throw new Error("toScalarNumber: value is not a scalar number");
+}
+
+/** MATLAB-style truthiness — for `if` / `while` / `&&` / `||`.
+ *  Scalar non-zero, all-elements-non-zero for tensors, nonempty
+ *  text. The interpreter uses this; codegen relies on the matching
+ *  C-side `__nonzero` helpers. */
+export function isTruthy(v: RuntimeValue): boolean {
+  if (typeof v === "number") return v !== 0;
+  if (typeof v === "boolean") return v;
+  if (typeof v === "string") return v.length > 0;
+  if (isChar(v)) return v.value.length > 0;
+  if (isTensor(v)) {
+    if (v.data.length === 0) return false;
+    for (let i = 0; i < v.data.length; i++) {
+      if (v.data[i] === 0) return false;
+    }
+    return true;
+  }
+  return false;
+}

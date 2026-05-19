@@ -47,7 +47,7 @@ export const angle: Builtin = {
     }
     return [scalarDouble()];
   },
-  emit({ argsC, argTypes, useRuntime }) {
+  emitC({ argsC, argTypes, useRuntime }) {
     const a = argTypes[0] as NumericType;
     if (a.isComplex) {
       useRuntime("mtoc2_cscalar");

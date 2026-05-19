@@ -17,6 +17,8 @@ import {
 import type { NumericType } from "../../types.js";
 import type { Builtin } from "../registry.js";
 import { exactDouble, exactRealArray } from "../_shared.js";
+import type { RuntimeTensor } from "../../../runtime/value.js";
+import { mtoc2_tensor_flip as jsFlip } from "../../../codegen/runtime/snippets.gen.js";
 
 function flipExact(
   src: Float64Array,
@@ -143,7 +145,7 @@ function defineFlip(opts: {
       }
       return [{ ...a, exact: undefined }];
     },
-    emit({ argsC, argTypes, useRuntime }) {
+    emitC({ argsC, argTypes, useRuntime }) {
       useRuntime("mtoc2_tensor_flip");
       const a = argTypes[0] as NumericType;
       if (!isMultiElement(a)) {
@@ -155,6 +157,29 @@ function defineFlip(opts: {
         opts.fixedAxis
       );
       return `mtoc2_tensor_flip(${argsC[0]}, ${axisIdx}L)`;
+    },
+    emitJs({ argsJs, argTypes, useRuntime }) {
+      useRuntime("mtoc2_tensor_flip");
+      const a = argTypes[0] as NumericType;
+      if (!isMultiElement(a)) return argsJs[0];
+      const axisIdx = resolveFlipAxis(
+        opts.name,
+        argTypes as NumericType[],
+        opts.fixedAxis
+      );
+      return `mtoc2_tensor_flip(${argsJs[0]}, ${axisIdx})`;
+    },
+    call({ args, argTypes }) {
+      const a = argTypes[0] as NumericType;
+      if (!isMultiElement(a)) return [args[0]];
+      const axisIdx = resolveFlipAxis(
+        opts.name,
+        argTypes as NumericType[],
+        opts.fixedAxis
+      );
+      return [
+        jsFlip(args[0] as RuntimeTensor, axisIdx) as unknown as RuntimeTensor,
+      ];
     },
   };
 }

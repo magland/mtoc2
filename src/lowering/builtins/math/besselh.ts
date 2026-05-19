@@ -71,7 +71,7 @@ export const besselh: Builtin = {
     }
     return [tensorComplexFromDims(xT.dims.slice())];
   },
-  emit({ argsC, argTypes, useRuntime }) {
+  emitC({ argsC, argTypes, useRuntime }) {
     useRuntime("mtoc2_tensor_besselh");
     useRuntime("mtoc2_cscalar");
     const nu = (argTypes[0] as NumericType).exact as number;

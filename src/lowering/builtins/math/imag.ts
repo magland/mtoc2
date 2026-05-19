@@ -42,7 +42,7 @@ export const imag: Builtin = {
     }
     return [scalarDouble("zero", 0)];
   },
-  emit({ argsC, argTypes, useRuntime }) {
+  emitC({ argsC, argTypes, useRuntime }) {
     const a = argTypes[0] as NumericType;
     if (isMultiElement(a)) {
       if (a.isComplex) {

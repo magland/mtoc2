@@ -15,6 +15,8 @@ import {
 import type { DimInfo, NumericType, Type } from "../../types.js";
 import type { Builtin } from "../registry.js";
 import { exactDouble } from "../_shared.js";
+import type { RuntimeTensor } from "../../../runtime/value.js";
+import { mtoc2_eye_rect as jsEyeRect } from "../../../codegen/runtime/snippets.gen.js";
 
 interface ResolvedAxis {
   exact: number | undefined;
@@ -105,7 +107,7 @@ export const eye: Builtin = {
     t.sign = "nonneg";
     return [t];
   },
-  emit({ argsC, argTypes, useRuntime }) {
+  emitC({ argsC, argTypes, useRuntime }) {
     useRuntime("mtoc2_tensor_eye");
     const axes = resolveArgs(argTypes);
     const rows = axes[0].exact;
@@ -124,5 +126,50 @@ export const eye: Builtin = {
       return `mtoc2_eye_square((long)(${argsC[axes[0].argIndex]}))`;
     }
     return `mtoc2_eye_rect(${rowsC}, ${colsC})`;
+  },
+  emitJs({ argsJs, argTypes, useRuntime }) {
+    useRuntime("mtoc2_tensor_eye");
+    const axes = resolveArgs(argTypes);
+    const rows = axes[0].exact;
+    const cols = axes[1].exact;
+    if (rows === 1 && cols === 1) return "1";
+    const rowsJs =
+      rows !== undefined
+        ? String(rows)
+        : `Math.trunc(${argsJs[axes[0].argIndex]})`;
+    const colsJs =
+      cols !== undefined
+        ? String(cols)
+        : `Math.trunc(${argsJs[axes[1].argIndex]})`;
+    if (
+      argTypes.length === 1 &&
+      rows === undefined &&
+      cols === undefined &&
+      axes[0].argIndex === axes[1].argIndex
+    ) {
+      return `mtoc2_eye_square(Math.trunc(${argsJs[axes[0].argIndex]}))`;
+    }
+    return `mtoc2_eye_rect(${rowsJs}, ${colsJs})`;
+  },
+  call({ args, argTypes }) {
+    const axes = resolveArgs(argTypes);
+    const rows =
+      axes[0].exact !== undefined
+        ? axes[0].exact
+        : Math.trunc(
+            typeof args[axes[0].argIndex] === "number"
+              ? (args[axes[0].argIndex] as number)
+              : Number(args[axes[0].argIndex] as object)
+          );
+    const cols =
+      axes[1].exact !== undefined
+        ? axes[1].exact
+        : Math.trunc(
+            typeof args[axes[1].argIndex] === "number"
+              ? (args[axes[1].argIndex] as number)
+              : Number(args[axes[1].argIndex] as object)
+          );
+    if (rows === 1 && cols === 1) return [1];
+    return [jsEyeRect(rows, cols) as unknown as RuntimeTensor];
   },
 };

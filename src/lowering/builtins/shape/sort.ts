@@ -19,6 +19,11 @@ import {
 } from "../../types.js";
 import type { Builtin } from "../registry.js";
 import { requireRealDouble } from "../_shared.js";
+import type { RuntimeTensor } from "../../../runtime/value.js";
+import {
+  mtoc2_sort_real as jsSortReal,
+  mtoc2_sort_real_2 as jsSortReal2,
+} from "../../../codegen/runtime/snippets.gen.js";
 
 function requireVectorInput(a: Type): NumericType {
   requireRealDouble(a, "'sort' arg 1");
@@ -64,12 +69,32 @@ export const sort: Builtin = {
     idx.sign = "positive";
     return [v, idx];
   },
-  emit({ argsC, nargout, outArgsC, useRuntime }) {
+  emitC({ argsC, nargout, outArgsC, useRuntime }) {
     useRuntime("mtoc2_sort_real");
     if (nargout === 1) {
       return `mtoc2_sort_real(${argsC[0]})`;
     }
     const outs = outArgsC ?? [];
     return `mtoc2_sort_real_2(${argsC[0]}, ${outs.join(", ")})`;
+  },
+  emitJs({ argsJs, nargout, useRuntime }) {
+    useRuntime("mtoc2_sort_real");
+    if (nargout === 1) return `mtoc2_sort_real(${argsJs[0]})`;
+    // The JS-side `mtoc2_sort_real_2` returns `{v, ix}` instead of
+    // populating out-pointers. The emitJs multi-output destructure
+    // shape expects an array; wrap inline so the call site spreads
+    // it directly.
+    return `(o => [o.v, o.ix])(mtoc2_sort_real_2(${argsJs[0]}))`;
+  },
+  call({ args, nargout }) {
+    const a = args[0] as RuntimeTensor;
+    if (nargout === 1) {
+      return [jsSortReal(a) as unknown as RuntimeTensor];
+    }
+    const out = jsSortReal2(a) as unknown as {
+      v: RuntimeTensor;
+      ix: RuntimeTensor;
+    };
+    return [out.v, out.ix];
   },
 };

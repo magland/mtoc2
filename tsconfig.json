@@ -19,11 +19,15 @@
     "noUnusedParameters": true,
     "noFallthroughCasesInSwitch": true,
     "noUncheckedSideEffectImports": true,
+    "allowJs": true,
+    "checkJs": false,
     "types": ["node", "vite/client"]
   },
   "include": [
     "src/**/*.ts",
     "src/**/*.tsx",
+    "src/codegen/runtime/*.js",
+    "src/codegen/runtime/*.d.ts",
     "scripts/**/*.ts",
     "tests/**/*.ts",
     "vite.config.ts"

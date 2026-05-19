@@ -14,7 +14,7 @@
  * pulls dependencies in first.
  */
 
-import { SNIPPETS } from "./runtime/snippets.gen.js";
+import { C_SNIPPETS, JS_SNIPPETS } from "./runtime/snippets.gen.js";
 import { getBuiltin } from "../lowering/builtins/index.js";
 import type { Builtin } from "../lowering/builtins/registry.js";
 
@@ -30,6 +30,12 @@ export interface RuntimeSnippet {
   headers: ReadonlyArray<string>;
   /** Body of the snippet (definitions only — `#include`s removed). */
   code: string;
+  /** Paired JS body, when a `<basename>.js` sibling exists in the
+   *  runtime directory. Populated by `loadSnippet` from
+   *  `JS_SNIPPETS[<basename>.js]`. `emitJs` activates and inlines
+   *  this; if absent, the snippet is C-only (the builtin that owns
+   *  it has no JS path yet). */
+  jsCode?: string;
   /** Other helpers (by name) this snippet depends on. The activator
    *  pulls these in first so their definitions come before this
    *  snippet's. Cycles are not supported — keep the graph acyclic. */
@@ -75,7 +81,7 @@ function loadSnippet(
   filename: string,
   deps: ReadonlyArray<string> = []
 ): RuntimeSnippet {
-  const raw = SNIPPETS[filename];
+  const raw = C_SNIPPETS[filename];
   if (raw === undefined) {
     throw new Error(
       `runtime snippet '${filename}' not found in snippets.gen.ts; ` +
@@ -83,7 +89,14 @@ function loadSnippet(
     );
   }
   const { headers, code } = parseSnippetSource(raw);
-  return { headers, code, deps };
+  // Optional paired `.js` sibling (same basename) — auto-bound when
+  // present so `emitJs` can render the JS body without each call
+  // site looking it up separately.
+  const jsName = filename.replace(/\.h$/, ".js");
+  const jsCode = JS_SNIPPETS[jsName];
+  const snippet: RuntimeSnippet = { headers, code, deps };
+  if (jsCode !== undefined) snippet.jsCode = jsCode;
+  return snippet;
 }
 
 // ── Registry ──────────────────────────────────────────────────────────
@@ -265,7 +278,11 @@ const REGISTRY: ReadonlyMap<string, RuntimeSnippet> = new Map<
   // single-eval square entry points; the snippet is keyed under one
   // name (`mtoc2_tensor_eye`) and the `eye` builtin pulls it in via
   // a single dep.
-  ["mtoc2_tensor_eye", loadSnippet("tensor_eye.h", ["mtoc2_tensor_alloc"])],
+  [
+    "mtoc2_tensor_eye",
+    loadSnippet("tensor_eye.h", ["mtoc2_tensor_alloc"]),
+    // JS sibling allocates via `mtoc2_tensor_alloc` (already a dep).
+  ],
   // Parameterized fill (used by the `nan` / `NaN` / `Inf` / `inf`
   // shape-constructor branch). The `_nd` helper takes the fill value
   // as a leading `double`; `_square` is the single-eval companion for
@@ -283,6 +300,7 @@ const REGISTRY: ReadonlyMap<string, RuntimeSnippet> = new Map<
     loadSnippet("tensor_reshape_nd.h", [
       "mtoc2_tensor_t",
       "mtoc2_tensor_alloc_nd",
+      // The JS sibling references `mtoc2_tensor_alloc_nd` too.
     ]),
   ],
   [
@@ -297,7 +315,12 @@ const REGISTRY: ReadonlyMap<string, RuntimeSnippet> = new Map<
   // tensors, which mtoc2 doesn't yet have).
   [
     "mtoc2_tensor_transpose",
-    loadSnippet("tensor_transpose.h", ["mtoc2_tensor_t", "mtoc2_alloc"]),
+    loadSnippet("tensor_transpose.h", [
+      "mtoc2_tensor_t",
+      "mtoc2_alloc",
+      // JS sibling's `mtoc2_tensor_transpose` calls `mtoc2_tensor_alloc`.
+      "mtoc2_tensor_alloc",
+    ]),
   ],
   // Complex sibling of `mtoc2_tensor_transpose` — the non-conjugating
   // `.'` operator on a complex tensor. The conjugate `'` operator
@@ -316,7 +339,16 @@ const REGISTRY: ReadonlyMap<string, RuntimeSnippet> = new Map<
   // paths stay routed through the elementwise `times` snippet.
   [
     "mtoc2_tensor_mtimes_real",
-    loadSnippet("tensor_mtimes_real.h", ["mtoc2_tensor_t", "mtoc2_alloc"]),
+    // The C path needs `mtoc2_alloc` only; the JS path's paired
+    // `tensor_mtimes_real.js` calls `mtoc2_tensor_alloc` so we
+    // declare it as a dep too. Activating an extra helper on the C
+    // side is a benign no-op (the compiler doesn't emit unused
+    // statics into the binary if dead-stripped).
+    loadSnippet("tensor_mtimes_real.h", [
+      "mtoc2_tensor_t",
+      "mtoc2_alloc",
+      "mtoc2_tensor_alloc",
+    ]),
   ],
   [
     "mtoc2_tensor_mtimes_complex",
@@ -333,7 +365,12 @@ const REGISTRY: ReadonlyMap<string, RuntimeSnippet> = new Map<
   // this helper.
   [
     "mtoc2_tensor_flip",
-    loadSnippet("tensor_flip.h", ["mtoc2_tensor_t", "mtoc2_alloc"]),
+    loadSnippet("tensor_flip.h", [
+      "mtoc2_tensor_t",
+      "mtoc2_alloc",
+      // JS sibling allocates via `mtoc2_tensor_alloc_nd`.
+      "mtoc2_tensor_alloc_nd",
+    ]),
   ],
   // `sort(a)` (single-output) and `[v, i] = sort(a)` (two-output).
   // Stable ascending sort over the column-major flat buffer; the
@@ -345,6 +382,8 @@ const REGISTRY: ReadonlyMap<string, RuntimeSnippet> = new Map<
       "mtoc2_tensor_t",
       "mtoc2_alloc",
       "mtoc2_tensor_assign",
+      // JS sibling allocs via `mtoc2_tensor_alloc_nd`.
+      "mtoc2_tensor_alloc_nd",
     ]),
   ],
   // `meshgrid(x, y)` — single-output (returns X) plus multi-output
@@ -601,11 +640,18 @@ export function getRuntimeSnippet(name: string): RuntimeSnippet {
 // ── Activation state + topological emit ────────────────────────────────
 
 /** Inline snippet definition supplied by a user `.mtoc2.js` builtin's
- *  `emit` via `useRuntime({...})`. Once registered on a `RuntimeState`,
- *  subsequent activations of the same `name` are deduplicated. */
+ *  `emitC` / `emitJs` via `useRuntime({...})`. Once registered on a
+ *  `RuntimeState`, subsequent activations of the same `name` are
+ *  deduplicated.
+ *
+ *  `code` is the C body (required for `emitC` consumers); `jsCode`
+ *  is the optional JS body (required for `emitJs` consumers but
+ *  ignored on the C path). A builtin that supports both backends
+ *  supplies both; one that only supports C may omit `jsCode`. */
 export interface InlineSnippet {
   name: string;
   code: string;
+  jsCode?: string;
   headers?: ReadonlyArray<string>;
   deps?: ReadonlyArray<string>;
 }
@@ -667,11 +713,13 @@ export function useRuntimeInline(
   snippet: InlineSnippet
 ): void {
   if (!state.extraSnippets.has(snippet.name)) {
-    state.extraSnippets.set(snippet.name, {
+    const stored: RuntimeSnippet = {
       headers: snippet.headers ?? [],
       code: snippet.code,
       deps: snippet.deps ?? [],
-    });
+    };
+    if (snippet.jsCode !== undefined) stored.jsCode = snippet.jsCode;
+    state.extraSnippets.set(snippet.name, stored);
   }
   useRuntimeByName(state, snippet.name);
 }
@@ -711,6 +759,26 @@ export function renderRuntimeBodies(state: RuntimeState): string {
   for (const name of state.active) {
     const s = lookupSnippet(state, name);
     bodies.push(s.code);
+  }
+  return bodies.join("\n");
+}
+
+/** JS counterpart of `renderRuntimeBodies` — concatenates the `jsCode`
+ *  fields of activated snippets, in dependency order, skipping
+ *  snippets that have no JS body. The result is plain JS source
+ *  ready to inline at the top of the emitted module so subsequent
+ *  call-site code can reference helpers by bare name.
+ *
+ *  Symmetric with the C side: the same `state.active` set drives
+ *  both renderers — a builtin activates `mtoc2_disp_double` once,
+ *  the C path emits `disp_double.h`'s body, the JS path emits
+ *  `disp_double.js`'s body. */
+export function renderJsRuntimeBodies(state: RuntimeState): string {
+  if (state.active.size === 0) return "";
+  const bodies: string[] = [];
+  for (const name of state.active) {
+    const s = lookupSnippet(state, name);
+    if (s.jsCode !== undefined) bodies.push(s.jsCode);
   }
   return bodies.join("\n");
 }

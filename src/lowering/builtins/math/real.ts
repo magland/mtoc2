@@ -44,7 +44,7 @@ export const real: Builtin = {
     if (v !== undefined) return [scalarDouble(signFromNumber(v), v)];
     return [scalarDouble(a.sign)];
   },
-  emit({ argsC, argTypes, useRuntime }) {
+  emitC({ argsC, argTypes, useRuntime }) {
     const a = argTypes[0] as NumericType;
     if (isMultiElement(a)) {
       if (a.isComplex) {

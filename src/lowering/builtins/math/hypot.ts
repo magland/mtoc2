@@ -8,6 +8,7 @@ export const hypot = defineElemwiseRealBinaryFn({
   helperBase: "hypot",
   commutative: true,
   fold: Math.hypot,
+  jsScalarExpr: (a, b) => `Math.hypot(${a}, ${b})`,
   signRule: () => "nonneg",
   runtimeDep: "mtoc2_tensor_elemwise_real_fn",
 });

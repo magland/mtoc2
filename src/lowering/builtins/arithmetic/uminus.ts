@@ -21,6 +21,8 @@ import {
   exactComplex,
   exactComplexArray,
 } from "../_shared.js";
+import type { RuntimeTensor } from "../../../runtime/value.js";
+import { mtoc2_tensor_uminus } from "../../../codegen/runtime/snippets.gen.js";
 
 export const uminus: Builtin = {
   name: "uminus",
@@ -78,7 +80,7 @@ export const uminus: Builtin = {
     out.sign = flipSign(a.sign);
     return [out];
   },
-  emit({ argsC, argTypes, useRuntime }) {
+  emitC({ argsC, argTypes, useRuntime }) {
     const ty = argTypes[0] as NumericType;
     if (isMultiElement(ty)) {
       if (ty.isComplex) {
@@ -94,6 +96,32 @@ export const uminus: Builtin = {
       return `mtoc2_cneg(${argsC[0]})`;
     }
     return `(-${argsC[0]})`;
+  },
+  emitJs({ argsJs, argTypes, useRuntime }) {
+    const ty = argTypes[0] as NumericType;
+    if (isNumeric(ty) && ty.isComplex) {
+      throw new UnsupportedConstruct(`'uminus' complex emitJs not yet wired`);
+    }
+    if (isMultiElement(ty)) {
+      useRuntime("mtoc2_tensor_elemwise_real");
+      return `mtoc2_tensor_uminus(${argsJs[0]})`;
+    }
+    return `(-${argsJs[0]})`;
+  },
+  call({ args, argTypes }) {
+    const ty = argTypes[0] as NumericType;
+    if (isNumeric(ty) && ty.isComplex) {
+      throw new UnsupportedConstruct(`'uminus' complex 'call' not yet wired`);
+    }
+    if (isMultiElement(ty)) {
+      // Cast through unknown — the .js snippet's return type infers
+      // as a generic object (no literal `"tensor"` discriminator).
+      return [
+        mtoc2_tensor_uminus(args[0] as RuntimeTensor) as unknown as RuntimeTensor,
+      ];
+    }
+    const v = typeof args[0] === "number" ? args[0] : Number(args[0]);
+    return [-v];
   },
   elementwise: true,
 };

@@ -32,6 +32,7 @@ import type { Assign, IRExpr } from "../lowering/ir.js";
 import type { NumericType, Type } from "../lowering/types.js";
 import { DIM_ONE, isMultiElement, isNumeric } from "../lowering/types.js";
 import { getBuiltin } from "../lowering/builtins/index.js";
+import { requireEmitC } from "../lowering/builtins/registry.js";
 import {
   lookupBuiltin,
   makeEmitUseRuntime,
@@ -208,7 +209,7 @@ function emitPerSlotExpr(e: IRExpr, state: RuntimeState): string {
           `emitTensorFused internal: builtin '${e.builtin}' is not elementwise`
         );
       }
-      return b.emit({
+      return requireEmitC(b)({
         argsC: [
           emitPerSlotExpr(e.left, state),
           emitPerSlotExpr(e.right, state),
@@ -225,7 +226,7 @@ function emitPerSlotExpr(e: IRExpr, state: RuntimeState): string {
           `emitTensorFused internal: builtin '${e.builtin}' is not elementwise`
         );
       }
-      return b.emit({
+      return requireEmitC(b)({
         argsC: [emitPerSlotExpr(e.operand, state)],
         argTypes: [scalarVersionOf(e.operand.ty)],
         nargout: 1,
@@ -239,7 +240,7 @@ function emitPerSlotExpr(e: IRExpr, state: RuntimeState): string {
           `emitTensorFused internal: builtin '${e.name}' is not elementwise`
         );
       }
-      return b.emit({
+      return requireEmitC(b)({
         argsC: e.args.map(a => emitPerSlotExpr(a, state)),
         argTypes: e.args.map(a => scalarVersionOf(a.ty)),
         nargout: 1,

@@ -8,7 +8,12 @@ import {
   type NumericType,
   type Sign,
 } from "../../types.js";
-import type { Builtin } from "../registry.js";
+import { type Builtin, requireEmitC, requireEmitJs, requireCall } from "../registry.js";
+import type { RuntimeTensor } from "../../../runtime/value.js";
+import {
+  mtoc2_tensor_mtimes_real,
+  mtoc2_tensor_mtimes_real_scalar,
+} from "../../../codegen/runtime/snippets.gen.js";
 import { times } from "./times.js";
 import { exactRealArray, requireRealOrComplex } from "../_shared.js";
 
@@ -175,10 +180,10 @@ export const mtimes: Builtin = {
       },
     ];
   },
-  emit(args) {
+  emitC(args) {
     const { argsC, argTypes, useRuntime } = args;
     if (!isMultiElement(argTypes[0]) || !isMultiElement(argTypes[1])) {
-      return times.emit(args);
+      return requireEmitC(times)(args);
     }
     const a = argTypes[0] as NumericType;
     const b = argTypes[1] as NumericType;
@@ -201,6 +206,43 @@ export const mtimes: Builtin = {
     return isComplex
       ? `mtoc2_tensor_mtimes_complex(${argsC[0]}, ${argsC[1]})`
       : `mtoc2_tensor_mtimes_real(${argsC[0]}, ${argsC[1]})`;
+  },
+  emitJs(args) {
+    const { argsJs, argTypes, useRuntime } = args;
+    if (!isMultiElement(argTypes[0]) || !isMultiElement(argTypes[1])) {
+      return requireEmitJs(times)(args);
+    }
+    const a = argTypes[0] as NumericType;
+    const b = argTypes[1] as NumericType;
+    if (a.isComplex || b.isComplex) {
+      throw new UnsupportedConstruct(
+        `'mtimes' complex tensor*tensor emitJs not yet wired (Phase 5)`
+      );
+    }
+    useRuntime("mtoc2_tensor_mtimes_real");
+    if (a.shape?.[0] === 1 && b.shape?.[1] === 1) {
+      return `mtoc2_tensor_mtimes_real_scalar(${argsJs[0]}, ${argsJs[1]})`;
+    }
+    return `mtoc2_tensor_mtimes_real(${argsJs[0]}, ${argsJs[1]})`;
+  },
+  call(args) {
+    const { argTypes } = args;
+    if (!isMultiElement(argTypes[0]) || !isMultiElement(argTypes[1])) {
+      return requireCall(times)(args);
+    }
+    const a = argTypes[0] as NumericType;
+    const b = argTypes[1] as NumericType;
+    if (a.isComplex || b.isComplex) {
+      throw new UnsupportedConstruct(
+        `'mtimes' complex tensor*tensor 'call' not yet wired (Phase 5)`
+      );
+    }
+    const at = args.args[0] as RuntimeTensor;
+    const bt = args.args[1] as RuntimeTensor;
+    if (a.shape?.[0] === 1 && b.shape?.[1] === 1) {
+      return [mtoc2_tensor_mtimes_real_scalar(at, bt)];
+    }
+    return [mtoc2_tensor_mtimes_real(at, bt) as unknown as RuntimeTensor];
   },
   // Elementwise per-slot template — only valid when at least one
   // operand is scalar (tensor * tensor is matrix product). The

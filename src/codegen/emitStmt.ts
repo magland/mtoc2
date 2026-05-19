@@ -23,6 +23,7 @@ import {
   useRuntimeByName,
   type RuntimeState,
 } from "./runtime.js";
+import { requireEmitC } from "../lowering/builtins/registry.js";
 import {
   computeFutureTouches,
   earlyFreeCandidates,
@@ -574,9 +575,9 @@ function emitStmt(
         }
       }
       if (builtinMA !== undefined) {
-        // Builtin path: builtin's `emit` returns the full call string
+        // Builtin path: builtin's `emitC` returns the full call string
         // including out-pointer args.
-        const callStr = builtinMA.emit({
+        const callStr = requireEmitC(builtinMA)({
           argsC: argStrs,
           argTypes: s.args.map((a: IRExpr) => a.ty),
           nargout: s.outputs.length,

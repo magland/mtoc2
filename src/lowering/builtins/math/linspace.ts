@@ -121,7 +121,7 @@ export const linspace: Builtin = {
     const dims: DimInfo[] = [DIM_ONE, { kind: "unknown" }];
     return [tensorDoubleFromDims(dims)];
   },
-  emit({ argsC, argTypes, useRuntime }) {
+  emitC({ argsC, argTypes, useRuntime }) {
     useRuntime("mtoc2_tensor_linspace");
     const aC = argsC[0];
     const bC = argsC[1];

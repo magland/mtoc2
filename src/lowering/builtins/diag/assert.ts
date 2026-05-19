@@ -65,7 +65,7 @@ export const assert: Builtin = {
 
     return [{ kind: "Unknown" }];
   },
-  emit({ argsC, argTypes, useRuntime }) {
+  emitC({ argsC, argTypes, useRuntime }) {
     useRuntime("mtoc2_assert_scalar");
     useRuntime("mtoc2_assert_scalar_fmt");
     const cond = argTypes[0];

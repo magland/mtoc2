@@ -11,7 +11,7 @@
 
 import { TypeError, UnsupportedConstruct } from "../../errors.js";
 import { isMultiElement } from "../../types.js";
-import type { Builtin } from "../registry.js";
+import { type Builtin, requireEmitC, requireEmitJs, requireCall } from "../registry.js";
 import { power } from "./power.js";
 
 export const mpower: Builtin = {
@@ -27,7 +27,13 @@ export const mpower: Builtin = {
     }
     return power.transfer(argTypes, nargout);
   },
-  emit(args) {
-    return power.emit(args);
+  emitC(args) {
+    return requireEmitC(power)(args);
+  },
+  emitJs(args) {
+    return requireEmitJs(power)(args);
+  },
+  call(args) {
+    return requireCall(power)(args);
   },
 };

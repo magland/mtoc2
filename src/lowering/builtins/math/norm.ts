@@ -96,7 +96,7 @@ export const norm: Builtin = {
     }
     return [scalarDouble("nonneg")];
   },
-  emit({ argsC, argTypes, useRuntime }) {
+  emitC({ argsC, argTypes, useRuntime }) {
     const a = argTypes[0] as NumericType;
     useRuntime("mtoc2_cscalar");
     if (isMultiElement(a)) {

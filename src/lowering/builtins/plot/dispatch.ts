@@ -40,7 +40,7 @@ function makePlotBuiltin(name: string): Builtin {
       validateFormatArgs(name, argTypes, 0);
       return [VOID];
     },
-    emit({ argsC, argTypes, useRuntime }) {
+    emitC({ argsC, argTypes, useRuntime }) {
       useRuntime("mtoc2_plot_dispatch");
       const slots: string[] = [];
       for (let i = 0; i < argTypes.length; i++) {

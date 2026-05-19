@@ -15,7 +15,7 @@
  */
 import { TypeError, UnsupportedConstruct } from "../../errors.js";
 import { scalarDouble } from "../../types.js";
-import type { Builtin } from "../registry.js";
+import { type Builtin, requireEmitC, requireEmitJs, requireCall } from "../registry.js";
 import { defineShapeConstructor } from "../shape/_construct.js";
 
 function constBuiltin(
@@ -24,6 +24,17 @@ function constBuiltin(
   sign: "positive" | "unknown",
   cLiteral: string
 ): Builtin {
+  // JS literal form. `Infinity` and `NaN` are JS keywords with the same
+  // numeric value as their C counterparts; the C literal happens to be
+  // the same for most numeric constants except Inf/NaN where C uses
+  // <math.h> macros.
+  const jsLiteral = Number.isFinite(value)
+    ? String(value)
+    : value > 0
+      ? "Infinity"
+      : value < 0
+        ? "-Infinity"
+        : "NaN";
   return {
     name,
     transfer(argTypes, nargout) {
@@ -39,8 +50,14 @@ function constBuiltin(
       }
       return [scalarDouble(sign, value)];
     },
-    emit() {
+    emitC() {
       return cLiteral;
+    },
+    emitJs() {
+      return jsLiteral;
+    },
+    call() {
+      return [value];
     },
     // Per-slot is the same literal — no loop-dependent context. Marking
     // elementwise lets the fused emitter accept Assigns whose RHS contains
@@ -79,9 +96,23 @@ function fillConstBuiltin(
       }
       return shape.transfer(argTypes, nargout);
     },
-    emit(args) {
+    emitC(args) {
       if (args.argTypes.length === 0) return cLiteral;
-      return shape.emit(args);
+      return requireEmitC(shape)(args);
+    },
+    emitJs(args) {
+      if (args.argTypes.length === 0) {
+        return Number.isFinite(value)
+          ? String(value)
+          : value > 0
+            ? "Infinity"
+            : "NaN";
+      }
+      return requireEmitJs(shape)(args);
+    },
+    call(args) {
+      if (args.argTypes.length === 0) return [value];
+      return requireCall(shape)(args);
     },
     // Per-slot is only invoked by the fused emitter for elementwise ops,
     // where the constant appears as a scalar slot. The shape-constructor

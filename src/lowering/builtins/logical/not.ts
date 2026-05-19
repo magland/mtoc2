@@ -103,7 +103,7 @@ export const notBuiltin: Builtin = {
     }
     return [logicalTensor(a.dims, a.shape)];
   },
-  emit({ argsC, argTypes, useRuntime }) {
+  emitC({ argsC, argTypes, useRuntime }) {
     if (isMultiElement(argTypes[0])) {
       useRuntime("mtoc2_tensor_logical_real");
       return `mtoc2_tensor_not(${argsC[0]})`;
@@ -118,5 +118,34 @@ export const notBuiltin: Builtin = {
     // technically valid C, but the explicit comparison is clearer and
     // is what numbl's logical layer reads as.
     return `((${argsC[0]}) == 0.0 ? 1.0 : 0.0)`;
+  },
+  emitJs({ argsJs, argTypes }) {
+    if (isMultiElement(argTypes[0])) {
+      throw new UnsupportedConstruct(
+        `'not' tensor emitJs not yet wired (Phase 5)`
+      );
+    }
+    const a = argTypes[0] as NumericType;
+    if (a.isComplex) {
+      throw new UnsupportedConstruct(
+        `'not' complex emitJs not yet wired (Phase 5)`
+      );
+    }
+    return `((${argsJs[0]}) == 0 ? 1 : 0)`;
+  },
+  call({ args, argTypes }) {
+    if (isMultiElement(argTypes[0])) {
+      throw new UnsupportedConstruct(
+        `'not' tensor 'call' not yet wired (Phase 5)`
+      );
+    }
+    const a = argTypes[0] as NumericType;
+    if (a.isComplex) {
+      throw new UnsupportedConstruct(
+        `'not' complex 'call' not yet wired (Phase 5)`
+      );
+    }
+    const v = typeof args[0] === "number" ? args[0] : Number(args[0]);
+    return [v === 0 ? 1 : 0];
   },
 };

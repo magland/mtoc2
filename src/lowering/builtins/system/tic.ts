@@ -8,6 +8,7 @@
 import { TypeError, UnsupportedConstruct } from "../../errors.js";
 import { scalarDouble } from "../../types.js";
 import type { Builtin } from "../registry.js";
+import { mtoc2_tic } from "../../../codegen/runtime/snippets.gen.js";
 
 export const tic: Builtin = {
   name: "tic",
@@ -22,8 +23,15 @@ export const tic: Builtin = {
     }
     return [scalarDouble("positive")];
   },
-  emit({ useRuntime }) {
+  emitC({ useRuntime }) {
     useRuntime("mtoc2_tic_toc");
     return "mtoc2_tic()";
+  },
+  emitJs({ useRuntime }) {
+    useRuntime("mtoc2_tic_toc");
+    return "mtoc2_tic()";
+  },
+  call() {
+    return [mtoc2_tic()];
   },
 };

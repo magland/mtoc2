@@ -8,6 +8,7 @@ export const atan2 = defineElemwiseRealBinaryFn({
   helperBase: "atan2",
   commutative: false,
   fold: Math.atan2,
+  jsScalarExpr: (a, b) => `Math.atan2(${a}, ${b})`,
   signRule: () => "unknown",
   runtimeDep: "mtoc2_tensor_elemwise_real_fn",
 });

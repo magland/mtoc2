@@ -41,6 +41,36 @@ import {
 import type { DimInfo, NumericType, Type } from "../../types.js";
 import type { Builtin } from "../registry.js";
 import { exactDouble, exactRealArray } from "../_shared.js";
+import {
+  mtoc2_tensor_zeros_nd,
+  mtoc2_tensor_ones_nd,
+  mtoc2_tensor_fill_nd,
+} from "../../../codegen/runtime/snippets.gen.js";
+import type { RuntimeTensor } from "../../../runtime/value.js";
+
+/** JS runtime dispatch for `defineShapeConstructor.call`. The
+ *  ndHelper name identifies which `(ndim, dims) -> tensor` helper to
+ *  invoke. Fill-style helpers (nan/Inf) prepend a leading `value`
+ *  argument; the dispatcher closure handles that here so the `call`
+ *  hook below doesn't branch on `cFillValue`. */
+type ShapeNdHelper = (
+  fillValue: number | undefined,
+  ndim: number,
+  dims: number[]
+) => RuntimeTensor;
+
+const JS_SHAPE_HELPERS: Record<string, ShapeNdHelper> = {
+  mtoc2_tensor_zeros_nd: (_v, ndim, dims) =>
+    mtoc2_tensor_zeros_nd(ndim, dims) as unknown as RuntimeTensor,
+  mtoc2_tensor_ones_nd: (_v, ndim, dims) =>
+    mtoc2_tensor_ones_nd(ndim, dims) as unknown as RuntimeTensor,
+  mtoc2_tensor_fill_nd: (v, ndim, dims) => {
+    if (v === undefined) {
+      throw new Error("internal: mtoc2_tensor_fill_nd called without fill value");
+    }
+    return mtoc2_tensor_fill_nd(v, ndim, dims) as unknown as RuntimeTensor;
+  },
+};
 
 /** Per-axis resolution. `argIndex` is the position in the original
  *  argTypes/argsC arrays that supplies this axis's value — both axes
@@ -280,7 +310,7 @@ export function defineShapeConstructor(
       t.sign = signFromNumber(fillValue);
       return [t];
     },
-    emit({ argsC, argTypes, useRuntime }) {
+    emitC({ argsC, argTypes, useRuntime }) {
       useRuntime(ndHelper);
       useRuntime(squareHelper);
       // The transfer step has already validated every arg; reuse the
@@ -305,5 +335,77 @@ export function defineShapeConstructor(
       const dimList = resolved.axes.map(a => dimC(a, argsC)).join(", ");
       return `${ndHelper}(${helperPrefix}${resolved.ndim}, (long[]){${dimList}})`;
     },
+    emitJs({ argsJs, argTypes, useRuntime }) {
+      useRuntime(ndHelper);
+      useRuntime(squareHelper);
+      const resolved = resolveShape(name, argTypes);
+      const shape = exactShapeOf(resolved);
+      // Helper-call prefix: `value, ndim, [...]` for fill-style,
+      // `ndim, [...]` for plain zeros/ones. The JS-side
+      // `mtoc2_tensor_fill_nd` takes (value, ndim, dims), matching.
+      const jsPrefix =
+        cFillValue !== undefined
+          ? `${fillValueAsJsLiteral(fillValue)}, `
+          : "";
+      if (shape !== undefined) {
+        if (shape.every(s => s === 1)) {
+          if (cFillValue !== undefined) return fillValueAsJsLiteral(fillValue);
+          return `${fillValue}`;
+        }
+        const dimList = shape.join(", ");
+        return `${ndHelper}(${jsPrefix}${resolved.ndim}, [${dimList}])`;
+      }
+      if (resolved.isSquare) {
+        const src = resolved.axes[0];
+        return `${squareHelper}(${jsPrefix}Math.trunc(${argsJs[src.argIndex]}))`;
+      }
+      const dimList = resolved.axes
+        .map(a =>
+          a.kind === "exact"
+            ? String(a.value)
+            : `Math.trunc(${argsJs[a.argIndex]})`
+        )
+        .join(", ");
+      return `${ndHelper}(${jsPrefix}${resolved.ndim}, [${dimList}])`;
+    },
+    call({ args, argTypes }) {
+      const resolved = resolveShape(name, argTypes);
+      const shape = exactShapeOf(resolved);
+      // Scalar-collapse case: every axis is exactly 1 — return the
+      // fill value as a plain number.
+      if (shape !== undefined && shape.every(s => s === 1)) {
+        return [fillValue];
+      }
+      const helper = JS_SHAPE_HELPERS[ndHelper];
+      if (!helper) {
+        throw new UnsupportedConstruct(
+          `'${name}' has no JS shape-constructor helper registered ` +
+            `(needs an entry in JS_SHAPE_HELPERS keyed by '${ndHelper}')`
+        );
+      }
+      const dimsArr: number[] = [];
+      for (const ax of resolved.axes) {
+        if (ax.kind === "exact") {
+          dimsArr.push(ax.value);
+        } else {
+          const v = args[ax.argIndex];
+          const n = typeof v === "number" ? v : Number(v);
+          dimsArr.push(Math.trunc(n));
+        }
+      }
+      const fv = cFillValue !== undefined ? fillValue : undefined;
+      return [helper(fv, resolved.ndim, dimsArr)];
+    },
   };
+}
+
+/** Render a fill value as a valid JS literal — needed because
+ *  `Infinity`/`NaN` round-trip via `Number.toString` correctly, but
+ *  `0.0` shows up as `0` etc. We accept the slight loss of decimal
+ *  point. */
+function fillValueAsJsLiteral(v: number): string {
+  if (Number.isNaN(v)) return "NaN";
+  if (v === Infinity) return "Infinity";
+  if (v === -Infinity) return "-Infinity";
+  return String(v);
 }

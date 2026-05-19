@@ -34,7 +34,7 @@ export const fprintf: Builtin = {
     validateFormatArgs("fprintf", argTypes, 1);
     return [{ kind: "Void" }];
   },
-  emit({ argsC, argTypes, useRuntime }) {
+  emitC({ argsC, argTypes, useRuntime }) {
     useRuntime("mtoc2_fprintf");
     const fmtView = emitTextView(argsC[0], argTypes[0]);
     const slots: string[] = [];

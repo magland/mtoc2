@@ -28,6 +28,102 @@ import {
   exactRealArray,
   exactScalarAsComplex,
 } from "../_shared.js";
+import type { RuntimeTensor, RuntimeValue } from "../../../runtime/value.js";
+import {
+  mtoc2_tensor_plus_tt,
+  mtoc2_tensor_plus_ts,
+  mtoc2_tensor_plus_bcast_tt,
+  mtoc2_tensor_minus_tt,
+  mtoc2_tensor_minus_ts,
+  mtoc2_tensor_minus_st,
+  mtoc2_tensor_minus_bcast_tt,
+  mtoc2_tensor_times_tt,
+  mtoc2_tensor_times_ts,
+  mtoc2_tensor_times_bcast_tt,
+  mtoc2_tensor_rdivide_tt,
+  mtoc2_tensor_rdivide_ts,
+  mtoc2_tensor_rdivide_st,
+  mtoc2_tensor_rdivide_bcast_tt,
+  mtoc2_tensor_atan2_tt,
+  mtoc2_tensor_atan2_ts,
+  mtoc2_tensor_atan2_st,
+  mtoc2_tensor_atan2_bcast_tt,
+  mtoc2_tensor_hypot_tt,
+  mtoc2_tensor_hypot_ts,
+  mtoc2_tensor_hypot_bcast_tt,
+  mtoc2_tensor_rem_tt,
+  mtoc2_tensor_rem_ts,
+  mtoc2_tensor_rem_st,
+  mtoc2_tensor_rem_bcast_tt,
+  mtoc2_tensor_mod_tt,
+  mtoc2_tensor_mod_ts,
+  mtoc2_tensor_mod_st,
+  mtoc2_tensor_mod_bcast_tt,
+} from "../../../codegen/runtime/snippets.gen.js";
+
+type TensorHelper2 = (a: RuntimeTensor, b: RuntimeTensor) => RuntimeTensor;
+type TensorHelperTS = (a: RuntimeTensor, s: number) => RuntimeTensor;
+type TensorHelperST = (s: number, a: RuntimeTensor) => RuntimeTensor;
+
+interface TensorHelperSet {
+  tt: TensorHelper2;
+  ts: TensorHelperTS;
+  /** Non-commutative ops define this. */
+  st?: TensorHelperST;
+  bcast_tt: TensorHelper2;
+}
+
+// `.js` snippet bodies infer their return type as `{ mtoc2Tag: string,
+// ... }` (no literal "tensor" discriminator). Cast through `unknown`
+// at the registration site so the typed dispatch table below stays
+// the source of truth for what these helpers return at runtime.
+const TENSOR_HELPERS: Record<string, TensorHelperSet> = {
+  plus: {
+    tt: mtoc2_tensor_plus_tt as unknown as TensorHelper2,
+    ts: mtoc2_tensor_plus_ts as unknown as TensorHelperTS,
+    bcast_tt: mtoc2_tensor_plus_bcast_tt as unknown as TensorHelper2,
+  },
+  minus: {
+    tt: mtoc2_tensor_minus_tt as unknown as TensorHelper2,
+    ts: mtoc2_tensor_minus_ts as unknown as TensorHelperTS,
+    st: mtoc2_tensor_minus_st as unknown as TensorHelperST,
+    bcast_tt: mtoc2_tensor_minus_bcast_tt as unknown as TensorHelper2,
+  },
+  times: {
+    tt: mtoc2_tensor_times_tt as unknown as TensorHelper2,
+    ts: mtoc2_tensor_times_ts as unknown as TensorHelperTS,
+    bcast_tt: mtoc2_tensor_times_bcast_tt as unknown as TensorHelper2,
+  },
+  rdivide: {
+    tt: mtoc2_tensor_rdivide_tt as unknown as TensorHelper2,
+    ts: mtoc2_tensor_rdivide_ts as unknown as TensorHelperTS,
+    st: mtoc2_tensor_rdivide_st as unknown as TensorHelperST,
+    bcast_tt: mtoc2_tensor_rdivide_bcast_tt as unknown as TensorHelper2,
+  },
+  atan2: {
+    tt: mtoc2_tensor_atan2_tt as unknown as TensorHelper2,
+    ts: mtoc2_tensor_atan2_ts as unknown as TensorHelperTS,
+    st: mtoc2_tensor_atan2_st as unknown as TensorHelperST,
+    bcast_tt: mtoc2_tensor_atan2_bcast_tt as unknown as TensorHelper2,
+  },
+  hypot: {
+    tt: mtoc2_tensor_hypot_tt as unknown as TensorHelper2,
+    ts: mtoc2_tensor_hypot_ts as unknown as TensorHelperTS,
+    bcast_tt: mtoc2_tensor_hypot_bcast_tt as unknown as TensorHelper2,
+  },
+  rem: {
+    tt: mtoc2_tensor_rem_tt as unknown as TensorHelper2,
+    ts: mtoc2_tensor_rem_ts as unknown as TensorHelperTS,
+    st: mtoc2_tensor_rem_st as unknown as TensorHelperST,
+    bcast_tt: mtoc2_tensor_rem_bcast_tt as unknown as TensorHelper2,
+  },
+  mod: {
+    tt: mtoc2_tensor_mod_tt as unknown as TensorHelper2,
+    ts: mtoc2_tensor_mod_ts as unknown as TensorHelperTS,
+    st: mtoc2_tensor_mod_st as unknown as TensorHelperST,
+    bcast_tt: mtoc2_tensor_mod_bcast_tt as unknown as TensorHelper2,
+  },
+};
 
 /** Result of broadcast shape resolution for the elementwise binary path.
  *  `outDims` is the output's per-axis dim info (MATLAB-style implicit
@@ -267,6 +363,12 @@ export function defineElemwiseRealBinaryFn(opts: {
   fold: (a: number, b: number) => number;
   signRule: (a: NumericType, b: NumericType) => Sign;
   runtimeDep: string;
+  /** Optional JS scalar form. Defaults to `${cFn}(${a}, ${b})` (works
+   *  when `cFn` happens to be a JS function on the surrounding scope
+   *  — almost never the case). Pass `(a, b) => "Math.atan2(...)"`
+   *  for `atan2`/`hypot`, an explicit JS-modulo expression for
+   *  `mod`/`rem`, etc. */
+  jsScalarExpr?: (aJs: string, bJs: string) => string;
 }): Builtin {
   return buildElemwiseRealBinary({
     name: opts.name,
@@ -276,6 +378,9 @@ export function defineElemwiseRealBinaryFn(opts: {
     signRule: opts.signRule,
     scalarExpr: (a, b) => `${opts.cFn}(${a}, ${b})`,
     runtimeDep: opts.runtimeDep,
+    ...(opts.jsScalarExpr !== undefined
+      ? { jsScalarExpr: opts.jsScalarExpr }
+      : {}),
   });
 }
 
@@ -286,6 +391,12 @@ function buildElemwiseRealBinary(opts: {
   fold: (a: number, b: number) => number;
   signRule: (a: NumericType, b: NumericType) => Sign;
   scalarExpr: (aC: string, bC: string) => string;
+  /** Optional JS scalar form (for `emitJs`). When omitted, the
+   *  factory uses `scalarExpr` — which is correct only when the C
+   *  expression is also valid JS (i.e. infix `+`/`-`/`*`/`/`). The
+   *  function-call forms (`atan2`, `hypot`, `fmod`, mtoc2's custom
+   *  mod) must supply this. */
+  jsScalarExpr?: (aJs: string, bJs: string) => string;
   runtimeDep: string;
   complexFold?: (
     a: { re: number; im: number },
@@ -306,6 +417,7 @@ function buildElemwiseRealBinary(opts: {
     complexScalarExpr,
     complexRuntimeDeps,
   } = opts;
+  const jsScalarExpr = opts.jsScalarExpr ?? scalarExpr;
   return {
     name,
     transfer(argTypes, nargout) {
@@ -397,7 +509,7 @@ function buildElemwiseRealBinary(opts: {
       outTy.sign = signRule(aN, bN);
       return [outTy];
     },
-    emit({ argsC, argTypes, useRuntime }) {
+    emitC({ argsC, argTypes, useRuntime }) {
       const aN = argTypes[0] as NumericType;
       const bN = argTypes[1] as NumericType;
       const aMulti = isMultiElement(aN);
@@ -458,6 +570,89 @@ function buildElemwiseRealBinary(opts: {
         return `mtoc2_tensor_${helperBase}_ts(${argsC[1]}, ${argsC[0]})`;
       }
       return `mtoc2_tensor_${helperBase}_st(${argsC[0]}, ${argsC[1]})`;
+    },
+    emitJs({ argsJs, argTypes, useRuntime }) {
+      const aN = argTypes[0] as NumericType;
+      const bN = argTypes[1] as NumericType;
+      const aMulti = isMultiElement(aN);
+      const bMulti = isMultiElement(bN);
+      if (aN.isComplex || bN.isComplex) {
+        throw new UnsupportedConstruct(
+          `'${name}' complex emitJs not yet wired (Phase 5)`
+        );
+      }
+      if (!aMulti && !bMulti) {
+        return jsScalarExpr(argsJs[0], argsJs[1]);
+      }
+      const helpers = TENSOR_HELPERS[helperBase];
+      if (!helpers) {
+        throw new UnsupportedConstruct(
+          `'${name}' tensor emitJs not yet wired (no helper for helperBase '${helperBase}')`
+        );
+      }
+      // Activate the runtime snippet this builtin's C path activates —
+      // its JS sibling carries the matching kernels. Plus/minus/times/
+      // rdivide route through `tensor_elemwise_real`; atan2/hypot/mod/
+      // rem/power route through `tensor_elemwise_real_fn`.
+      useRuntime(runtimeDep);
+      if (aMulti && bMulti) {
+        if (needsBroadcast(aN, bN)) {
+          return `mtoc2_tensor_${helperBase}_bcast_tt(${argsJs[0]}, ${argsJs[1]})`;
+        }
+        return `mtoc2_tensor_${helperBase}_tt(${argsJs[0]}, ${argsJs[1]})`;
+      }
+      if (aMulti) {
+        return `mtoc2_tensor_${helperBase}_ts(${argsJs[0]}, ${argsJs[1]})`;
+      }
+      if (commutative) {
+        return `mtoc2_tensor_${helperBase}_ts(${argsJs[1]}, ${argsJs[0]})`;
+      }
+      return `mtoc2_tensor_${helperBase}_st(${argsJs[0]}, ${argsJs[1]})`;
+    },
+    call({ args, argTypes }) {
+      const aN = argTypes[0] as NumericType;
+      const bN = argTypes[1] as NumericType;
+      if (aN.isComplex || bN.isComplex) {
+        throw new UnsupportedConstruct(
+          `'${name}' complex 'call' not yet wired (Phase 5)`
+        );
+      }
+      const aMulti = isMultiElement(aN);
+      const bMulti = isMultiElement(bN);
+      const aVal = args[0] as RuntimeValue;
+      const bVal = args[1] as RuntimeValue;
+      if (!aMulti && !bMulti) {
+        const av = typeof aVal === "number" ? aVal : Number(aVal);
+        const bv = typeof bVal === "number" ? bVal : Number(bVal);
+        return [fold(av, bv)];
+      }
+      const helpers = TENSOR_HELPERS[helperBase];
+      if (!helpers) {
+        throw new UnsupportedConstruct(
+          `'${name}' tensor 'call' not yet wired (no helper for helperBase '${helperBase}')`
+        );
+      }
+      if (aMulti && bMulti) {
+        const at = aVal as RuntimeTensor;
+        const bt = bVal as RuntimeTensor;
+        const op = needsBroadcast(aN, bN) ? helpers.bcast_tt : helpers.tt;
+        return [op(at, bt)];
+      }
+      if (aMulti) {
+        const at = aVal as RuntimeTensor;
+        const bv = typeof bVal === "number" ? bVal : Number(bVal);
+        return [helpers.ts(at, bv)];
+      }
+      // scalar OP tensor
+      const av = typeof aVal === "number" ? aVal : Number(aVal);
+      const bt = bVal as RuntimeTensor;
+      if (commutative) return [helpers.ts(bt, av)];
+      if (helpers.st === undefined) {
+        throw new UnsupportedConstruct(
+          `internal: '${name}' is non-commutative but has no _st JS helper`
+        );
+      }
+      return [helpers.st(av, bt)];
     },
     elementwise: true,
   };

@@ -107,7 +107,7 @@ export function defineShortCircuit(
       if (at !== undefined && bt !== undefined) return [scalarLogical(bt)];
       return [scalarLogical()];
     },
-    emit({ argsC, argTypes, useRuntime }) {
+    emitC({ argsC, argTypes, useRuntime }) {
       const anyComplex =
         (argTypes[0] as NumericType).isComplex ||
         (argTypes[1] as NumericType).isComplex;
@@ -121,6 +121,29 @@ export function defineShortCircuit(
       // C's `||` / `&&` short-circuit and yield 0/1; cast to double
       // so the scalar slot matches the logical-as-double convention.
       return `((double)(${lhs} ${cOp} ${rhs}))`;
+    },
+    emitJs({ argsJs, argTypes }) {
+      const aN = argTypes[0] as NumericType;
+      const bN = argTypes[1] as NumericType;
+      if (aN.isComplex || bN.isComplex) {
+        throw new UnsupportedConstruct(
+          `'${name}' complex emitJs not yet wired (Phase 5)`
+        );
+      }
+      // Match the C output's logical-as-double convention: 1/0.
+      return `((${argsJs[0]} ${cOp} ${argsJs[1]}) ? 1 : 0)`;
+    },
+    call({ args, argTypes }) {
+      const aN = argTypes[0] as NumericType;
+      const bN = argTypes[1] as NumericType;
+      if (aN.isComplex || bN.isComplex) {
+        throw new UnsupportedConstruct(
+          `'${name}' complex 'call' not yet wired (Phase 5)`
+        );
+      }
+      const av = typeof args[0] === "number" ? args[0] : Number(args[0]);
+      const bv = typeof args[1] === "number" ? args[1] : Number(args[1]);
+      return [kind === "or" ? (av !== 0 || bv !== 0 ? 1 : 0) : (av !== 0 && bv !== 0 ? 1 : 0)];
     },
   };
 }

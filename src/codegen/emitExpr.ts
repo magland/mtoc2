@@ -22,6 +22,7 @@ import {
   useRuntimeByName,
   type RuntimeState,
 } from "./runtime.js";
+import { requireEmitC } from "../lowering/builtins/registry.js";
 import { cStringLiteral, dimsProductExpr } from "./cFormat.js";
 import { emitTensorConcat } from "./emitTensorConcat.js";
 import { emitIndexSliceProducer, emitNdScalarOffset } from "./emitIndex.js";
@@ -169,7 +170,7 @@ export function emitExpr(e: IRExpr, state: RuntimeState): string {
     case "Binary": {
       const b = lookupBuiltin(state, e.builtin);
       if (!b) throw new Error(`emit: builtin '${e.builtin}' not found`);
-      return b.emit({
+      return requireEmitC(b)({
         argsC: [emitExpr(e.left, state), emitExpr(e.right, state)],
         argTypes: [e.left.ty, e.right.ty],
         nargout: 1,
@@ -179,7 +180,7 @@ export function emitExpr(e: IRExpr, state: RuntimeState): string {
     case "Unary": {
       const b = lookupBuiltin(state, e.builtin);
       if (!b) throw new Error(`emit: builtin '${e.builtin}' not found`);
-      return b.emit({
+      return requireEmitC(b)({
         argsC: [emitExpr(e.operand, state)],
         argTypes: [e.operand.ty],
         nargout: 1,
@@ -189,7 +190,7 @@ export function emitExpr(e: IRExpr, state: RuntimeState): string {
     case "Call": {
       const builtinB = lookupBuiltin(state, e.name);
       if (builtinB) {
-        return builtinB.emit({
+        return requireEmitC(builtinB)({
           argsC: e.args.map(a => emitExpr(a, state)),
           argTypes: e.args.map(a => a.ty),
           nargout: 1,
