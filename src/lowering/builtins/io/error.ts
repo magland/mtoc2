@@ -7,6 +7,7 @@ import {
   emitTextView,
   validateFormatArgs,
 } from "./_format_args.js";
+import { mtoc2_error_fmt as jsErrorFmt } from "../../../codegen/runtime/snippets.gen.js";
 
 const MATLAB_ID_REGEX = /^[A-Za-z]\w*(:[A-Za-z]\w*)+$/;
 
@@ -72,4 +73,48 @@ export const errorBuiltin: Builtin = {
     }
     return `mtoc2_error_fmt(${fmtView}, ${slots.length}, ${emitFormatSlotArray(slots)})`;
   },
+  emitJs({ argsJs, argTypes, useRuntime }) {
+    useRuntime("mtoc2_error_fmt");
+    const first = argTypes[0];
+    const firstExact =
+      first.kind === "Char" || first.kind === "String"
+        ? first.exact
+        : undefined;
+    let fmtIdx = 0;
+    if (
+      argTypes.length >= 2 &&
+      firstExact !== undefined &&
+      MATLAB_ID_REGEX.test(firstExact)
+    ) {
+      fmtIdx = 1;
+    }
+    return `mtoc2_error_fmt(${argsJs.slice(fmtIdx).join(", ")})`;
+  },
+  call({ args, argTypes }) {
+    const first = argTypes[0];
+    const firstExact =
+      first.kind === "Char" || first.kind === "String"
+        ? first.exact
+        : undefined;
+    let fmtIdx = 0;
+    if (
+      argTypes.length >= 2 &&
+      firstExact !== undefined &&
+      MATLAB_ID_REGEX.test(firstExact)
+    ) {
+      fmtIdx = 1;
+    }
+    const unwrapped = args.slice(fmtIdx).map(unwrapFmtArg);
+    const fmt = unwrapped[0] as string;
+    jsErrorFmt(fmt, ...unwrapped.slice(1));
+    return [];
+  },
 };
+
+function unwrapFmtArg(v: unknown): unknown {
+  if (typeof v === "object" && v !== null) {
+    const o = v as { mtoc2Tag?: string; value?: string };
+    if (o.mtoc2Tag === "char" && typeof o.value === "string") return o.value;
+  }
+  return v;
+}

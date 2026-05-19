@@ -19,6 +19,8 @@ import {
 } from "../../types.js";
 import { TypeError, UnsupportedConstruct } from "../../errors.js";
 import type { Builtin } from "../registry.js";
+import type { RuntimeTensor } from "../../../runtime/value.js";
+import { mtoc2_norm2_real as jsNorm2Real } from "../../../codegen/runtime/snippets.gen.js";
 import {
   exactDouble,
   exactComplex,
@@ -106,5 +108,31 @@ export const norm: Builtin = {
         : `mtoc2_norm2_real(${argsC[0]})`;
     }
     return a.isComplex ? `mtoc2_cabs(${argsC[0]})` : `fabs(${argsC[0]})`;
+  },
+  emitJs({ argsJs, argTypes, useRuntime }) {
+    const a = argTypes[0] as NumericType;
+    if (a.isComplex) {
+      throw new UnsupportedConstruct(
+        `'norm' complex emitJs not yet wired (Phase 5)`
+      );
+    }
+    if (isMultiElement(a)) {
+      useRuntime("mtoc2_tensor_norm");
+      return `mtoc2_norm2_real(${argsJs[0]})`;
+    }
+    return `Math.abs(${argsJs[0]})`;
+  },
+  call({ args, argTypes }) {
+    const a = argTypes[0] as NumericType;
+    if (a.isComplex) {
+      throw new UnsupportedConstruct(
+        `'norm' complex 'call' not yet wired (Phase 5)`
+      );
+    }
+    if (isMultiElement(a)) {
+      return [jsNorm2Real(args[0] as RuntimeTensor)];
+    }
+    const v = typeof args[0] === "number" ? args[0] : Number(args[0]);
+    return [Math.abs(v)];
   },
 };

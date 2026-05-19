@@ -287,8 +287,14 @@ export class Interpreter {
     switch (e.type) {
       case "Number":
         return Number(e.value);
-      case "String":
-        return e.value;
+      case "String": {
+        // Parser keeps the surrounding `"…"` quotes in `value`; strip
+        // them so the runtime value carries just the inner string.
+        const raw = e.value;
+        return raw.length >= 2 && raw.startsWith('"') && raw.endsWith('"')
+          ? raw.slice(1, -1)
+          : raw;
+      }
       case "Char": {
         // Parser keeps the surrounding `'…'` quotes in `value`; strip
         // them so the runtime value (and `Char.exact` after

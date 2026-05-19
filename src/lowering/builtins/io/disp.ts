@@ -92,8 +92,16 @@ export const disp: Builtin = {
       useRuntime("mtoc2_disp_tensor");
       return `mtoc2_disp_tensor(${argsJs[0]})`;
     }
+    if (t.kind === "String") {
+      // String runtime value is a JS string; print + newline.
+      return `($write(${argsJs[0]} + "\\n"))`;
+    }
+    if (t.kind === "Char") {
+      // Char runtime value is `{mtoc2Tag:"char",value}`; print value + newline.
+      return `($write(${argsJs[0]}.value + "\\n"))`;
+    }
     throw new UnsupportedConstruct(
-      `'disp' emitJs for complex / text / struct args is not yet wired (Phase 5)`
+      `'disp' emitJs for complex / struct args is not yet wired (Phase 5)`
     );
   },
   call({ args, ctx }) {

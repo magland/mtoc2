@@ -13,6 +13,15 @@ import {
   emitTextView,
   validateFormatArgs,
 } from "../io/_format_args.js";
+import { mtoc2_assert_scalar_fmt as jsAssertFmt } from "../../../codegen/runtime/snippets.gen.js";
+
+function unwrapFmtArg(v: unknown): unknown {
+  if (typeof v === "object" && v !== null) {
+    const o = v as { mtoc2Tag?: string; value?: string };
+    if (o.mtoc2Tag === "char" && typeof o.value === "string") return o.value;
+  }
+  return v;
+}
 
 export const assert: Builtin = {
   name: "assert",
@@ -88,5 +97,32 @@ export const assert: Builtin = {
       slots.push(emitFormatSlot("assert", argsC[i], argTypes[i], i));
     }
     return `mtoc2_assert_scalar_fmt(${condC}, ${fmtView}, ${slots.length}, ${emitFormatSlotArray(slots)})`;
+  },
+  emitJs({ argsJs, argTypes, useRuntime }) {
+    useRuntime("mtoc2_assert_scalar_fmt");
+    const cond = argTypes[0];
+    if (isNumeric(cond) && exactDouble(cond) !== undefined) {
+      return `undefined`;
+    }
+    if (argTypes.length < 2) {
+      return `mtoc2_assert_scalar_fmt(${argsJs[0]}, "assertion failed")`;
+    }
+    return `mtoc2_assert_scalar_fmt(${argsJs.join(", ")})`;
+  },
+  call({ args, argTypes }) {
+    const cond = argTypes[0];
+    const v =
+      typeof args[0] === "number"
+        ? args[0]
+        : Number(args[0] as object);
+    const truthy = v !== 0 && !Number.isNaN(v);
+    if (truthy) return [];
+    const unwrapped = args.slice(1).map(unwrapFmtArg);
+    if (unwrapped.length === 0) {
+      throw new Error("assertion failed");
+    }
+    void cond; // type-check satisfied by transfer
+    jsAssertFmt(false, unwrapped[0] as string, ...unwrapped.slice(1));
+    return [];
   },
 };
