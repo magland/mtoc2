@@ -201,28 +201,26 @@ the cross-runner parallelizes better and stays the oracle.
 
 ## Pre-merge checklist
 
-Before landing a change:
+Before landing a change, run `npm run check` — it chains every gate
+in the order below and exits non-zero on the first failure:
 
-- `npx tsc` clean.
-- `npx tsx scripts/run_test_scripts.ts` full pass — c-aot vs numbl,
-  byte-for-byte, the strict oracle.
-- `npx tsx scripts/run_test_scripts_all_modes.ts` full pass —
-  interpreter / js-aot / c-aot all against numbl. Known backend gaps
-  are marked `% mtoc2-test-xfail-<backend>:` per script; the runner
-  is expected to exit 0. Failures here mean a backend has rotted
-  away from the others.
-- `npx vitest run`.
-- `npm run lint`.
-- `npm run format:check`.
-- `npm run build:snippets:check` if you touched any `.h` / `.js`
-  under `src/builtins/runtime/` (otherwise `snippets.gen.ts` will
-  drift).
+- `npm run format:check` (prettier)
+- `npm run lint` (eslint, covers `.ts/.tsx` and runtime `.js`)
+- `npm run typecheck` (`tsc`)
+- `npm run build:snippets:check` (catches stale `snippets.gen.ts`
+  after a `.h` / `.js` edit under `src/builtins/runtime/`)
+- `npm run test` (vitest)
+- `npm run test:scripts:all-modes` — interpreter / js-aot / c-aot
+  all against numbl byte-for-byte. Known backend gaps are marked
+  `% mtoc2-test-xfail-<backend>:` per script; the runner is
+  expected to exit 0. Failures here mean a backend has rotted away
+  from the others. This is also a strict superset of the c-aot-only
+  `npm run test:scripts` runner today (no script currently xfails
+  c-aot), so the umbrella check doesn't run both.
 
-The runners are the slow gates — minutes for a full sweep. Run them
-at checkpoints. For tight iteration, use `tsc` + a single targeted
-script (`run_test_scripts.ts path/to/foo.m` for c-aot only, or
-`run_test_scripts_all_modes.ts path/to/foo.m` when the change spans
-backends).
+The cross-runner is the slow gate (~50–60s on a 12-core dev
+machine; longer on CI). For tight iteration, use `tsc` + a single
+targeted script (`npm run test:scripts:all-modes path/to/foo.m`).
 
 ### Periodic: leak-check sweep
 

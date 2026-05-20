@@ -21,6 +21,7 @@
     "lint": "eslint .",
     "build:snippets": "tsx scripts/build_runtime_snippets.ts",
     "build:snippets:check": "tsx scripts/build_runtime_snippets.ts --check",
+    "check": "npm run format:check && npm run lint && npm run typecheck && npm run build:snippets:check && npm run test && npm run test:scripts:all-modes",
     "dev": "npm run build:snippets && vite",
     "build": "npm run build:snippets && tsc && vite build",
     "preview": "vite preview"
