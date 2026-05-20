@@ -489,9 +489,17 @@ export function indexTensor(
   rawArgs: ReadonlyArray<Expr>,
   span: Span
 ): RuntimeValue {
-  // `v(:)` short-circuit — column-major linearize.
+  // `v(:)` short-circuit — column-major linearize. Both real and
+  // imag lanes carry through when the base is complex.
   if (rawArgs.length === 1 && rawArgs[0].type === "Colon") {
     const n = base.data.length;
+    if (base.imag !== undefined) {
+      return makeComplexTensor(
+        [n, 1],
+        new Float64Array(base.data),
+        new Float64Array(base.imag)
+      );
+    }
     return makeTensor([n, 1], new Float64Array(base.data));
   }
   // Per-axis resolution: each slot becomes (count, indexFn) where
@@ -530,8 +538,24 @@ export function indexTensor(
           const iv = Math.trunc(v);
           slot = { count: 1, idxFn: () => iv };
         } else if (isTensor(v)) {
-          const data = v.data;
-          slot = { count: data.length, idxFn: k => Math.trunc(data[k]) };
+          if (v.isLogical) {
+            // Logical mask: scan the mask, collect 1-based positions
+            // of truthy entries. The slot then "picks" those positions
+            // along the corresponding axis (or linear element index
+            // for single-slot). MATLAB / numbl rule: mask length
+            // should match the indexed axis; we don't enforce equality
+            // here (truthy positions beyond the axis fall through to
+            // the bounds check below).
+            const md = v.data;
+            const truthy: number[] = [];
+            for (let mi = 0; mi < md.length; mi++) {
+              if (md[mi] !== 0) truthy.push(mi + 1);
+            }
+            slot = { count: truthy.length, idxFn: k => truthy[k] };
+          } else {
+            const data = v.data;
+            slot = { count: data.length, idxFn: k => Math.trunc(data[k]) };
+          }
           allScalar = false;
         } else {
           throw new UnsupportedConstruct(
@@ -571,6 +595,13 @@ export function indexTensor(
         stride *= dim;
       }
     }
+    // Complex tensor: return `{re, im}`. We don't collapse to a bare
+    // number when `im === 0` — `b(2) = 5` into a complex base writes
+    // imag=0, but the value remains complex; numbl preserves the
+    // complex shape too.
+    if (base.imag !== undefined) {
+      return { re: base.data[offset], im: base.imag[offset] };
+    }
     return base.data[offset];
   }
 
@@ -578,10 +609,12 @@ export function indexTensor(
   // freshly-owned tensor. For the linear single-slot form, result
   // orientation matches MATLAB: row base → row, col base → col, else
   // column vector.
+  const baseIsComplex = base.imag !== undefined;
   if (slots.length === 1) {
     const n = slots[0].count;
     const isRowBase = base.shape.length >= 2 && base.shape[0] === 1;
-    const out = new Float64Array(n);
+    const outRe = new Float64Array(n);
+    const outIm = baseIsComplex ? new Float64Array(n) : undefined;
     for (let k = 0; k < n; k++) {
       const ix = slots[0].idxFn(k);
       if (ix < 1 || ix > base.data.length) {
@@ -589,17 +622,20 @@ export function indexTensor(
           `Index in position 1 (${ix}) exceeds array bounds (${base.data.length})`
         );
       }
-      out[k] = base.data[ix - 1];
+      outRe[k] = base.data[ix - 1];
+      if (outIm !== undefined) outIm[k] = base.imag![ix - 1];
     }
     const shape = isRowBase ? [1, n] : [n, 1];
-    return makeTensor(shape, out);
+    if (outIm !== undefined) return makeComplexTensor(shape, outRe, outIm);
+    return makeTensor(shape, outRe);
   }
 
   // Multi-slot per-axis.
   const dims = slots.map(s => s.count);
   let total = 1;
   for (const d of dims) total *= d;
-  const out = new Float64Array(total);
+  const outRe = new Float64Array(total);
+  const outIm = baseIsComplex ? new Float64Array(total) : undefined;
   const idx = new Array(slots.length).fill(0);
   for (let k = 0; k < total; k++) {
     // Source linear offset (column-major) using actual indices.
@@ -623,7 +659,8 @@ export function indexTensor(
       dstOff += idx[i] * dstStride;
       dstStride *= dims[i];
     }
-    out[dstOff] = base.data[srcOff];
+    outRe[dstOff] = base.data[srcOff];
+    if (outIm !== undefined) outIm[dstOff] = base.imag![srcOff];
     // Advance idx (column-major).
     for (let i = 0; i < slots.length; i++) {
       idx[i]++;
@@ -635,7 +672,8 @@ export function indexTensor(
   // c-aot path's result shape canonicalization).
   while (dims.length > 2 && dims[dims.length - 1] === 1) dims.pop();
   while (dims.length < 2) dims.push(1);
-  return makeTensor(dims, out);
+  if (outIm !== undefined) return makeComplexTensor(dims, outRe, outIm);
+  return makeTensor(dims, outRe);
 }
 
 // Used internally by the anonymous-function handler so a fresh child

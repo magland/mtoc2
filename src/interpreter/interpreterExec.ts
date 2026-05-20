@@ -223,9 +223,18 @@ export function assignLValue(
   }
   if (lv.type === "Ignore") return;
   if (lv.type === "Index") {
-    // Scalar tensor write MVP: `v(i) = x` / `M(i,j) = x`. The base
-    // must be a bare Var holding a tensor; the RHS must be a scalar
-    // number. Range / colon / multi-element RHS land separately.
+    // Indexed-write paths supported:
+    //   - all-scalar slots: `v(i) = x`, `M(i,j) = x` — scalar RHS,
+    //     direct linear or column-major scatter into one slot.
+    //   - any Colon/Range slots: `v(:) = rhs`, `v(2:5) = rhs`,
+    //     `M(2,:) = rhs`, `t(:,:,2) = rhs` — slot resolution mirrors
+    //     `indexTensor`'s read path; the scatter walks the cartesian
+    //     product of slot indices, broadcasting a scalar RHS or
+    //     copying from a numel-matching tensor RHS.
+    // The base must be a bare Var holding a tensor today. IndexVec /
+    // LogicalMask slots, member-rooted writes (`obj.field(args) = ...`),
+    // and indexed delete (`v(2:5) = []`) raise as out-of-scope per
+    // CLAUDE.md.
     if (lv.base.type !== "Ident") {
       throw new UnsupportedConstruct(
         `interpreter: indexed assignment requires a bare-variable base ` +
@@ -240,56 +249,162 @@ export function assignLValue(
           `an already-bound tensor`
       );
     }
-    if (typeof v !== "number") {
-      throw new UnsupportedConstruct(
-        `interpreter: indexed assignment requires a scalar RHS (got ${typeof v})`
-      );
-    }
-    // `end` inside the index list resolves to the size of the axis
-    // being indexed (or `numel` for linear single-slot).
+    // All indexed-write paths share the same slot-resolution + scatter
+    // machinery: a slot resolves to (count, idxFn), the cartesian
+    // product of slot indices walks the selected region, and each
+    // visited position writes one element from a scalar / complex-
+    // scalar / tensor RHS. Statically-scalar slots (Number / Char /
+    // String / ImagUnit literals) still benefit from the same code:
+    // count = 1, total = 1, single write. Removing the old fast path
+    // unifies the handling and (importantly) lets `b(1) = 1 + 1i`
+    // accept a complex scalar RHS uniformly with `b(:) = 1 + 1i`.
+    //
+    // Resolve each slot to (count, idxFn) mirroring `indexTensor` —
+    // same `end`-stack push so `v(2:end)`, `M(2, 1:end-1)`, etc.
+    // resolve consistently with the read side.
     const ndim = lv.indices.length;
-    const idxVals = lv.indices.map((ix, i) => {
+    type Slot = { count: number; idxFn: (k: number) => number };
+    const slots: Slot[] = [];
+    for (let i = 0; i < ndim; i++) {
+      const a = lv.indices[i];
       this.endStack.push({
         baseTensor: baseVal,
         axis: ndim === 1 ? "linear" : i,
       });
+      let slot: Slot;
       try {
-        return this.evalExpr(ix);
+        if (a.type === "Colon") {
+          const axisLen =
+            ndim === 1 ? baseVal.data.length : (baseVal.shape[i] ?? 1);
+          slot = { count: axisLen, idxFn: k => k + 1 };
+        } else if (a.type === "Range") {
+          const s = toScalarNumber(this.evalExpr(a.start));
+          const en = toScalarNumber(this.evalExpr(a.end));
+          const st = a.step ? toScalarNumber(this.evalExpr(a.step)) : 1;
+          let n = 0;
+          if (st !== 0) {
+            const calc = Math.floor((en - s) / st + 1 + 1e-10);
+            n = calc > 0 && Number.isFinite(calc) ? calc : 0;
+          }
+          slot = { count: n, idxFn: k => Math.trunc(s + st * k) };
+        } else {
+          // Bare ident / lit / arith — scalar numeric, an IndexVec
+          // (numeric tensor), or a LogicalMask (isLogical-tagged
+          // tensor). Same surface as the read-side `indexTensor`.
+          const sv = this.evalExpr(a);
+          if (typeof sv === "number") {
+            const iv = Math.trunc(sv);
+            slot = { count: 1, idxFn: () => iv };
+          } else if (isTensor(sv)) {
+            if (sv.isLogical) {
+              const md = sv.data;
+              const truthy: number[] = [];
+              for (let mi = 0; mi < md.length; mi++) {
+                if (md[mi] !== 0) truthy.push(mi + 1);
+              }
+              slot = { count: truthy.length, idxFn: k => truthy[k] };
+            } else {
+              const td = sv.data;
+              slot = { count: td.length, idxFn: k => Math.trunc(td[k]) };
+            }
+          } else {
+            throw new UnsupportedConstruct(
+              `interpreter: indexed write slot must be a Colon, Range, ` +
+                `scalar numeric, IndexVec, or logical mask ` +
+                `(got ${typeof sv} at position ${i + 1})`
+            );
+          }
+        }
       } finally {
         this.endStack.pop();
       }
-    });
-    for (const iv of idxVals) {
-      if (typeof iv !== "number") {
-        throw new UnsupportedConstruct(
-          `interpreter: indexed assignment supports scalar numeric indices only`
-        );
-      }
+      slots.push(slot);
     }
-    const ks = idxVals.map(iv => Math.trunc(iv as number));
-    let offset: number;
-    if (ks.length === 1) {
-      if (ks[0] < 1 || ks[0] > baseVal.data.length) {
-        throw new RangeError(
-          `Index in position 1 (${ks[0]}) exceeds array bounds (${baseVal.data.length})`
+    let total = 1;
+    for (const s of slots) total *= s.count;
+    // Validate / classify RHS shape. Three accepted forms:
+    //   - real scalar number: broadcast across every slot
+    //   - complex scalar `{re, im}`: broadcast both lanes
+    //   - tensor (real or complex): numel must match `total`, copy
+    //     element-by-element (and the imag lane when the rhs has one)
+    let rhsScalar: number | undefined;
+    let rhsScalarComplex: { re: number; im: number } | undefined;
+    let rhsTensor:
+      | { data: ArrayLike<number>; imag?: ArrayLike<number> }
+      | undefined;
+    if (typeof v === "number") {
+      rhsScalar = v;
+    } else if (isTensor(v)) {
+      if (v.data.length !== total) {
+        throw new UnsupportedConstruct(
+          `interpreter: indexed-slice RHS has ${v.data.length} element(s) ` +
+            `but the selected region has ${total} slot(s)`
         );
       }
-      offset = ks[0] - 1;
+      rhsTensor = v;
+    } else if (isComplexValue(v)) {
+      rhsScalarComplex = v;
     } else {
-      offset = 0;
-      let stride = 1;
-      for (let i = 0; i < ks.length; i++) {
-        const dim = baseVal.shape[i] ?? 1;
-        if (ks[i] < 1 || ks[i] > dim) {
+      throw new UnsupportedConstruct(
+        `interpreter: indexed-slice RHS must be a real or complex scalar, ` +
+          `or a tensor (got ${typeof v})`
+      );
+    }
+    const baseImag = baseVal.imag;
+    // Walk the cartesian product of slot indices, scattering into the
+    // base tensor. Column-major iteration matches the runtime layout.
+    // When the base carries an imag lane, the rhs lane is written
+    // alongside: real scalar / tensor RHS fills imag with 0; complex
+    // scalar / tensor RHS copies the rhs imag (treating a missing rhs
+    // imag as zero, mirroring the C-side helpers).
+    const idx = new Array(slots.length).fill(0);
+    for (let k = 0; k < total; k++) {
+      // Compute source linear offset.
+      let off: number;
+      if (slots.length === 1) {
+        const ix = slots[0].idxFn(idx[0]);
+        if (ix < 1 || ix > baseVal.data.length) {
           throw new RangeError(
-            `Index in position ${i + 1} (${ks[i]}) exceeds array bounds (${dim})`
+            `Index in position 1 (${ix}) exceeds array bounds (${baseVal.data.length})`
           );
         }
-        offset += (ks[i] - 1) * stride;
-        stride *= dim;
+        off = ix - 1;
+      } else {
+        off = 0;
+        let stride = 1;
+        for (let i = 0; i < slots.length; i++) {
+          const ix = slots[i].idxFn(idx[i]);
+          const dim = baseVal.shape[i] ?? 1;
+          if (ix < 1 || ix > dim) {
+            throw new RangeError(
+              `Index in position ${i + 1} (${ix}) exceeds array bounds (${dim})`
+            );
+          }
+          off += (ix - 1) * stride;
+          stride *= dim;
+        }
+      }
+      let reVal: number;
+      let imVal: number;
+      if (rhsScalar !== undefined) {
+        reVal = rhsScalar;
+        imVal = 0;
+      } else if (rhsScalarComplex !== undefined) {
+        reVal = rhsScalarComplex.re;
+        imVal = rhsScalarComplex.im;
+      } else {
+        reVal = rhsTensor!.data[k];
+        imVal = rhsTensor!.imag ? rhsTensor!.imag[k] : 0;
+      }
+      baseVal.data[off] = reVal;
+      if (baseImag !== undefined) baseImag[off] = imVal;
+      // Advance idx in column-major order (innermost = fastest).
+      for (let i = 0; i < slots.length; i++) {
+        idx[i]++;
+        if (idx[i] < slots[i].count) break;
+        idx[i] = 0;
       }
     }
-    baseVal.data[offset] = v;
     if (!suppressed) this.autoDisp(baseName, baseVal);
     return;
   }

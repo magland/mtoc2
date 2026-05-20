@@ -64,12 +64,20 @@ export type RuntimeStruct = { readonly [field: string]: RuntimeValue };
  *  real-only tensors. Mirrors the C representation's split-buffer
  *  layout — codegen / interpreter dispatch on `imag !== undefined`
  *  the way the C side dispatches on `imag != NULL`. The shape array
- *  is owned by the value; do not mutate. */
+ *  is owned by the value; do not mutate.
+ *
+ *  `isLogical` flags this tensor as the result of a logical operation
+ *  (`~`, `<`, `==`, `&&`, …) so downstream index-slot resolution can
+ *  treat it as a mask instead of an IndexVec — same role as numbl's
+ *  `_isLogical` on its RuntimeTensor. The flag is one-way (once set,
+ *  stays set across copies via the helper) and absent on numeric
+ *  tensors; helper sites that don't care leave it undefined. */
 export interface RuntimeTensor {
   readonly mtoc2Tag: "tensor";
   readonly shape: number[];
   readonly data: Float64Array;
   readonly imag?: Float64Array;
+  readonly isLogical?: boolean;
 }
 
 /** Single-quoted char-array (`'foo'`). Distinct from `"foo"` strings
