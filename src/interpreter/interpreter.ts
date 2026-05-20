@@ -389,11 +389,15 @@ export class Interpreter {
         );
       }
       const { rootName, fields } = path;
+      // Use `cloneStruct` so non-enumerable tags (e.g. `mtoc2Class`
+      // on class instances) survive the deep-clone — without that,
+      // a constructor's `obj.x = a` would silently strip the class
+      // tag and method dispatch later would fail.
       let host = this.env.get(rootName) as Record<string, RuntimeValue> | undefined;
       if (host === undefined || typeof host !== "object" || host === null) {
         host = {};
       } else {
-        host = { ...host };
+        host = Interpreter.cloneStructLocal(host);
       }
       // Walk to the parent of the leaf, cloning along the way so
       // older references aren't mutated.
@@ -403,7 +407,7 @@ export class Interpreter {
         const next = cur[fname];
         const cloned: Record<string, RuntimeValue> =
           next && typeof next === "object" && !isTensor(next) && !isCharRV(next)
-            ? { ...(next as Record<string, RuntimeValue>) }
+            ? Interpreter.cloneStructLocal(next as Record<string, RuntimeValue>)
             : {};
         cur[fname] = cloned as RuntimeValue;
         cur = cloned;
@@ -546,56 +550,7 @@ export class Interpreter {
         // disambiguates by checking the env first; mirror that here.
         const envVal = this.env.get(e.name);
         if (envVal !== undefined && isTensor(envVal)) {
-          // Single-slot `v(:)` — column-major linearize to N×1.
-          if (e.args.length === 1 && e.args[0].type === "Colon") {
-            const n = envVal.data.length;
-            return makeTensor([n, 1], new Float64Array(envVal.data));
-          }
-          // `end` inside the index list resolves to the size of the
-          // axis being indexed (or `numel` for linear single-slot).
-          const idxVals = e.args.map((a, i) => {
-            this.endStack.push({
-              baseTensor: envVal,
-              axis: e.args.length === 1 ? "linear" : i,
-            });
-            try {
-              return this.evalExpr(a);
-            } finally {
-              this.endStack.pop();
-            }
-          });
-          for (const v of idxVals) {
-            if (typeof v !== "number") {
-              throw new UnsupportedConstruct(
-                `interpreter: only scalar numeric indices are supported in the MVP`,
-                e.span
-              );
-            }
-          }
-          const ks = idxVals.map(v => Math.trunc(v as number));
-          let offset: number;
-          if (ks.length === 1) {
-            if (ks[0] < 1 || ks[0] > envVal.data.length) {
-              throw new RangeError(
-                `Index in position 1 (${ks[0]}) exceeds array bounds (${envVal.data.length})`
-              );
-            }
-            offset = ks[0] - 1;
-          } else {
-            offset = 0;
-            let stride = 1;
-            for (let i = 0; i < ks.length; i++) {
-              const dim = envVal.shape[i] ?? 1;
-              if (ks[i] < 1 || ks[i] > dim) {
-                throw new RangeError(
-                  `Index in position ${i + 1} (${ks[i]}) exceeds array bounds (${dim})`
-                );
-              }
-              offset += (ks[i] - 1) * stride;
-              stride *= dim;
-            }
-          }
-          return envVal.data[offset];
+          return this.indexTensor(envVal, e.args, e.span);
         }
         const argVals = e.args.map(a => this.evalExpr(a));
         return this.callByName(e.name, argVals, 1, e.span)[0];
@@ -717,10 +672,9 @@ export class Interpreter {
       }
 
       case "Index": {
-        // Scalar tensor read MVP: `v(i)` or `M(i, j)`. Plus single-slot
-        // `v(:)` (column-major linearize to N×1). Range / multi-slot
-        // colon / logical-mask / vector-of-indices land separately as
-        // they're needed.
+        // Both `v(args)` and `expr(args)` route through `indexTensor`
+        // — which handles scalar / colon / range / index-vector
+        // slots uniformly.
         const baseVal = this.evalExpr(e.base);
         if (!isTensor(baseVal)) {
           throw new UnsupportedConstruct(
@@ -728,56 +682,7 @@ export class Interpreter {
             e.span
           );
         }
-        if (e.indices.length === 1 && e.indices[0].type === "Colon") {
-          // `v(:)` — column-major linearize to a column vector. For an
-          // already-column-shaped base this is a copy; for any other
-          // shape it reinterprets the flat buffer as N×1.
-          const n = baseVal.data.length;
-          return makeTensor([n, 1], new Float64Array(baseVal.data));
-        }
-        const idxVals = e.indices.map((ix, i) => {
-          this.endStack.push({
-            baseTensor: baseVal,
-            axis: e.indices.length === 1 ? "linear" : i,
-          });
-          try {
-            return this.evalExpr(ix);
-          } finally {
-            this.endStack.pop();
-          }
-        });
-        for (const v of idxVals) {
-          if (typeof v !== "number") {
-            throw new UnsupportedConstruct(
-              `interpreter: only scalar numeric indices are supported in the MVP`,
-              e.span
-            );
-          }
-        }
-        const ks = idxVals.map(v => Math.trunc(v as number));
-        let offset: number;
-        if (ks.length === 1) {
-          if (ks[0] < 1 || ks[0] > baseVal.data.length) {
-            throw new RangeError(
-              `Index in position 1 (${ks[0]}) exceeds array bounds (${baseVal.data.length})`
-            );
-          }
-          offset = ks[0] - 1;
-        } else {
-          offset = 0;
-          let stride = 1;
-          for (let i = 0; i < ks.length; i++) {
-            const dim = baseVal.shape[i] ?? 1;
-            if (ks[i] < 1 || ks[i] > dim) {
-              throw new RangeError(
-                `Index in position ${i + 1} (${ks[i]}) exceeds array bounds (${dim})`
-              );
-            }
-            offset += (ks[i] - 1) * stride;
-            stride *= dim;
-          }
-        }
-        return baseVal.data[offset];
+        return this.indexTensor(baseVal, e.indices, e.span);
       }
 
       case "EndKeyword":
@@ -809,9 +714,55 @@ export class Interpreter {
         return o[e.name];
       }
 
+      case "MethodCall": {
+        // `obj.method(args)` — three resolution kinds:
+        //   1. Package function: dotted name (e.g. `pkg.fn(args)`).
+        //   2. Instance method on a class receiver.
+        //   3. Member-rooted index: `obj.field(args)` where
+        //      `obj.field` is a tensor and the `(args)` are indices.
+        // Try to extract a dotted name like `pkg.fn` / `pkg.sub.fn`.
+        const dotted = this.tryExtractDottedName(e.base);
+        if (dotted !== null && this.env.get(dotted.split(".")[0]) === undefined) {
+          const argVals = e.args.map(a => this.evalExpr(a));
+          const qualified = `${dotted}.${e.name}`;
+          return this.callByName(qualified, argVals, 1, e.span)[0];
+        }
+        const base = this.evalExpr(e.base);
+        if (
+          typeof base === "object" &&
+          base !== null &&
+          !isTensor(base) &&
+          !isCharRV(base)
+        ) {
+          const tag = (base as { mtoc2Class?: string }).mtoc2Class;
+          if (tag !== undefined && this.workspace !== undefined) {
+            const reg = this.workspace.classes.get(tag);
+            const fn = reg?.methods.get(e.name);
+            if (reg !== undefined && fn !== undefined) {
+              const argVals = e.args.map(a => this.evalExpr(a));
+              return this.callUserFunction(fn, [base, ...argVals], 1, e.span)[0];
+            }
+          }
+          // Struct / class field that's a tensor: treat as a
+          // member-rooted index read (`obj.data(i)`). Read the field
+          // into a temp and route through the tensor-indexing path
+          // by synthesizing the equivalent FuncCall semantics.
+          const obj = base as Record<string, RuntimeValue>;
+          if (e.name in obj) {
+            const fieldVal = obj[e.name];
+            if (isTensor(fieldVal)) {
+              return this.indexTensor(fieldVal, e.args, e.span);
+            }
+          }
+        }
+        throw new UnsupportedConstruct(
+          `interpreter: MethodCall '${e.name}' could not be dispatched`,
+          e.span
+        );
+      }
+
       case "IndexCell":
       case "MemberDynamic":
-      case "MethodCall":
       case "SuperMethodCall":
       case "AnonFunc":
       case "FuncHandle":
@@ -916,13 +867,44 @@ export class Interpreter {
             }
             return this.invokeBuiltin(ub, args, argTypes, nargout, name);
           }
-          case "classConstructor":
-          case "classMethod":
-            throw new UnsupportedConstruct(
-              `interpreter: class constructors / methods are not yet ` +
-                `implemented (resolved '${name}' → ${target.kind})`,
-              span
-            );
+          case "classConstructor": {
+            const reg = this.workspace.classes.get(target.className);
+            if (reg === undefined) {
+              throw new UnsupportedConstruct(
+                `interpreter: workspace resolved '${name}' as a class but ` +
+                  `no registration found for '${target.className}'`,
+                span
+              );
+            }
+            return this.constructClassInstance(reg, args, span);
+          }
+          case "classMethod": {
+            const reg = this.workspace.classes.get(target.className);
+            if (reg === undefined) {
+              throw new UnsupportedConstruct(
+                `interpreter: workspace resolved '${name}' as a class method ` +
+                  `but no registration found for '${target.className}'`,
+                span
+              );
+            }
+            // Static methods are called as `ClassName.method(args)`
+            // and don't have a receiver to thread; instance methods
+            // receive the receiver as their first parameter.
+            const fn =
+              reg.staticMethods.get(target.methodName) ??
+              reg.methods.get(target.methodName);
+            if (fn === undefined) {
+              throw new UnsupportedConstruct(
+                `interpreter: class '${target.className}' has no method ` +
+                  `'${target.methodName}'`,
+                span
+              );
+            }
+            // `stripInstance: true` → caller already excluded the
+            // receiver from `args`. `false` → receiver is implicit
+            // first arg already in `args[0]`.
+            return this.callUserFunction(fn, args, nargout, span);
+          }
         }
       }
     }
@@ -931,6 +913,282 @@ export class Interpreter {
       `interpreter: undefined identifier or function '${name}'`,
       span
     );
+  }
+
+  /** Tensor indexing — supports scalar reads, single-slot Colon
+   *  (linearize to N×1), single-slot Range, multi-slot per-axis
+   *  with Colon / Scalar / Range / IndexVec mixes. Used by both
+   *  the `v(args)` FuncCall path (bare-name tensor variable) and
+   *  the `obj.field(args)` MethodCall path (member-rooted index). */
+  private indexTensor(
+    base: import("../runtime/value.js").RuntimeTensor,
+    rawArgs: ReadonlyArray<Expr>,
+    span: Span
+  ): RuntimeValue {
+    // `v(:)` short-circuit — column-major linearize.
+    if (rawArgs.length === 1 && rawArgs[0].type === "Colon") {
+      const n = base.data.length;
+      return makeTensor([n, 1], new Float64Array(base.data));
+    }
+    // Per-axis resolution: each slot becomes (count, indexFn) where
+    // indexFn(k) returns the 1-based source index along that axis.
+    const ndim = rawArgs.length;
+    type Slot = { count: number; idxFn: (k: number) => number };
+    const slots: Slot[] = [];
+    let allScalar = true;
+    for (let i = 0; i < ndim; i++) {
+      const a = rawArgs[i];
+      this.endStack.push({
+        baseTensor: base,
+        axis: ndim === 1 ? "linear" : i,
+      });
+      let slot: Slot;
+      try {
+        if (a.type === "Colon") {
+          const axisLen = ndim === 1 ? base.data.length : base.shape[i] ?? 1;
+          slot = { count: axisLen, idxFn: k => k + 1 };
+          allScalar = false;
+        } else if (a.type === "Range") {
+          const s = toScalarNumber(this.evalExpr(a.start));
+          const en = toScalarNumber(this.evalExpr(a.end));
+          const st = a.step ? toScalarNumber(this.evalExpr(a.step)) : 1;
+          // Use the same loop_count formula as the c-aot path.
+          let n = 0;
+          if (st !== 0) {
+            const calc = Math.floor((en - s) / st + 1 + 1e-10);
+            n = calc > 0 && Number.isFinite(calc) ? calc : 0;
+          }
+          slot = { count: n, idxFn: k => Math.trunc(s + st * k) };
+          allScalar = false;
+        } else {
+          const v = this.evalExpr(a);
+          if (typeof v === "number") {
+            const iv = Math.trunc(v);
+            slot = { count: 1, idxFn: () => iv };
+          } else if (isTensor(v)) {
+            const data = v.data;
+            slot = { count: data.length, idxFn: k => Math.trunc(data[k]) };
+            allScalar = false;
+          } else {
+            throw new UnsupportedConstruct(
+              `interpreter: index slot must be numeric (got ${typeof v})`,
+              span
+            );
+          }
+        }
+      } finally {
+        this.endStack.pop();
+      }
+      slots.push(slot);
+    }
+
+    // All-scalar fast path: classic scalar element read.
+    if (allScalar) {
+      const ks = slots.map(s => s.idxFn(0));
+      let offset: number;
+      if (ks.length === 1) {
+        if (ks[0] < 1 || ks[0] > base.data.length) {
+          throw new RangeError(
+            `Index in position 1 (${ks[0]}) exceeds array bounds (${base.data.length})`
+          );
+        }
+        offset = ks[0] - 1;
+      } else {
+        offset = 0;
+        let stride = 1;
+        for (let i = 0; i < ks.length; i++) {
+          const dim = base.shape[i] ?? 1;
+          if (ks[i] < 1 || ks[i] > dim) {
+            throw new RangeError(
+              `Index in position ${i + 1} (${ks[i]}) exceeds array bounds (${dim})`
+            );
+          }
+          offset += (ks[i] - 1) * stride;
+          stride *= dim;
+        }
+      }
+      return base.data[offset];
+    }
+
+    // Multi-element slice — walk the cartesian product and build a
+    // freshly-owned tensor. For the linear single-slot form, the
+    // result orientation matches MATLAB: row base → row, col base →
+    // col, else column vector.
+    if (slots.length === 1) {
+      const n = slots[0].count;
+      const isRowBase = base.shape.length >= 2 && base.shape[0] === 1;
+      const out = new Float64Array(n);
+      for (let k = 0; k < n; k++) {
+        const ix = slots[0].idxFn(k);
+        if (ix < 1 || ix > base.data.length) {
+          throw new RangeError(
+            `Index in position 1 (${ix}) exceeds array bounds (${base.data.length})`
+          );
+        }
+        out[k] = base.data[ix - 1];
+      }
+      const shape = isRowBase ? [1, n] : [n, 1];
+      return makeTensor(shape, out);
+    }
+
+    // Multi-slot per-axis.
+    const dims = slots.map(s => s.count);
+    let total = 1;
+    for (const d of dims) total *= d;
+    const out = new Float64Array(total);
+    const idx = new Array(slots.length).fill(0);
+    for (let k = 0; k < total; k++) {
+      // Source linear offset (column-major) using actual indices.
+      let srcOff = 0;
+      let baseStride = 1;
+      for (let i = 0; i < slots.length; i++) {
+        const ix = slots[i].idxFn(idx[i]);
+        const dim = base.shape[i] ?? 1;
+        if (ix < 1 || ix > dim) {
+          throw new RangeError(
+            `Index in position ${i + 1} (${ix}) exceeds array bounds (${dim})`
+          );
+        }
+        srcOff += (ix - 1) * baseStride;
+        baseStride *= dim;
+      }
+      // Destination offset (column-major in result dims).
+      let dstOff = 0;
+      let dstStride = 1;
+      for (let i = 0; i < slots.length; i++) {
+        dstOff += idx[i] * dstStride;
+        dstStride *= dims[i];
+      }
+      out[dstOff] = base.data[srcOff];
+      // Advance idx (column-major).
+      for (let i = 0; i < slots.length; i++) {
+        idx[i]++;
+        if (idx[i] < dims[i]) break;
+        idx[i] = 0;
+      }
+    }
+    // Trim trailing exact-1 axes down to a rank-2 floor (matches the
+    // c-aot path's result shape canonicalization).
+    while (dims.length > 2 && dims[dims.length - 1] === 1) dims.pop();
+    while (dims.length < 2) dims.push(1);
+    return makeTensor(dims, out);
+  }
+
+  /** Shallow-copy a struct-shaped object, preserving non-enumerable
+   *  tags like `mtoc2Class`. The naive `{...host}` spread only copies
+   *  enumerable own properties, so it silently drops the class tag —
+   *  which breaks downstream method dispatch on instance receivers. */
+  private static cloneStructLocal(
+    src: Record<string, RuntimeValue>
+  ): Record<string, RuntimeValue> {
+    const out: Record<string, RuntimeValue> = {};
+    for (const k of Object.keys(src)) out[k] = src[k];
+    const tag = (src as { mtoc2Class?: string }).mtoc2Class;
+    if (tag !== undefined) {
+      Object.defineProperty(out, "mtoc2Class", {
+        value: tag,
+        enumerable: false,
+        writable: false,
+      });
+    }
+    return out;
+  }
+
+  /** Try to extract a dotted identifier chain like `pkg.sub.foo` from
+   *  a Member-rooted expression, returning the dotted string. Returns
+   *  null if the chain bottoms out at something other than an Ident. */
+  private tryExtractDottedName(e: Expr): string | null {
+    const parts: string[] = [];
+    let cur: Expr = e;
+    while (cur.type === "Member") {
+      parts.unshift(cur.name);
+      cur = cur.base;
+    }
+    if (cur.type !== "Ident") return null;
+    parts.unshift(cur.name);
+    return parts.join(".");
+  }
+
+  /** Build a class instance: initialize properties to defaults, run
+   *  the constructor body (if any) on that initial receiver, and
+   *  return the resulting object. Mirrors numbl's classdef semantics:
+   *  the constructor's `obj` parameter is bound to the default-valued
+   *  receiver, and the constructor body writes through `obj.<prop>`
+   *  to mutate properties before returning `obj`. */
+  private constructClassInstance(
+    reg: import("../lowering/classDefs.js").ClassRegistration,
+    args: RuntimeValue[],
+    span: Span
+  ): RuntimeValue[] {
+    const initial: Record<string, RuntimeValue> = {};
+    // Tag the instance with its class name so MethodCall dispatch
+    // can look up the right method registration at the call site.
+    // The tag is non-enumerable so it doesn't show up in disp /
+    // Object.keys, keeping struct-shaped behavior elsewhere.
+    Object.defineProperty(initial, "mtoc2Class", {
+      value: reg.className,
+      enumerable: false,
+      writable: false,
+    });
+    for (const name of reg.propertyNames) {
+      const def = reg.defaults.get(name);
+      if (def !== undefined) {
+        initial[name] = this.evalExpr(def.expr);
+      } else {
+        // No default — leave the slot unset; the constructor must
+        // assign before the first read. Use `0` as a neutral
+        // placeholder so a stray read doesn't blow up with
+        // `undefined` (matches numbl's "empty struct field" feel).
+        initial[name] = 0;
+      }
+    }
+    if (reg.constructor === null) {
+      if (args.length !== 0) {
+        throw new UnsupportedConstruct(
+          `'${reg.className}' has no constructor; the default form takes no args ` +
+            `(got ${args.length})`,
+          span
+        );
+      }
+      return [initial as RuntimeValue];
+    }
+    // Bind the constructor's output param to `initial`, then run.
+    const fn = reg.constructor;
+    if (args.length > fn.params.length) {
+      throw new UnsupportedConstruct(
+        `'${fn.name}': too many arguments (${args.length} > ${fn.params.length})`,
+        span
+      );
+    }
+    const child = new Environment();
+    for (let i = 0; i < args.length; i++) child.set(fn.params[i], args[i]);
+    // The first output (typically `obj`) starts as the default-valued
+    // receiver so the constructor body can write through it.
+    if (fn.outputs.length > 0) {
+      child.set(fn.outputs[0], initial as RuntimeValue);
+    }
+    child.set("nargin", args.length);
+    child.set("nargout", 1);
+    const inner = new Interpreter(this.ctx, {
+      env: child,
+      ...(this.workspace !== undefined ? { workspace: this.workspace } : {}),
+      currentFile: this.currentFile,
+    });
+    this.active.add(fn.name);
+    try {
+      inner.runProgram(fn.body);
+    } finally {
+      this.active.delete(fn.name);
+    }
+    const outName = fn.outputs[0];
+    const result = outName !== undefined ? child.get(outName) : undefined;
+    if (result === undefined) {
+      throw new UnsupportedConstruct(
+        `'${fn.name}': constructor output '${outName}' was never assigned`,
+        span
+      );
+    }
+    return [result];
   }
 
   private invokeBuiltin(
