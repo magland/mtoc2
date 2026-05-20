@@ -41,6 +41,7 @@ export class Environment {
    *  would. Closer frames shadow farther ones. */
   *entries(): IterableIterator<[string, RuntimeValue]> {
     const seen = new Set<string>();
+    // eslint-disable-next-line @typescript-eslint/no-this-alias
     let cur: Environment | undefined = this;
     while (cur) {
       for (const [k, v] of cur.vars) {

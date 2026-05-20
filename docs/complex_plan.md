@@ -1,7 +1,27 @@
 # Complex-number support for mtoc2 — plan
 
-Status: planning. No code changes yet. This document is the contract
-we'll build to.
+**Status (May 2026):** Phases 1–4 have landed on the c-aot backend.
+Complex literals (`1i`, `2.5i`), scalar arithmetic + compare +
+logical, the `real`/`imag`/`conj`/`angle`/`abs` family, tensor
+literals + arithmetic (elementwise + broadcast + uminus), unary
+math (`sqrt`/`exp`/`log`/`log2`/`log10`/`sin`/`cos`/`tan`/`atan`/
+`floor`/`ceil`/`round`/`fix`/`sign`/`conj`), scalar + slice
+indexing, reductions, reshape, and `.'` / `'` transpose all work
+end-to-end. Real ↔ complex mixing works through the runtime helpers
+branching on `imag != NULL`.
+
+The remaining work is Phase 5 — wiring the same coverage through the
+js-aot backend's `emitJs` hooks and the interpreter's `call` hooks
+for every builtin that currently throws `'<op>' complex emitJs not
+yet wired (Phase 5)` / `'<op>' complex 'call' not yet wired (Phase
+5)`. The JS sibling runtime helpers (`tensor_unary_complex_math.h`,
+`tensor_reduce_complex.h`, `tensor_reshape_nd_complex.h`,
+`tensor_transpose_complex.h`, etc.) need `.js` counterparts written.
+Tensor `mtimes` on two complex operands, complex args to `fprintf` /
+`error` / `sprintf` / plot dispatch, and the `complex(a, b)`
+constructor are deferred.
+
+The original plan below remains the contract for what's accepted.
 
 ## 1. Goals
 

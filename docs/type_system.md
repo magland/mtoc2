@@ -1,11 +1,15 @@
 # Type system
 
-mtoc2's type lattice lives in `src/lowering/types.ts`. Every scalar
-(and small array) carries an optional `exact` field threaded through
-the lowerer by every builtin's `transfer` function. The lattice is
-**exact-aware** rather than exact-folding: knowing the value is the
-most precise type and feeds two specific consumers, but the lowerer
-does NOT substitute literals for runtime computations.
+mtoc2's type lattice lives in [src/lowering/types.ts](../src/lowering/types.ts).
+It's shared by all three backends: the c-aot and js-aot lowering
+paths thread it through the IR, and the interpreter feeds runtime
+values through `inferTypeFromValue` to produce the same `argTypes`
+shape that the builtin `transfer` functions consume on the typed
+paths. Every scalar (and small array) carries an optional `exact`
+field threaded through by every builtin's `transfer` function. The
+lattice is **exact-aware** rather than exact-folding: knowing the
+value is the most precise type and feeds two specific consumers, but
+the lowerer does NOT substitute literals for runtime computations.
 
 ## Where `exact` is used
 
@@ -41,7 +45,8 @@ mtoc2 stays out of the way.
 For specialization and if-cond folding to work without drift between
 mtoc2 and numbl, the JS-side `transfer` of a builtin must produce the
 same exact result numbl would produce at runtime. The cross-runner
-enforces this byte-for-byte.
+enforces this byte-for-byte; the all-modes runner extends the same
+check to the interpreter and js-aot backends.
 
 ## Type variants
 

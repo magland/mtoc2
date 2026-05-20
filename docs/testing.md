@@ -5,9 +5,9 @@ Two layers, deliberately separated.
 ## Cross-runner (the oracle)
 
 `scripts/run_test_scripts.ts` walks every `.m` file under
-`test_scripts/`, runs each through numbl's CLI and mtoc2's CLI, and
-compares stdouts byte-for-byte. A test fails if the two runners
-disagree on a single character.
+`test_scripts/`, runs each through numbl's CLI and mtoc2's
+**c-aot** CLI, and compares stdouts byte-for-byte. A test fails if
+the two runners disagree on a single character.
 
 ```
 npx tsx scripts/run_test_scripts.ts                # all scripts
@@ -19,29 +19,48 @@ MTOC_TEST_TIMEOUT_MS=60000 npx tsx scripts/run_test_scripts.ts
 The cross-runner needs numbl checked out at `../numbl` — same sibling
 location mtoc2 imports its parser from.
 
+### All-modes runner
+
+`scripts/run_test_scripts_all_modes.ts` runs each script through
+numbl plus all three mtoc2 backends (`--exec interpreter`,
+`--exec js-aot`, `--exec c-aot`) and checks they all match numbl
+byte-for-byte. Same masking rules as the c-aot-only runner;
+backends that don't support a feature yet surface as per-script
+failures.
+
+```
+npx tsx scripts/run_test_scripts_all_modes.ts                # all
+npx tsx scripts/run_test_scripts_all_modes.ts foo.m          # specific
+```
+
+The c-aot-vs-numbl runner is the commit-time gate. The all-modes
+runner is the broader signal — used when working on the interpreter
+or js-aot backend, and when verifying that a change keeps coverage
+parity across modes.
+
 ### Adding a script-level test
 
 The walker uses a two-tier rule so flat single-file tests and
 multifile workspace tests can coexist without polluting each other:
 
-- `test_scripts/*.m` — each top-level `.m` file is a test entry. Drop
-  a new file and it's auto-discovered.
+- `test_scripts/*.m` — each top-level `.m` file is a test entry.
+  Drop a new file and it's auto-discovered.
 - `test_scripts/<subdir>/main.m` — each subdirectory is a multifile
   test group. `main.m` is the entry; every other `.m` in the
   subdirectory is a workspace sibling (auto-picked up by the CLI's
   `scanSiblings`, which descends recursively into `+pkg/` and
-  `@Class/` directories). The walker does NOT treat sibling files in
-  a subdir as standalone entries — including files inside `+pkg/`
+  `@Class/` directories). The walker does NOT treat sibling files
+  in a subdir as standalone entries — including files inside `+pkg/`
   subdirs.
 
 Each script should:
 
 - Be self-contained within its tier (a flat-tier test must not need
-  siblings; a multifile-tier test gets its sibling files from its own
-  subdirectory and nowhere else).
+  siblings; a multifile-tier test gets its sibling files from its
+  own subdirectory and nowhere else).
 - Use only `disp` for output, so stdout is the comparison surface.
-- Exercise one thing crisply. If a script catches three bugs at once,
-  split it.
+- Exercise one thing crisply. If a script catches three bugs at
+  once, split it.
 
 ### What "passes" means
 
@@ -85,8 +104,8 @@ runner emits a banner-style line — e.g. numbl's
 `[matmul] using bridge: native LAPACK addon` is printed on first
 matmul activation; mtoc2 doesn't emit anything similar, so masking
 would leave a `[MASKED]` placeholder while the other runner has
-no line at all and the compare still fails. `drop` collapses
-both sides to no-line. Same scan window and `gm` semantics as
+no line at all and the compare still fails. `drop` collapses both
+sides to no-line. Same scan window and `gm` semantics as
 `mtoc2-test-mask`.
 
 ### When mtoc2 and numbl disagree
@@ -96,17 +115,19 @@ real numbl bug, file it upstream — don't paper it over locally. The
 oracle has to stay the oracle.
 
 If a feature isn't in mtoc2's scope yet, the right move is to throw
-`UnsupportedConstruct` at lowering time, not to silently produce
-wrong C. A script that triggers that error will fail the cross-runner
-on numbl's exit code (since mtoc2 exits non-zero), which is the
+`UnsupportedConstruct` at lowering time (for c-aot / js-aot) or
+from the builtin's `call` hook (for the interpreter), not to
+silently produce wrong output. A script that triggers that error
+fails the cross-runner on mtoc2's non-zero exit, which is the
 correct signal.
 
 ## Forcing the runtime path: `%!numbl:opaque`
 
 Mtoc2's exact-value folding is aggressive — a value mentioned as a
 literal almost always carries `exact` through the lowerer, and the
-runtime codegen never fires. That's a feature in production but a
-problem for tests that need to exercise the runtime path.
+runtime codegen never fires for the if-cond fold path. That's a
+feature in production but a problem for tests that need to exercise
+the runtime path.
 
 The directive `%!numbl:opaque <var> [<var>...]` strips `exact` from
 each named variable. Numbl's parser recognizes the directive but
@@ -152,8 +173,8 @@ directives, so cross-runner output is unaffected.
 Reserved for assertions that aren't ergonomic as `.m` scripts:
 type-lattice invariants, spec-key edge cases, and diagnostic error
 paths the cross-runner collapses to a single "errored" line.
-Cases live under `tests/`. Don't add per-script entries to vitest
-— the cross-runner parallelizes better and stays the oracle.
+Cases live under `tests/`. Don't add per-script entries to vitest —
+the cross-runner parallelizes better and stays the oracle.
 
 ## Pre-merge checklist
 
@@ -164,12 +185,17 @@ Before landing a change:
 - `npx vitest run` (when there are vitest cases).
 - `npm run lint`.
 - `npm run format:check`.
-- `npm run build:snippets:check` if you touched any `.h` / `.js` under
-  `src/builtins/runtime/` (otherwise `snippets.gen.ts` will drift).
+- `npm run build:snippets:check` if you touched any `.h` / `.js`
+  under `src/builtins/runtime/` (otherwise `snippets.gen.ts` will
+  drift).
 
-The cross-runner is the slow gate — minutes to run a full sweep. Run
-it at checkpoints. For tight iteration, just use `tsc` + a targeted
-script (`run_test_scripts.ts path/to/foo.m`).
+For changes that touch the interpreter or js-aot backends, also run
+`npx tsx scripts/run_test_scripts_all_modes.ts` to make sure
+coverage parity didn't regress.
+
+The cross-runner is the slow gate — minutes to run a full sweep.
+Run it at checkpoints. For tight iteration, just use `tsc` + a
+targeted script (`run_test_scripts.ts path/to/foo.m`).
 
 ## Test corpus organization
 
@@ -192,7 +218,4 @@ Complex tests follow the same rule: a complex regression on
 indexing goes into `indexing.m`, a complex reduction into
 `reducers.m`, a complex unary-math case into `math_builtins.m`,
 etc. The one new topic file is `complex_basics.m`, which collects
-patterns that don't fit any existing topic (scalar literals + arith
-
-- compare + logical + control-flow conds, complex tensor literals,
-  pass-to-func round-trips).
+patterns that don't fit any existing topic.
