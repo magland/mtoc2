@@ -176,6 +176,30 @@ export function execStmt(this: Interpreter, s: Stmt): void {
     case "Return":
       throw new ReturnSignal();
 
+    case "Switch": {
+      // Numbl semantics (see numbl's `switchMatch` /
+      // `switchValuesMatch`): the case value is matched against the
+      // switch expression with MATLAB-style equality. A case whose
+      // value is a `Cell` (`{a, b, c}`) matches if ANY of its elements
+      // matches; mtoc2 doesn't have Cell in scope yet so we don't
+      // handle that branch here — the parser will surface it as a
+      // Cell expr inside `c.value` and the eval-switch will reject it
+      // before we get a value to compare. The `otherwise` body runs
+      // only when no case matched; at most one case body runs.
+      const switchVal = this.evalExpr(s.expr);
+      let matched = false;
+      for (const c of s.cases) {
+        const caseVal = this.evalExpr(c.value);
+        if (switchMatch(switchVal, caseVal)) {
+          matched = true;
+          this.execBody(c.body);
+          break;
+        }
+      }
+      if (!matched && s.otherwise) this.execBody(s.otherwise);
+      return;
+    }
+
     // Non-executable at this level — body of a Function is run
     // through `callUserFunction`, not `execBody`. ClassDef is a
     // workspace-time declaration; Import / Directive are translator
@@ -192,7 +216,6 @@ export function execStmt(this: Interpreter, s: Stmt): void {
     // until storage classes are wired through Environment.
     case "Global":
     case "Persistent":
-    case "Switch":
     case "TryCatch":
     case "Synth":
       throw new UnsupportedConstruct(
@@ -503,6 +526,62 @@ export function expandForRange(this: Interpreter, e: Expr): RuntimeValue[] {
     `interpreter: for-driver of type '${e.type}' is not yet implemented`,
     e.span
   );
+}
+
+// ── Switch matching ──────────────────────────────────────────────────────
+
+/** MATLAB-style `switch` equality. Mirrors numbl's
+ *  `switchValuesMatch` (runtime/runtimeHelpers.ts) + `valuesAreEqual`
+ *  (runtime/compare.ts):
+ *
+ *  - Text ↔ text: `'foo'` and `"foo"` compare as the same string
+ *    regardless of source kind (Char vs String).
+ *  - Numbers, booleans (`logical`): plain `===` on the JS primitive.
+ *  - Tensors: same `data` (and matching `imag` if either side is
+ *    complex), no shape comparison beyond `data.length`. Mirrors
+ *    numbl's elementwise tensor compare.
+ *  - Complex scalars: matching `re` AND `im`.
+ *  - Anything else falls back to JS `===` (handles, structs as
+ *    identity).
+ *
+ *  v1 doesn't accept cell-of-cases (numbl's `switch x; case {a,b}`
+ *  short-circuit), since `Cell` isn't yet wired through the
+ *  interpreter — the caller's `evalExpr` rejects Cell exprs first. */
+function switchMatch(a: RuntimeValue, b: RuntimeValue): boolean {
+  // Text ↔ text (Char or String, in any combination).
+  const aIsText = typeof a === "string" || isCharRV(a);
+  const bIsText = typeof b === "string" || isCharRV(b);
+  if (aIsText && bIsText) {
+    const av = typeof a === "string" ? a : a.value;
+    const bv = typeof b === "string" ? b : b.value;
+    return av === bv;
+  }
+  if (typeof a === "number" || typeof a === "boolean") {
+    if (typeof b !== "number" && typeof b !== "boolean") return false;
+    return Number(a) === Number(b);
+  }
+  if (typeof b === "number" || typeof b === "boolean") return false;
+  if (isComplexValue(a)) {
+    if (!isComplexValue(b)) return false;
+    return a.re === b.re && a.im === b.im;
+  }
+  if (isTensor(a)) {
+    if (!isTensor(b)) return false;
+    if (a.data.length !== b.data.length) return false;
+    for (let i = 0; i < a.data.length; i++) {
+      if (a.data[i] !== b.data[i]) return false;
+    }
+    const aIm = a.imag;
+    const bIm = b.imag;
+    if (!!aIm !== !!bIm) return false;
+    if (aIm && bIm) {
+      for (let i = 0; i < aIm.length; i++) {
+        if (aIm[i] !== bIm[i]) return false;
+      }
+    }
+    return true;
+  }
+  return a === b;
 }
 
 // ── Auto-display helper ──────────────────────────────────────────────────
