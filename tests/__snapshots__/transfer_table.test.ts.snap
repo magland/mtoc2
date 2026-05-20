@@ -1,0 +1,978 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`builtin transfer-table snapshot > abs > scalar complex 1`] = `
+{
+  "ok": true,
+  "outputs": [
+    "double[1×1]:nonneg",
+  ],
+}
+`;
+
+exports[`builtin transfer-table snapshot > abs > scalar opaque 1`] = `
+{
+  "ok": true,
+  "outputs": [
+    "double[1×1]:nonneg",
+  ],
+}
+`;
+
+exports[`builtin transfer-table snapshot > abs > scalar positive exact 1`] = `
+{
+  "ok": true,
+  "outputs": [
+    "double[1×1]:positive=1",
+  ],
+}
+`;
+
+exports[`builtin transfer-table snapshot > abs > tensor nonneg 1`] = `
+{
+  "ok": true,
+  "outputs": [
+    "double[4]:nonneg",
+  ],
+}
+`;
+
+exports[`builtin transfer-table snapshot > all > matrix default dim 1`] = `
+{
+  "ok": true,
+  "outputs": [
+    "logical[1×4]:nonneg",
+  ],
+}
+`;
+
+exports[`builtin transfer-table snapshot > all > row vector 1`] = `
+{
+  "ok": true,
+  "outputs": [
+    "logical[1×1]:nonneg",
+  ],
+}
+`;
+
+exports[`builtin transfer-table snapshot > all > scalar real 1`] = `
+{
+  "ok": true,
+  "outputs": [
+    "logical[1×1]:positive=1",
+  ],
+}
+`;
+
+exports[`builtin transfer-table snapshot > any > matrix default dim 1`] = `
+{
+  "ok": true,
+  "outputs": [
+    "logical[1×4]:nonneg",
+  ],
+}
+`;
+
+exports[`builtin transfer-table snapshot > any > row vector 1`] = `
+{
+  "ok": true,
+  "outputs": [
+    "logical[1×1]:nonneg",
+  ],
+}
+`;
+
+exports[`builtin transfer-table snapshot > any > scalar real 1`] = `
+{
+  "ok": true,
+  "outputs": [
+    "logical[1×1]:positive=1",
+  ],
+}
+`;
+
+exports[`builtin transfer-table snapshot > atan2 > scalar-scalar exact 1`] = `
+{
+  "ok": true,
+  "outputs": [
+    "double[1×1]:positive=0.6435011087932844",
+  ],
+}
+`;
+
+exports[`builtin transfer-table snapshot > atan2 > scalar-scalar opaque 1`] = `
+{
+  "ok": true,
+  "outputs": [
+    "double[1×1]",
+  ],
+}
+`;
+
+exports[`builtin transfer-table snapshot > atan2 > tensor3-scalar 1`] = `
+{
+  "ok": true,
+  "outputs": [
+    "double[3×1]",
+  ],
+}
+`;
+
+exports[`builtin transfer-table snapshot > atan2 > tensor3-tensor3 1`] = `
+{
+  "ok": true,
+  "outputs": [
+    "double[3×1]",
+  ],
+}
+`;
+
+exports[`builtin transfer-table snapshot > cos > scalar opaque 1`] = `
+{
+  "ok": true,
+  "outputs": [
+    "double[1×1]",
+  ],
+}
+`;
+
+exports[`builtin transfer-table snapshot > cos > scalar positive exact 1`] = `
+{
+  "ok": true,
+  "outputs": [
+    "double[1×1]:positive=0.5403023058681398",
+  ],
+}
+`;
+
+exports[`builtin transfer-table snapshot > cos > tensor nonneg 1`] = `
+{
+  "ok": true,
+  "outputs": [
+    "double[4]",
+  ],
+}
+`;
+
+exports[`builtin transfer-table snapshot > eq > scalar-scalar exact 1`] = `
+{
+  "ok": true,
+  "outputs": [
+    "logical[1×1]:zero=0",
+  ],
+}
+`;
+
+exports[`builtin transfer-table snapshot > eq > scalar-scalar opaque 1`] = `
+{
+  "ok": true,
+  "outputs": [
+    "logical[1×1]:nonneg",
+  ],
+}
+`;
+
+exports[`builtin transfer-table snapshot > eq > tensor3-scalar 1`] = `
+{
+  "errorClass": "TypeError",
+  "errorMessage": "'eq' arg 1 must be a scalar numeric (got Numeric)",
+  "ok": false,
+}
+`;
+
+exports[`builtin transfer-table snapshot > eq > tensor3-tensor3 1`] = `
+{
+  "errorClass": "TypeError",
+  "errorMessage": "'eq' arg 1 must be a scalar numeric (got Numeric)",
+  "ok": false,
+}
+`;
+
+exports[`builtin transfer-table snapshot > exp > scalar opaque 1`] = `
+{
+  "ok": true,
+  "outputs": [
+    "double[1×1]:positive",
+  ],
+}
+`;
+
+exports[`builtin transfer-table snapshot > exp > scalar positive exact 1`] = `
+{
+  "ok": true,
+  "outputs": [
+    "double[1×1]:positive=2.718281828459045",
+  ],
+}
+`;
+
+exports[`builtin transfer-table snapshot > exp > tensor nonneg 1`] = `
+{
+  "ok": true,
+  "outputs": [
+    "double[4]:positive",
+  ],
+}
+`;
+
+exports[`builtin transfer-table snapshot > ge > scalar-scalar exact 1`] = `
+{
+  "ok": true,
+  "outputs": [
+    "logical[1×1]:zero=0",
+  ],
+}
+`;
+
+exports[`builtin transfer-table snapshot > ge > scalar-scalar opaque 1`] = `
+{
+  "ok": true,
+  "outputs": [
+    "logical[1×1]:nonneg",
+  ],
+}
+`;
+
+exports[`builtin transfer-table snapshot > ge > tensor3-scalar 1`] = `
+{
+  "errorClass": "TypeError",
+  "errorMessage": "'ge' arg 1 must be a scalar numeric (got Numeric)",
+  "ok": false,
+}
+`;
+
+exports[`builtin transfer-table snapshot > ge > tensor3-tensor3 1`] = `
+{
+  "errorClass": "TypeError",
+  "errorMessage": "'ge' arg 1 must be a scalar numeric (got Numeric)",
+  "ok": false,
+}
+`;
+
+exports[`builtin transfer-table snapshot > gt > scalar-scalar exact 1`] = `
+{
+  "ok": true,
+  "outputs": [
+    "logical[1×1]:zero=0",
+  ],
+}
+`;
+
+exports[`builtin transfer-table snapshot > gt > scalar-scalar opaque 1`] = `
+{
+  "ok": true,
+  "outputs": [
+    "logical[1×1]:nonneg",
+  ],
+}
+`;
+
+exports[`builtin transfer-table snapshot > gt > tensor3-scalar 1`] = `
+{
+  "errorClass": "TypeError",
+  "errorMessage": "'gt' arg 1 must be a scalar numeric (got Numeric)",
+  "ok": false,
+}
+`;
+
+exports[`builtin transfer-table snapshot > gt > tensor3-tensor3 1`] = `
+{
+  "errorClass": "TypeError",
+  "errorMessage": "'gt' arg 1 must be a scalar numeric (got Numeric)",
+  "ok": false,
+}
+`;
+
+exports[`builtin transfer-table snapshot > hypot > scalar-scalar exact 1`] = `
+{
+  "ok": true,
+  "outputs": [
+    "double[1×1]:positive=5",
+  ],
+}
+`;
+
+exports[`builtin transfer-table snapshot > hypot > scalar-scalar opaque 1`] = `
+{
+  "ok": true,
+  "outputs": [
+    "double[1×1]:nonneg",
+  ],
+}
+`;
+
+exports[`builtin transfer-table snapshot > hypot > tensor3-scalar 1`] = `
+{
+  "ok": true,
+  "outputs": [
+    "double[3×1]:nonneg",
+  ],
+}
+`;
+
+exports[`builtin transfer-table snapshot > hypot > tensor3-tensor3 1`] = `
+{
+  "ok": true,
+  "outputs": [
+    "double[3×1]:nonneg",
+  ],
+}
+`;
+
+exports[`builtin transfer-table snapshot > le > scalar-scalar exact 1`] = `
+{
+  "ok": true,
+  "outputs": [
+    "logical[1×1]:positive=1",
+  ],
+}
+`;
+
+exports[`builtin transfer-table snapshot > le > scalar-scalar opaque 1`] = `
+{
+  "ok": true,
+  "outputs": [
+    "logical[1×1]:nonneg",
+  ],
+}
+`;
+
+exports[`builtin transfer-table snapshot > le > tensor3-scalar 1`] = `
+{
+  "errorClass": "TypeError",
+  "errorMessage": "'le' arg 1 must be a scalar numeric (got Numeric)",
+  "ok": false,
+}
+`;
+
+exports[`builtin transfer-table snapshot > le > tensor3-tensor3 1`] = `
+{
+  "errorClass": "TypeError",
+  "errorMessage": "'le' arg 1 must be a scalar numeric (got Numeric)",
+  "ok": false,
+}
+`;
+
+exports[`builtin transfer-table snapshot > length > matrix default dim 1`] = `
+{
+  "ok": true,
+  "outputs": [
+    "double[1×1]:positive=4",
+  ],
+}
+`;
+
+exports[`builtin transfer-table snapshot > length > row vector 1`] = `
+{
+  "ok": true,
+  "outputs": [
+    "double[1×1]:positive=5",
+  ],
+}
+`;
+
+exports[`builtin transfer-table snapshot > length > scalar real 1`] = `
+{
+  "ok": true,
+  "outputs": [
+    "double[1×1]:positive=1",
+  ],
+}
+`;
+
+exports[`builtin transfer-table snapshot > lt > scalar-scalar exact 1`] = `
+{
+  "ok": true,
+  "outputs": [
+    "logical[1×1]:positive=1",
+  ],
+}
+`;
+
+exports[`builtin transfer-table snapshot > lt > scalar-scalar opaque 1`] = `
+{
+  "ok": true,
+  "outputs": [
+    "logical[1×1]:nonneg",
+  ],
+}
+`;
+
+exports[`builtin transfer-table snapshot > lt > tensor3-scalar 1`] = `
+{
+  "errorClass": "TypeError",
+  "errorMessage": "'lt' arg 1 must be a scalar numeric (got Numeric)",
+  "ok": false,
+}
+`;
+
+exports[`builtin transfer-table snapshot > lt > tensor3-tensor3 1`] = `
+{
+  "errorClass": "TypeError",
+  "errorMessage": "'lt' arg 1 must be a scalar numeric (got Numeric)",
+  "ok": false,
+}
+`;
+
+exports[`builtin transfer-table snapshot > max > matrix default dim 1`] = `
+{
+  "ok": true,
+  "outputs": [
+    "double[1×4]",
+  ],
+}
+`;
+
+exports[`builtin transfer-table snapshot > max > row vector 1`] = `
+{
+  "ok": true,
+  "outputs": [
+    "double[1×1]",
+  ],
+}
+`;
+
+exports[`builtin transfer-table snapshot > max > scalar real 1`] = `
+{
+  "ok": true,
+  "outputs": [
+    "double[1×1]:positive=7",
+  ],
+}
+`;
+
+exports[`builtin transfer-table snapshot > mean > matrix default dim 1`] = `
+{
+  "ok": true,
+  "outputs": [
+    "double[1×4]",
+  ],
+}
+`;
+
+exports[`builtin transfer-table snapshot > mean > row vector 1`] = `
+{
+  "ok": true,
+  "outputs": [
+    "double[1×1]",
+  ],
+}
+`;
+
+exports[`builtin transfer-table snapshot > mean > scalar real 1`] = `
+{
+  "ok": true,
+  "outputs": [
+    "double[1×1]:positive=7",
+  ],
+}
+`;
+
+exports[`builtin transfer-table snapshot > min > matrix default dim 1`] = `
+{
+  "ok": true,
+  "outputs": [
+    "double[1×4]",
+  ],
+}
+`;
+
+exports[`builtin transfer-table snapshot > min > row vector 1`] = `
+{
+  "ok": true,
+  "outputs": [
+    "double[1×1]",
+  ],
+}
+`;
+
+exports[`builtin transfer-table snapshot > min > scalar real 1`] = `
+{
+  "ok": true,
+  "outputs": [
+    "double[1×1]:positive=7",
+  ],
+}
+`;
+
+exports[`builtin transfer-table snapshot > minus > scalar-complex scalar 1`] = `
+{
+  "ok": true,
+  "outputs": [
+    "complex(double)[1×1]=(1+-1i)",
+  ],
+}
+`;
+
+exports[`builtin transfer-table snapshot > minus > scalar-scalar exact 1`] = `
+{
+  "ok": true,
+  "outputs": [
+    "double[1×1]:negative=-1",
+  ],
+}
+`;
+
+exports[`builtin transfer-table snapshot > minus > scalar-scalar opaque 1`] = `
+{
+  "ok": true,
+  "outputs": [
+    "double[1×1]",
+  ],
+}
+`;
+
+exports[`builtin transfer-table snapshot > minus > tensor-real tensor-complex 1`] = `
+{
+  "ok": true,
+  "outputs": [
+    "complex(double)[2×2]",
+  ],
+}
+`;
+
+exports[`builtin transfer-table snapshot > minus > tensor3-scalar 1`] = `
+{
+  "ok": true,
+  "outputs": [
+    "double[3×1]",
+  ],
+}
+`;
+
+exports[`builtin transfer-table snapshot > minus > tensor3-tensor3 1`] = `
+{
+  "ok": true,
+  "outputs": [
+    "double[3×1]",
+  ],
+}
+`;
+
+exports[`builtin transfer-table snapshot > mtimes > 3x4 * 4x2 1`] = `
+{
+  "ok": true,
+  "outputs": [
+    "double[3×2]",
+  ],
+}
+`;
+
+exports[`builtin transfer-table snapshot > mtimes > scalar * scalar 1`] = `
+{
+  "ok": true,
+  "outputs": [
+    "double[1×1]:positive=10",
+  ],
+}
+`;
+
+exports[`builtin transfer-table snapshot > ne > scalar-scalar exact 1`] = `
+{
+  "ok": true,
+  "outputs": [
+    "logical[1×1]:positive=1",
+  ],
+}
+`;
+
+exports[`builtin transfer-table snapshot > ne > scalar-scalar opaque 1`] = `
+{
+  "ok": true,
+  "outputs": [
+    "logical[1×1]:nonneg",
+  ],
+}
+`;
+
+exports[`builtin transfer-table snapshot > ne > tensor3-scalar 1`] = `
+{
+  "errorClass": "TypeError",
+  "errorMessage": "'ne' arg 1 must be a scalar numeric (got Numeric)",
+  "ok": false,
+}
+`;
+
+exports[`builtin transfer-table snapshot > ne > tensor3-tensor3 1`] = `
+{
+  "errorClass": "TypeError",
+  "errorMessage": "'ne' arg 1 must be a scalar numeric (got Numeric)",
+  "ok": false,
+}
+`;
+
+exports[`builtin transfer-table snapshot > not > scalar real 1`] = `
+{
+  "ok": true,
+  "outputs": [
+    "logical[1×1]:zero=0",
+  ],
+}
+`;
+
+exports[`builtin transfer-table snapshot > not > tensor real 1`] = `
+{
+  "ok": true,
+  "outputs": [
+    "logical[3]:nonneg",
+  ],
+}
+`;
+
+exports[`builtin transfer-table snapshot > numel > matrix default dim 1`] = `
+{
+  "ok": true,
+  "outputs": [
+    "double[1×1]:positive=12",
+  ],
+}
+`;
+
+exports[`builtin transfer-table snapshot > numel > row vector 1`] = `
+{
+  "ok": true,
+  "outputs": [
+    "double[1×1]:positive=5",
+  ],
+}
+`;
+
+exports[`builtin transfer-table snapshot > numel > scalar real 1`] = `
+{
+  "ok": true,
+  "outputs": [
+    "double[1×1]:positive=1",
+  ],
+}
+`;
+
+exports[`builtin transfer-table snapshot > ones > 1-arg scalar dim 1`] = `
+{
+  "ok": true,
+  "outputs": [
+    "double[4×4]:positive=[1, 1, 1, 1, 1, 1, 1, 1, …]",
+  ],
+}
+`;
+
+exports[`builtin transfer-table snapshot > ones > 2-arg row/col dims 1`] = `
+{
+  "ok": true,
+  "outputs": [
+    "double[3×4]:positive=[1, 1, 1, 1, 1, 1, 1, 1, …]",
+  ],
+}
+`;
+
+exports[`builtin transfer-table snapshot > plus > scalar-complex scalar 1`] = `
+{
+  "ok": true,
+  "outputs": [
+    "complex(double)[1×1]=(3+1i)",
+  ],
+}
+`;
+
+exports[`builtin transfer-table snapshot > plus > scalar-scalar exact 1`] = `
+{
+  "ok": true,
+  "outputs": [
+    "double[1×1]:positive=7",
+  ],
+}
+`;
+
+exports[`builtin transfer-table snapshot > plus > scalar-scalar opaque 1`] = `
+{
+  "ok": true,
+  "outputs": [
+    "double[1×1]",
+  ],
+}
+`;
+
+exports[`builtin transfer-table snapshot > plus > tensor-real tensor-complex 1`] = `
+{
+  "ok": true,
+  "outputs": [
+    "complex(double)[2×2]",
+  ],
+}
+`;
+
+exports[`builtin transfer-table snapshot > plus > tensor3-scalar 1`] = `
+{
+  "ok": true,
+  "outputs": [
+    "double[3×1]",
+  ],
+}
+`;
+
+exports[`builtin transfer-table snapshot > plus > tensor3-tensor3 1`] = `
+{
+  "ok": true,
+  "outputs": [
+    "double[3×1]",
+  ],
+}
+`;
+
+exports[`builtin transfer-table snapshot > prod > matrix default dim 1`] = `
+{
+  "ok": true,
+  "outputs": [
+    "double[1×4]",
+  ],
+}
+`;
+
+exports[`builtin transfer-table snapshot > prod > row vector 1`] = `
+{
+  "ok": true,
+  "outputs": [
+    "double[1×1]",
+  ],
+}
+`;
+
+exports[`builtin transfer-table snapshot > prod > scalar real 1`] = `
+{
+  "ok": true,
+  "outputs": [
+    "double[1×1]:positive=7",
+  ],
+}
+`;
+
+exports[`builtin transfer-table snapshot > rdivide > scalar-complex scalar 1`] = `
+{
+  "ok": true,
+  "outputs": [
+    "complex(double)[1×1]=(1+-1i)",
+  ],
+}
+`;
+
+exports[`builtin transfer-table snapshot > rdivide > scalar-scalar exact 1`] = `
+{
+  "ok": true,
+  "outputs": [
+    "double[1×1]:positive=0.75",
+  ],
+}
+`;
+
+exports[`builtin transfer-table snapshot > rdivide > scalar-scalar opaque 1`] = `
+{
+  "ok": true,
+  "outputs": [
+    "double[1×1]",
+  ],
+}
+`;
+
+exports[`builtin transfer-table snapshot > rdivide > tensor-real tensor-complex 1`] = `
+{
+  "ok": true,
+  "outputs": [
+    "complex(double)[2×2]",
+  ],
+}
+`;
+
+exports[`builtin transfer-table snapshot > rdivide > tensor3-scalar 1`] = `
+{
+  "ok": true,
+  "outputs": [
+    "double[3×1]",
+  ],
+}
+`;
+
+exports[`builtin transfer-table snapshot > rdivide > tensor3-tensor3 1`] = `
+{
+  "ok": true,
+  "outputs": [
+    "double[3×1]",
+  ],
+}
+`;
+
+exports[`builtin transfer-table snapshot > sin > scalar opaque 1`] = `
+{
+  "ok": true,
+  "outputs": [
+    "double[1×1]",
+  ],
+}
+`;
+
+exports[`builtin transfer-table snapshot > sin > scalar positive exact 1`] = `
+{
+  "ok": true,
+  "outputs": [
+    "double[1×1]:positive=0.8414709848078965",
+  ],
+}
+`;
+
+exports[`builtin transfer-table snapshot > sin > tensor nonneg 1`] = `
+{
+  "ok": true,
+  "outputs": [
+    "double[4]",
+  ],
+}
+`;
+
+exports[`builtin transfer-table snapshot > sqrt > scalar opaque 1`] = `
+{
+  "errorClass": "TypeError",
+  "errorMessage": "'sqrt' of input that may be negative is not yet supported for real-typed input (would produce a complex result). Either guard upstream or make the input complex (e.g. 'sqrt(x + 0i)').",
+  "ok": false,
+}
+`;
+
+exports[`builtin transfer-table snapshot > sqrt > scalar positive exact 1`] = `
+{
+  "ok": true,
+  "outputs": [
+    "double[1×1]:positive=1",
+  ],
+}
+`;
+
+exports[`builtin transfer-table snapshot > sqrt > tensor nonneg 1`] = `
+{
+  "ok": true,
+  "outputs": [
+    "double[4]:nonneg",
+  ],
+}
+`;
+
+exports[`builtin transfer-table snapshot > sum > matrix default dim 1`] = `
+{
+  "ok": true,
+  "outputs": [
+    "double[1×4]",
+  ],
+}
+`;
+
+exports[`builtin transfer-table snapshot > sum > row vector 1`] = `
+{
+  "ok": true,
+  "outputs": [
+    "double[1×1]",
+  ],
+}
+`;
+
+exports[`builtin transfer-table snapshot > sum > scalar real 1`] = `
+{
+  "ok": true,
+  "outputs": [
+    "double[1×1]:positive=7",
+  ],
+}
+`;
+
+exports[`builtin transfer-table snapshot > times > scalar-complex scalar 1`] = `
+{
+  "ok": true,
+  "outputs": [
+    "complex(double)[1×1]=(2+2i)",
+  ],
+}
+`;
+
+exports[`builtin transfer-table snapshot > times > scalar-scalar exact 1`] = `
+{
+  "ok": true,
+  "outputs": [
+    "double[1×1]:positive=12",
+  ],
+}
+`;
+
+exports[`builtin transfer-table snapshot > times > scalar-scalar opaque 1`] = `
+{
+  "ok": true,
+  "outputs": [
+    "double[1×1]",
+  ],
+}
+`;
+
+exports[`builtin transfer-table snapshot > times > tensor-real tensor-complex 1`] = `
+{
+  "ok": true,
+  "outputs": [
+    "complex(double)[2×2]",
+  ],
+}
+`;
+
+exports[`builtin transfer-table snapshot > times > tensor3-scalar 1`] = `
+{
+  "ok": true,
+  "outputs": [
+    "double[3×1]",
+  ],
+}
+`;
+
+exports[`builtin transfer-table snapshot > times > tensor3-tensor3 1`] = `
+{
+  "ok": true,
+  "outputs": [
+    "double[3×1]",
+  ],
+}
+`;
+
+exports[`builtin transfer-table snapshot > uminus > scalar complex 1`] = `
+{
+  "ok": true,
+  "outputs": [
+    "complex(double)[1×1]=(-1+-1i)",
+  ],
+}
+`;
+
+exports[`builtin transfer-table snapshot > uminus > scalar positive exact 1`] = `
+{
+  "ok": true,
+  "outputs": [
+    "double[1×1]:negative=-7",
+  ],
+}
+`;
+
+exports[`builtin transfer-table snapshot > uminus > tensor real 1`] = `
+{
+  "ok": true,
+  "outputs": [
+    "double[3×3]",
+  ],
+}
+`;
+
+exports[`builtin transfer-table snapshot > zeros > 1-arg scalar dim 1`] = `
+{
+  "ok": true,
+  "outputs": [
+    "double[4×4]:zero=[0, 0, 0, 0, 0, 0, 0, 0, …]",
+  ],
+}
+`;
+
+exports[`builtin transfer-table snapshot > zeros > 2-arg row/col dims 1`] = `
+{
+  "ok": true,
+  "outputs": [
+    "double[3×4]:zero=[0, 0, 0, 0, 0, 0, 0, 0, …]",
+  ],
+}
+`;
