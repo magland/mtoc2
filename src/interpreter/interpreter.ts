@@ -483,11 +483,19 @@ export class Interpreter {
       case "Range": {
         // Range-as-value (not for-driver) → build a 1×N row tensor
         // via the shared runtime snippet so cross-runner output
-        // matches numbl / c-aot byte-for-byte.
+        // matches numbl / c-aot byte-for-byte. Length-1 collapse
+        // mirrors `lowerRangeAsValue` in the c-aot path: a
+        // single-element range is the scalar `start` so downstream
+        // arithmetic (`(3:3) * 4`) and disp formatting agree.
         const start = toScalarNumber(this.evalExpr(e.start));
         const end = toScalarNumber(this.evalExpr(e.end));
         const step = e.step ? toScalarNumber(this.evalExpr(e.step)) : 1;
-        return jsMakeRange(start, step, end) as unknown as RuntimeValue;
+        const t = jsMakeRange(start, step, end) as unknown as Extract<
+          RuntimeValue,
+          { mtoc2Tag: "tensor" }
+        >;
+        if (t.data.length === 1) return t.data[0];
+        return t;
       }
 
       case "Tensor": {
