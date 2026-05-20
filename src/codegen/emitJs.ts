@@ -49,6 +49,7 @@ import type {
   MultiAssignCall,
 } from "../lowering/ir.js";
 import { UnsupportedConstruct } from "../lowering/errors.js";
+import { isColVecTy, isRowVecTy } from "../lowering/types.js";
 import { requireEmitJs } from "../builtins/registry.js";
 import {
   lookupBuiltin,
@@ -558,28 +559,173 @@ function emitIndexSliceJs(
       e.span
     );
   }
-  // Minimum support for bracket_concat: single-slot Colon (the `v(:)`
-  // / `M(:)` linearization). Other slot kinds (Range, Scalar mix,
-  // IndexVec, LogicalMask, multi-slot per-axis) will land alongside
-  // the broader Phase 5 retrofit.
-  if (e.index.length !== 1 || e.index[0].kind !== "Colon") {
+  useRuntimeByName(state, "mtoc2_tensor_alloc_nd");
+  const baseName = e.base.cName;
+
+  // Single-slot linear form. Covers `v(:)`, `v(a:b)`, `v(idx_vec)`,
+  // `v(mask)`. Multi-slot Scalar single-slot reads route through
+  // IndexLoad, not IndexSlice, so we don't see them here.
+  if (e.index.length === 1) {
+    const slot = e.index[0];
+    const baseNum = e.base.ty.kind === "Numeric" ? e.base.ty : undefined;
+    const isColVec = baseNum !== undefined && isColVecTy(baseNum);
+    const isRowVec = baseNum !== undefined && isRowVecTy(baseNum);
+    if (slot.kind === "Colon") {
+      return (
+        `(() => { ` +
+        `const _mtoc2_n = ${baseName}.data.length; ` +
+        `const _mtoc2_t = mtoc2_tensor_alloc_nd(2, [_mtoc2_n, 1]); ` +
+        `for (let _mtoc2_k = 0; _mtoc2_k < _mtoc2_n; _mtoc2_k++) ` +
+        `_mtoc2_t.data[_mtoc2_k] = ${baseName}.data[_mtoc2_k]; ` +
+        `return _mtoc2_t; ` +
+        `})()`
+      );
+    }
+    if (slot.kind === "Range") {
+      useRuntimeByName(state, "mtoc2_loop_count");
+      useRuntimeByName(state, "mtoc2_range_value");
+      const s = emitExpr(slot.start, state);
+      const st = emitExpr(slot.step, state);
+      const en = emitExpr(slot.end, state);
+      const rows = isColVec ? "_mtoc2_n" : "1";
+      const cols = isColVec ? "1" : "_mtoc2_n";
+      return (
+        `(() => { ` +
+        `const _mtoc2_s = ${s}; const _mtoc2_e = ${en}; const _mtoc2_st = ${st}; ` +
+        `const _mtoc2_n = mtoc2_loop_count(_mtoc2_s, _mtoc2_e, _mtoc2_st); ` +
+        `const _mtoc2_t = mtoc2_tensor_alloc_nd(2, [${rows}, ${cols}]); ` +
+        `for (let _mtoc2_k = 0; _mtoc2_k < _mtoc2_n; _mtoc2_k++) { ` +
+        `const _mtoc2_v = mtoc2_range_value(_mtoc2_s, _mtoc2_st, _mtoc2_e, _mtoc2_n, _mtoc2_k); ` +
+        `_mtoc2_t.data[_mtoc2_k] = ${baseName}.data[Math.trunc(_mtoc2_v) - 1]; ` +
+        `} ` +
+        `return _mtoc2_t; ` +
+        `})()`
+      );
+    }
+    if (slot.kind === "Scalar") {
+      // Single-slot Scalar should have routed to IndexLoad; this is
+      // a safety net.
+      throw new UnsupportedConstruct(
+        `emitJs internal: single-slot Scalar IndexSlice should route to IndexLoad`,
+        e.span
+      );
+    }
+    if (slot.kind === "IndexVec") {
+      const idx = emitExpr(slot.expr, state);
+      const rows = isRowVec ? "1" : "_mtoc2_n";
+      const cols = isRowVec ? "_mtoc2_n" : "1";
+      return (
+        `(() => { ` +
+        `const _mtoc2_ix = ${idx}; ` +
+        `const _mtoc2_ixd = _mtoc2_ix.mtoc2Tag === "tensor" ? _mtoc2_ix.data : [_mtoc2_ix]; ` +
+        `const _mtoc2_n = _mtoc2_ixd.length; ` +
+        `const _mtoc2_t = mtoc2_tensor_alloc_nd(2, [${rows}, ${cols}]); ` +
+        `for (let _mtoc2_k = 0; _mtoc2_k < _mtoc2_n; _mtoc2_k++) ` +
+        `_mtoc2_t.data[_mtoc2_k] = ${baseName}.data[Math.trunc(_mtoc2_ixd[_mtoc2_k]) - 1]; ` +
+        `return _mtoc2_t; ` +
+        `})()`
+      );
+    }
+    // LogicalMask — wire when needed.
     throw new UnsupportedConstruct(
-      `emitJs: IndexSlice slot pattern not yet wired ` +
-        `(only single-slot ':' is supported so far)`,
+      `emitJs: IndexSlice single-slot '${slot.kind}' not yet wired`,
       e.span
     );
   }
-  useRuntimeByName(state, "mtoc2_tensor_alloc_nd");
-  const baseName = e.base.cName;
-  return (
-    `(() => { ` +
-    `const _mtoc2_n = ${baseName}.data.length; ` +
-    `const _mtoc2_t = mtoc2_tensor_alloc_nd(2, [_mtoc2_n, 1]); ` +
-    `for (let _mtoc2_k = 0; _mtoc2_k < _mtoc2_n; _mtoc2_k++) ` +
-    `_mtoc2_t.data[_mtoc2_k] = ${baseName}.data[_mtoc2_k]; ` +
-    `return _mtoc2_t; ` +
-    `})()`
+
+  // Multi-slot per-axis form. Each slot maps to a per-axis count and
+  // a per-iteration 1-based source-index expression. The result is
+  // allocated with the slot counts as its dims (rank-2 floor; trailing
+  // exact-1 axes already collapsed by the lowerer's transfer).
+  const ndim = e.index.length;
+  const setup: string[] = [];
+  const idxFns: string[] = [];
+  const dims: string[] = [];
+  for (let i = 0; i < ndim; i++) {
+    const slot = e.index[i];
+    if (slot.kind === "Colon") {
+      setup.push(`const _mtoc2_n_${i} = ${baseName}.shape[${i}] ?? 1;`);
+      dims.push(`_mtoc2_n_${i}`);
+      idxFns.push(`(_mtoc2_k_${i} + 1)`);
+    } else if (slot.kind === "Range") {
+      useRuntimeByName(state, "mtoc2_loop_count");
+      useRuntimeByName(state, "mtoc2_range_value");
+      const s = emitExpr(slot.start, state);
+      const st = emitExpr(slot.step, state);
+      const en = emitExpr(slot.end, state);
+      setup.push(
+        `const _mtoc2_s_${i} = ${s}, _mtoc2_e_${i} = ${en}, _mtoc2_st_${i} = ${st};`
+      );
+      setup.push(
+        `const _mtoc2_n_${i} = mtoc2_loop_count(_mtoc2_s_${i}, _mtoc2_e_${i}, _mtoc2_st_${i});`
+      );
+      dims.push(`_mtoc2_n_${i}`);
+      idxFns.push(
+        `mtoc2_range_value(_mtoc2_s_${i}, _mtoc2_st_${i}, _mtoc2_e_${i}, _mtoc2_n_${i}, _mtoc2_k_${i})`
+      );
+    } else if (slot.kind === "Scalar") {
+      const v = emitExpr(slot.expr, state);
+      setup.push(`const _mtoc2_s_${i} = ${v};`);
+      setup.push(`const _mtoc2_n_${i} = 1;`);
+      dims.push(`1`);
+      idxFns.push(`_mtoc2_s_${i}`);
+    } else if (slot.kind === "IndexVec") {
+      const idxE = emitExpr(slot.expr, state);
+      setup.push(
+        `const _mtoc2_ix_${i} = ${idxE}; ` +
+          `const _mtoc2_ixd_${i} = _mtoc2_ix_${i}.mtoc2Tag === "tensor" ? _mtoc2_ix_${i}.data : [_mtoc2_ix_${i}];`
+      );
+      setup.push(`const _mtoc2_n_${i} = _mtoc2_ixd_${i}.length;`);
+      dims.push(`_mtoc2_n_${i}`);
+      idxFns.push(`_mtoc2_ixd_${i}[_mtoc2_k_${i}]`);
+    } else {
+      throw new UnsupportedConstruct(
+        `emitJs: IndexSlice multi-slot '${slot.kind}' not yet wired`,
+        e.span
+      );
+    }
+  }
+  // Pad to rank-2 floor with trailing 1s in the result shape.
+  const resultDims = dims.slice();
+  while (resultDims.length < 2) resultDims.push("1");
+
+  const lines: string[] = [];
+  for (const s of setup) lines.push(s);
+  lines.push(
+    `const _mtoc2_t = mtoc2_tensor_alloc_nd(${resultDims.length}, [${resultDims.join(", ")}]);`
   );
+  for (let i = ndim - 1; i >= 0; i--) {
+    lines.push(
+      `for (let _mtoc2_k_${i} = 0; _mtoc2_k_${i} < _mtoc2_n_${i}; _mtoc2_k_${i}++) {`
+    );
+  }
+  // Column-major source offset: sum_i (idxFn[i] - 1) * stride[i] where
+  // stride[i] = product of base.shape[0..i).
+  const srcTerms: string[] = [];
+  for (let i = 0; i < ndim; i++) {
+    const strideParts: string[] = [];
+    for (let j = 0; j < i; j++) {
+      strideParts.push(`(${baseName}.shape[${j}] ?? 1)`);
+    }
+    const stride = strideParts.length === 0 ? "1" : strideParts.join(" * ");
+    srcTerms.push(`(Math.trunc(${idxFns[i]}) - 1) * ${stride}`);
+  }
+  // Column-major destination offset using the result's own dims.
+  const dstTerms: string[] = [];
+  for (let i = 0; i < ndim; i++) {
+    const strideParts: string[] = [];
+    for (let j = 0; j < i; j++) strideParts.push(dims[j]);
+    const stride = strideParts.length === 0 ? "1" : strideParts.join(" * ");
+    dstTerms.push(`_mtoc2_k_${i} * ${stride}`);
+  }
+  lines.push(`const _mtoc2_src_off = ${srcTerms.join(" + ")};`);
+  lines.push(`const _mtoc2_dst_off = ${dstTerms.join(" + ")};`);
+  lines.push(
+    `_mtoc2_t.data[_mtoc2_dst_off] = ${baseName}.data[_mtoc2_src_off];`
+  );
+  for (let i = ndim - 1; i >= 0; i--) lines.push(`}`);
+  lines.push(`return _mtoc2_t;`);
+  return `(() => { ${lines.join(" ")} })()`;
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────
