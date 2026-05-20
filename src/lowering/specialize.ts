@@ -319,19 +319,38 @@ export function specializeUserFunction(
     // body produced differ from the seed, the recursive Call IR
     // nodes built in pass 1 carry the (now-stale) seed type. Update
     // the placeholder with the actual outputs and re-lower the body
-    // so the recursive Call IR picks up the refined type. Capped at
-    // one retry — a function whose output type still hasn't
-    // stabilized after two passes is either mutually recursive in a
-    // pathological way or has a genuinely unknowable output type;
-    // either way, the second pass's result is what we ship.
+    // so the recursive Call IR picks up the refined type. One retry
+    // suffices for the common recursion shapes (`factorial`, `fib`),
+    // where the output kind matches the input kind. For other
+    // shapes — e.g. tensor-in / struct-out — the second pass's
+    // recursive Call IR might still not match its body's final
+    // output type. Rather than silently ship a third-pass-stale
+    // result, raise so the user gets a clear translation-time error
+    // instead of a quietly-wrong specialization.
+    let seed = seedOutputs;
     if (
       this.recursiveSpecsConsumed.has(key) &&
-      !sameOutputTypes(seedOutputs, outputTypes)
+      !sameOutputTypes(seed, outputTypes)
     ) {
       placeholder.outputTypes = outputTypes;
+      seed = outputTypes;
       const second = lowerBodyOnce();
       body = second.body;
       outputTypes = second.outputTypes;
+      if (!sameOutputTypes(seed, outputTypes)) {
+        throw new TypeError(
+          `function '${decl.name}': recursive output type did not stabilize ` +
+            `after two lowering passes. First pass produced ` +
+            `[${seedOutputs.map(canonicalizeType).join(", ")}], second pass ` +
+            `produced [${outputTypes.map(canonicalizeType).join(", ")}]. ` +
+            `This usually means the output type genuinely depends on a ` +
+            `runtime value the lowerer can't resolve, or that the function ` +
+            `is mutually recursive in a shape mtoc2 can't yet handle. ` +
+            `Try annotating the output via an early assignment, or avoid ` +
+            `recursion for this call.`,
+          errSpan
+        );
+      }
     }
 
     const out: IRFunc = {
