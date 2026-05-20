@@ -109,6 +109,7 @@ type Mode = "numbl" | "mtoc2-interpreter" | "mtoc2-js-aot" | "mtoc2-c-aot";
 
 const ALL_MODES: ReadonlyArray<Mode> = [
   "numbl",
+  "mtoc2-interpreter",
   "mtoc2-js-aot",
   "mtoc2-c-aot",
 ];
