@@ -26,6 +26,8 @@ import {
 } from "../../../lowering/types.js";
 import type { Builtin } from "../../registry.js";
 import { exactDouble, exactRealArray, exactComplex } from "../_shared.js";
+import { mtoc2_tensor_not as jsTensorNot } from "../../runtime/snippets.gen.js";
+import type { RuntimeTensor } from "../../../runtime/value.js";
 
 function logicalTensor(
   dims: DimInfo[],
@@ -119,11 +121,10 @@ export const notBuiltin: Builtin = {
     // is what numbl's logical layer reads as.
     return `((${argsC[0]}) == 0.0 ? 1.0 : 0.0)`;
   },
-  emitJs({ argsJs, argTypes }) {
+  emitJs({ argsJs, argTypes, useRuntime }) {
     if (isMultiElement(argTypes[0])) {
-      throw new UnsupportedConstruct(
-        `'not' tensor emitJs not yet wired (Phase 5)`
-      );
+      useRuntime("mtoc2_tensor_logical_real");
+      return `mtoc2_tensor_not(${argsJs[0]})`;
     }
     const a = argTypes[0] as NumericType;
     if (a.isComplex) {
@@ -135,9 +136,13 @@ export const notBuiltin: Builtin = {
   },
   call({ args, argTypes }) {
     if (isMultiElement(argTypes[0])) {
-      throw new UnsupportedConstruct(
-        `'not' tensor 'call' not yet wired (Phase 5)`
-      );
+      const a = argTypes[0] as NumericType;
+      if (a.isComplex) {
+        throw new UnsupportedConstruct(
+          `'not' complex 'call' not yet wired (Phase 5)`
+        );
+      }
+      return [jsTensorNot(args[0] as RuntimeTensor) as unknown as RuntimeTensor];
     }
     const a = argTypes[0] as NumericType;
     if (a.isComplex) {
