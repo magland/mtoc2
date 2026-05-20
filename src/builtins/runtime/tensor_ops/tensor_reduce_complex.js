@@ -74,17 +74,17 @@ const cMeanFinalize = (a, n) =>
   n === 0 ? { re: NaN, im: NaN } : { re: a.re / n, im: a.im / n };
 
 export const mtoc2_sum_complex_all = (t) =>
-  complexAccumAll(t, sumInit, sumAccum, idFinalize);
+  complexAccumAll(t, cSumInit, cSumAccum, cIdFinalize);
 export const mtoc2_sum_complex_dim = (t, d) =>
-  complexAccumDim(t, d, sumInit, sumAccum, idFinalize);
+  complexAccumDim(t, d, cSumInit, cSumAccum, cIdFinalize);
 export const mtoc2_prod_complex_all = (t) =>
-  complexAccumAll(t, prodInit, prodAccum, idFinalize);
+  complexAccumAll(t, cProdInit, cProdAccum, cIdFinalize);
 export const mtoc2_prod_complex_dim = (t, d) =>
-  complexAccumDim(t, d, prodInit, prodAccum, idFinalize);
+  complexAccumDim(t, d, cProdInit, cProdAccum, cIdFinalize);
 export const mtoc2_mean_complex_all = (t) =>
-  complexAccumAll(t, sumInit, sumAccum, meanFinalize);
+  complexAccumAll(t, cSumInit, cSumAccum, cMeanFinalize);
 export const mtoc2_mean_complex_dim = (t, d) =>
-  complexAccumDim(t, d, sumInit, sumAccum, meanFinalize);
+  complexAccumDim(t, d, cSumInit, cSumAccum, cMeanFinalize);
 
 // Min / max — magnitude compare with atan2 tiebreak (numbl's
 // complexIsBetter). Skip NaN-lane elements; result is complex.
@@ -218,9 +218,9 @@ function complexLogicalDim(t, dim, emptyResult, shortPredicate) {
 
 const cAnyShort = (x) => x;
 const cAllShort = (x) => !x;
-export const mtoc2_any_complex_all = (t) => complexLogicalAll(t, 0, anyShort);
+export const mtoc2_any_complex_all = (t) => complexLogicalAll(t, 0, cAnyShort);
 export const mtoc2_any_complex_dim = (t, d) =>
-  complexLogicalDim(t, d, 0, anyShort);
-export const mtoc2_all_complex_all = (t) => complexLogicalAll(t, 1, allShort);
+  complexLogicalDim(t, d, 0, cAnyShort);
+export const mtoc2_all_complex_all = (t) => complexLogicalAll(t, 1, cAllShort);
 export const mtoc2_all_complex_dim = (t, d) =>
-  complexLogicalDim(t, d, 1, allShort);
+  complexLogicalDim(t, d, 1, cAllShort);
