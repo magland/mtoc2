@@ -11,6 +11,12 @@ test_size_in_zeros();
 test_size_in_ones();
 test_size_with_concat();
 
+test_size_multi_2();
+test_size_multi_3();
+test_size_multi_fewer();
+test_size_multi_more();
+test_size_multi_after_opaque();
+
 function test_size_scalar()
   disp(size(5));
   disp(size(0));
@@ -86,4 +92,53 @@ function test_size_with_concat()
   szx = size(xs);
   disp(szx);
   disp([1, szx]);
+end
+
+% -------- multi-output size --------
+% `[d1, d2, ...] = size(A)` returns one scalar per output slot. Per
+% numbl semantics (verified by cross-runner), trailing dims are NOT
+% collapsed into the last slot — they stay separate, and overflow
+% slots get 1. This differs from MATLAB but mtoc2 follows numbl.
+
+function test_size_multi_2()
+  A = [1 2 3; 4 5 6];
+  [r, c] = size(A);
+  disp(r);
+  disp(c);
+end
+
+function test_size_multi_3()
+  A = zeros(2, 3, 4);
+  [r, c, p] = size(A);
+  disp(r);
+  disp(c);
+  disp(p);
+end
+
+function test_size_multi_fewer()
+  % nargout < ndim: numbl returns the first nargout dims; trailing
+  % dims are dropped (not collapsed).
+  A = zeros(2, 3, 4);
+  [r, c] = size(A);
+  disp(r);
+  disp(c);
+end
+
+function test_size_multi_more()
+  % nargout > ndim: overflow slots get 1.
+  A = [1 2 3; 4 5 6];
+  [r, c, p, q] = size(A);
+  disp(r);
+  disp(c);
+  disp(p);
+  disp(q);
+end
+
+function test_size_multi_after_opaque()
+  % Opaque base — exact-shape info is gone but dims-info survives.
+  A = zeros(3, 5);
+  %!numbl:opaque A
+  [r, c] = size(A);
+  disp(r);
+  disp(c);
 end
