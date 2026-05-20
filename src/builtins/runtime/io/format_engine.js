@@ -83,6 +83,11 @@ function applyWidth(spec, str) {
 }
 
 export function mtoc2_sprintf_format(fmt, args) {
+  // Char literals (`'foo'`) come through wrapped as
+  // `{mtoc2Tag:"char", value:"..."}` to match the interpreter's
+  // RuntimeValue convention; unwrap so the format walker indexes
+  // a plain JS string.
+  if (isChar(fmt)) fmt = fmt.value;
   // Flatten args column-major (tensors expand element-by-element).
   const flat = [];
   for (const arg of args) {
