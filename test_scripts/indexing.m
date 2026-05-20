@@ -75,6 +75,10 @@ test_noninteger_indexvec();
 test_noninteger_range_index();
 test_noninteger_indexed_write();
 
+test_range_step_unary_minus();
+test_range_step_constant_expr();
+test_range_step_write_side();
+
 % -------- scalar index --------
 
 function test_index_read_2d()
@@ -676,4 +680,35 @@ function test_noninteger_indexed_write()
   a(2.5) = 100;       % writes element 3
   a(1.4) = 50;        % writes element 1
   disp(a);
+end
+
+% -------- range steps that aren't a bare NumLit --------
+% The parser represents `-1` as `Unary(Minus, NumLit(1))`, not
+% `NumLit(-1)`. The lowerer accepts any range-step expression whose
+% type carries a compile-time-known exact value, so common idioms
+% like `a(end:-1:1)` work. Locks in single-slot and per-axis, read
+% and write sides.
+
+function test_range_step_unary_minus()
+  a = [10 20 30 40 50];
+  disp(a(5:-1:1));
+  disp(a(end:-1:1));
+  M = [1 2 3; 4 5 6; 7 8 9];
+  disp(M(3:-1:1, :));     % reverse rows
+  disp(M(:, end:-1:1));   % reverse cols via end
+end
+
+function test_range_step_constant_expr()
+  a = 1:10;
+  disp(a(1:(1+1):end));    % step = 2 from constant expression
+  disp(a(end:-(1+1):1));   % step = -2 from unary minus + parens
+end
+
+function test_range_step_write_side()
+  b = zeros(1, 6);
+  b(6:-1:1) = [10 20 30 40 50 60];
+  disp(b);
+  c = zeros(2, 4);
+  c(:, end:-1:1) = [1 2 3 4; 5 6 7 8];
+  disp(c);
 end

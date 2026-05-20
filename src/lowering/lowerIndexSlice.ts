@@ -305,14 +305,42 @@ export function lowerSliceArg(
       arg.step?.span ?? arg.span
     );
   }
-  // Index-slot ranges require a NumLit step so codegen can derive the
-  // loop count + source-index arithmetic at compile time.
+  // Index-slot ranges require a compile-time-known step so codegen can
+  // derive the loop count + source-index arithmetic. A bare NumLit
+  // (`1:5:end`) is the common case; anything else is accepted as long
+  // as the lowered expression's type carries an `exact` numeric value
+  // — covers `1:-1:end` (parsed as `Unary(Minus, NumLit(1))`),
+  // constant folds (`1:(2+1):end`), and exact-tracked variables
+  // (`s = 2; a(1:s:end)`).
   if (step.kind !== "NumLit") {
-    throw new UnsupportedConstruct(
-      `range step in an index expression must be a numeric literal ` +
-        `(got expression)`,
-      arg.step?.span ?? arg.span
-    );
+    const exactStep =
+      step.ty.kind === "Numeric" && typeof step.ty.exact === "number"
+        ? step.ty.exact
+        : undefined;
+    if (exactStep === undefined) {
+      throw new UnsupportedConstruct(
+        `range step in an index expression must be a compile-time-known ` +
+          `numeric value (got expression with unknown value)`,
+        arg.step?.span ?? arg.span
+      );
+    }
+    step = {
+      kind: "NumLit",
+      value: exactStep,
+      ty: {
+        kind: "Numeric",
+        elem: "double",
+        isComplex: false,
+        dims: [
+          { kind: "exact", value: 1 },
+          { kind: "exact", value: 1 },
+        ],
+        shape: [1, 1],
+        sign: exactStep > 0 ? "positive" : exactStep < 0 ? "negative" : "zero",
+        exact: exactStep,
+      },
+      span: arg.step?.span ?? arg.span,
+    };
   }
   if (step.value === 0) {
     throw new UnsupportedConstruct(
