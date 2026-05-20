@@ -98,13 +98,16 @@ inventory by example. Highlights:
   emitting one JSON record per call (real-time consumable by a
   numbl plot viewer).
 
-Several features still get explicit rejection: logical-mask indexing
-(`a(mask)`), vector-of-indices writes (`a(idx_vec) = rhs`),
-member-rooted index writes (`obj.f(i) = rhs`), indexed delete
-(`a(2:5) = []`), char arithmetic (`'A' + 1`), `strcmp`, builtin
-handles (`@disp`), `private/` directories, `import` statements, and
-`.mtoc2.js` user functions with `cSources`. Expanding scope is
-gated by the cross-runner.
+Several features still get explicit rejection: per-axis logical-mask
+writes (`M(:, mask) = rhs` — the linear form `a(mask) = rhs` works),
+vector-of-indices writes (`a(idx_vec) = rhs`), member-rooted index
+writes (`obj.f(i) = rhs`), indexed delete (`a(2:5) = []`), char
+arithmetic (`'A' + 1`), `strcmp`, builtin handles (`@disp`),
+`private/` directories, and `import` statements. `.mtoc2.js` user
+functions that declare `cSources` work via `mtoc2 run` but not via
+the `translate` subcommand (which produces a single C string and
+can't represent sibling C files). Expanding scope is gated by the
+cross-runner.
 
 Coverage parity across backends is uneven today — c-aot is the most
 complete, js-aot and the interpreter have gaps documented in
