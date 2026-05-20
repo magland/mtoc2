@@ -13,7 +13,7 @@ import {
 import { mtoc2_cdiv } from "../system/cdiv.js";
 
 function cLaneOf(t, idx) {
-  return { re: t.data[idx], im: t.imag[idx] };
+  return { re: t.data[idx], im: t.imag !== undefined ? t.imag[idx] : 0 };
 }
 
 function cTtKernel(a, b, fn) {

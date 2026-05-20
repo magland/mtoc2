@@ -177,10 +177,14 @@ export function isTruthy(v: RuntimeValue): boolean {
   if (typeof v === "boolean") return v;
   if (typeof v === "string") return v.length > 0;
   if (isChar(v)) return v.value.length > 0;
+  if (isComplexValue(v)) return v.re !== 0 || v.im !== 0;
   if (isTensor(v)) {
     if (v.data.length === 0) return false;
+    const im = v.imag;
     for (let i = 0; i < v.data.length; i++) {
-      if (v.data[i] === 0) return false;
+      const reZero = v.data[i] === 0;
+      const imZero = im === undefined || im[i] === 0;
+      if (reZero && imZero) return false;
     }
     return true;
   }

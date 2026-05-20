@@ -975,12 +975,18 @@ function makeJsUseRuntime(
 
 /** Wrap a cond expression with the truthiness conversion that matches
  *  MATLAB's scalar-only short-circuit semantics — `cond !== 0` for
- *  numerics, otherwise direct (booleans, …). The minimal subset takes
- *  the easy path: trust the cond expression to evaluate as a JS
- *  truthy value. Complex / tensor / string conds will need explicit
- *  truthiness shims, which arrive when those types land in emitJs. */
+ *  numerics, otherwise direct (booleans, …). Real numeric scalars
+ *  fall through to JS truthiness (a `0` is falsy, anything else is
+ *  truthy). Complex scalars route through `mtoc2_cnonzero` — a
+ *  `{re: 0, im: 0}` object is "truthy" in JS as a non-null reference,
+ *  which would loop forever in `while (z)`. */
 function truthy(e: IRExpr, state: RuntimeState): string {
-  return emitExpr(e, state);
+  const expr = emitExpr(e, state);
+  if (e.ty.kind === "Numeric" && e.ty.isComplex) {
+    useRuntimeByName(state, "mtoc2_cscalar");
+    return `mtoc2_cnonzero(${expr})`;
+  }
+  return expr;
 }
 
 /** Walk every Assign / MultiAssignCall in `stmts` and return the

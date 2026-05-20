@@ -826,8 +826,13 @@ export function reductionEmitJs(spec: {
 }): Builtin["emitJs"] {
   return ({ argsJs, argTypes, useRuntime }) => {
     if (spec.dimArgIndex === 2 && argTypes.length === 2) {
+      // MATLAB / numbl 2-arg min/max: NaN compares as "missing", so
+      // `min(NaN, 4)` returns 4 (the non-NaN). JS `Math.min(NaN, 4)`
+      // is NaN. Use an explicit NaN-skip wrapper instead.
       const fn = spec.name === "max" ? "Math.max" : "Math.min";
-      return `${fn}(${argsJs[0]}, ${argsJs[1]})`;
+      const a = argsJs[0];
+      const b = argsJs[1];
+      return `(((_a, _b) => isNaN(_a) ? _b : isNaN(_b) ? _a : ${fn}(_a, _b))(${a}, ${b}))`;
     }
     const inputT = argTypes[0];
     if (!isNumeric(inputT)) {
@@ -904,6 +909,10 @@ export function reductionCall(spec: {
     if (spec.dimArgIndex === 2 && argTypes.length === 2) {
       const av = typeof args[0] === "number" ? args[0] : Number(args[0]);
       const bv = typeof args[1] === "number" ? args[1] : Number(args[1]);
+      // NaN-skip: MATLAB / numbl returns the non-NaN side when one
+      // operand is NaN. JS `Math.min/max` propagates NaN.
+      if (Number.isNaN(av)) return [bv];
+      if (Number.isNaN(bv)) return [av];
       return [spec.name === "max" ? Math.max(av, bv) : Math.min(av, bv)];
     }
     const inputT = argTypes[0];
