@@ -25,6 +25,7 @@ import {
   canonicalizeType,
   hashType,
   sanitizeCIdent,
+  UNKNOWN,
   VOID,
 } from "./types.js";
 import type { Lowerer } from "./lower.js";
@@ -156,7 +157,18 @@ export function specializeUserFunction(
   const hashInput = `${file}|${argTypes.map(canonicalizeType).join("|")}|nargout=${effectiveNargout}`;
   const key = `${sanitizeCIdent(source)}__${hashType(hashInput)}`;
   const cached = this.specializations.get(key);
-  if (cached) return cached;
+  if (cached) {
+    // A still-empty placeholder means we're hitting the spec while
+    // its outer specializeUserFunction is still lowering the body —
+    // i.e. a recursive self-call (or mutual-recursive entry to the
+    // same key from a sibling specializer that's still pending).
+    // Track so the outer call can re-lower the body once the final
+    // outputTypes are known, swapping out the heuristic seed.
+    if (cached.body.length === 0) {
+      this.recursiveSpecsConsumed.add(key);
+    }
+    return cached;
+  }
 
   // Per-spec output list: truncate to the caller's requested nargout.
   // A 3-output function called as `[a] = f(...)` or `x = f(...)`
@@ -165,8 +177,17 @@ export function specializeUserFunction(
   // to trailing outputs are kept but unused — the nargout fold may
   // dead-code them via `if nargout >= N` branches.
   const effectiveOutputs = decl.outputs.slice(0, effectiveNargout);
-  // Insert placeholder to break recursion (not supported in MVP but
-  // we'll throw a cleaner error than infinite recursion).
+  // Pre-seed each output's type with the i-th param's type (or
+  // Unknown when fewer params than outputs). This is the placeholder's
+  // `outputTypes` value that recursive self-calls will read while the
+  // body is mid-lowering. For the common recursion shape — output
+  // kind matches input kind, as in `factorial` / `fib` — the seed is
+  // already correct and the body type-checks first try. For other
+  // shapes the post-lowering compare below catches the mismatch and
+  // re-lowers once with the actual types.
+  const seedOutputs: Type[] = effectiveOutputs.map(
+    (_, i) => argTypes[i] ?? UNKNOWN
+  );
   const placeholder: IRFunc = {
     name: decl.name,
     cName: key,
@@ -175,7 +196,7 @@ export function specializeUserFunction(
     paramTypes: argTypes,
     outputs: effectiveOutputs.slice(),
     cOutputs: effectiveOutputs.map(cIdentForUserName),
-    outputTypes: [],
+    outputTypes: seedOutputs,
     body: [],
     span: decl.span,
   };
@@ -188,15 +209,19 @@ export function specializeUserFunction(
   const savedEnv = this.env;
   const savedTempCounter = this.tempCounter;
   const savedCurrentFile = this.currentFile;
-  this.env = new Map();
-  this.tempCounter = 0;
   this.currentFile = file;
   this.callFrameStack.push({
     nargin: argTypes.length,
     nargout: effectiveNargout,
   });
 
-  try {
+  // Lower the body once with the current placeholder.outputTypes.
+  // Returns the freshly-built body + the actual output types read
+  // from env. Resets env/tempCounter so a re-lower starts from the
+  // same clean state as the first pass.
+  const lowerBodyOnce = (): { body: IRStmt[]; outputTypes: Type[] } => {
+    this.env = new Map();
+    this.tempCounter = 0;
     // Bind params. The C name goes through `cIdentForUserName` so a
     // user-source `function r = f(struct)` doesn't reference the C
     // keyword `struct` for reads of `struct` inside the body.
@@ -241,6 +266,31 @@ export function specializeUserFunction(
       }
       return e.ty;
     });
+    return { body, outputTypes };
+  };
+
+  try {
+    let { body, outputTypes } = lowerBodyOnce();
+
+    // If a recursive self-call consumed the placeholder's seeded
+    // outputTypes during the first pass AND the actual outputs the
+    // body produced differ from the seed, the recursive Call IR
+    // nodes built in pass 1 carry the (now-stale) seed type. Update
+    // the placeholder with the actual outputs and re-lower the body
+    // so the recursive Call IR picks up the refined type. Capped at
+    // one retry — a function whose output type still hasn't
+    // stabilized after two passes is either mutually recursive in a
+    // pathological way or has a genuinely unknowable output type;
+    // either way, the second pass's result is what we ship.
+    if (
+      this.recursiveSpecsConsumed.has(key) &&
+      !sameOutputTypes(seedOutputs, outputTypes)
+    ) {
+      placeholder.outputTypes = outputTypes;
+      const second = lowerBodyOnce();
+      body = second.body;
+      outputTypes = second.outputTypes;
+    }
 
     const out: IRFunc = {
       ...placeholder,
@@ -261,5 +311,23 @@ export function specializeUserFunction(
     this.tempCounter = savedTempCounter;
     this.currentFile = savedCurrentFile;
     this.callFrameStack.pop();
+    // Clear the recursion-consumed marker for this key so a later
+    // unrelated spec on the same Lowerer doesn't spuriously re-lower.
+    this.recursiveSpecsConsumed.delete(key);
   }
+}
+
+/** True iff two output-type lists are canonically equal. Used to
+ *  decide whether a recursive specialization's body needs re-lowering
+ *  after the heuristic seed produced different output types than the
+ *  actual body finalizes to. */
+function sameOutputTypes(
+  a: ReadonlyArray<Type>,
+  b: ReadonlyArray<Type>
+): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    if (canonicalizeType(a[i]) !== canonicalizeType(b[i])) return false;
+  }
+  return true;
 }

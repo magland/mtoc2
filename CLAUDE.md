@@ -82,8 +82,11 @@ inventory by example. Highlights:
   `break`, `continue`, `return`.
 - **Functions**: user functions with 0/1/N≥2 outputs; type-tuple
   specialization (c-aot/js-aot); `nargin` / `nargout`; function
-  handles (named `@foo` and anonymous `@(x) ...`); recursion not
-  yet supported.
+  handles (named `@foo` and anonymous `@(x) ...`); self-recursion
+  (the lowerer's spec placeholder seeds `outputTypes` with the
+  input-type and re-lowers once if the actual outputs differ —
+  works when output kind matches input kind, which is the common
+  `fact` / `fib` shape).
 - **Workspace**: sibling `.m` files; `+pkg/` package functions;
   `@Class/` class folders with instance + static methods and
   external method files.

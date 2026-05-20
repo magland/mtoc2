@@ -155,6 +155,14 @@ export class Lowerer {
    *  function body, which we mirror by leaving the reference
    *  unresolved (which falls through to the "undefined" error). */
   callFrameStack: { nargin: number; nargout: number }[] = [];
+  /** Spec keys whose still-empty placeholder was consumed via a cache
+   *  hit while lowering some other (or the same) spec. Tracked so
+   *  `specializeUserFunction` knows when a recursive self-call used a
+   *  stale `outputTypes` seed and a second pass is needed to refine
+   *  the recursive-call IR's `ty`. The set is populated by
+   *  `specializeUserFunction`'s cache-hit branch and consumed by the
+   *  same function after body lowering. */
+  recursiveSpecsConsumed: Set<string> = new Set();
 
   constructor(public workspace: Workspace) {
     this.currentFile = workspace.mainFile;

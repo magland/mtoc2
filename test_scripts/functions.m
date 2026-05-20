@@ -4,6 +4,8 @@ test_multi_output_partial_consume();
 test_multi_output_ignore();
 test_multi_output_drop_all();
 test_recursive_call();
+test_recursive_call_runtime_arg();
+test_recursive_call_in_loop();
 test_void_function_in_expr_stmt();
 
 function test_func_if_fold_on_arg()
@@ -91,6 +93,36 @@ function y = fact(n)
     y = 1;
   else
     y = n * fact(n - 1);
+  end
+end
+
+function test_recursive_call_runtime_arg()
+  % Self-recursion with a runtime (non-exact) argument: the recursive
+  % call hits the SAME specialization key as the outer call, so the
+  % lowerer can't side-step the recursion via per-value spec sharding
+  % the way `fact(5)` does. Forces the placeholder-outputTypes seeding
+  % + recursive-self-call re-lowering machinery in `specialize.ts`.
+  n = 5;
+  %!numbl:opaque n
+  disp(fact(n));
+end
+
+function test_recursive_call_in_loop()
+  % Loop-driven recursion: the loop index strips exact off `i`, so
+  % each call to `fib(i)` hits the same opaque-arg specialization
+  % and the recursive `fib(i-1) + fib(i-2)` inside likewise stays on
+  % the same key. This is the canonical mtoc2 ↔ numbl `recursion.m`
+  % shape.
+  for i = 1:5
+    disp(fib(i));
+  end
+end
+
+function r = fib(n)
+  if n <= 1
+    r = n;
+  else
+    r = fib(n - 1) + fib(n - 2);
   end
 end
 
