@@ -47,6 +47,8 @@ import {
   mtoc2_disp_double,
   mtoc2_format_double,
   mtoc2_tensor_make_range as jsMakeRange,
+  mtoc2_toc_print,
+  mtoc2_toc_handle_print,
 } from "../builtins/runtime/snippets.gen.js";
 
 class ReturnSignal {}
@@ -186,6 +188,32 @@ export class Interpreter {
         return;
       }
       case "ExprStmt": {
+        // Bare `toc;` / `toc();` / `toc(t0);` is the printing form,
+        // matching numbl's `nargout === 0` discriminator. Mirrors
+        // `lowerExprStmt`'s special case in the c-aot path: the shadow
+        // checks ensure a user-level `toc = 5; toc;` reads the local
+        // rather than dispatching to the print form. We import the
+        // runtime helpers lazily to avoid a circular dep at module top.
+        if (
+          this.env.get("toc") === undefined &&
+          !(this.workspace && this.workspace.isClass("toc"))
+        ) {
+          if (s.expr.type === "Ident" && s.expr.name === "toc") {
+            mtoc2_toc_print();
+            return;
+          }
+          if (s.expr.type === "FuncCall" && s.expr.name === "toc") {
+            if (s.expr.args.length === 0) {
+              mtoc2_toc_print();
+              return;
+            }
+            if (s.expr.args.length === 1) {
+              const t0 = toScalarNumber(this.evalExpr(s.expr.args[0]));
+              mtoc2_toc_handle_print(t0);
+              return;
+            }
+          }
+        }
         const v = this.evalExpr(s.expr);
         if (v === undefined) return;
         if (!s.suppressed) this.autoDisp("ans", v);
