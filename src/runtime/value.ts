@@ -58,13 +58,18 @@ export function isHandleValue(v: RuntimeValue): v is RuntimeHandle {
  *  any RuntimeValue (including nested structs). */
 export type RuntimeStruct = { readonly [field: string]: RuntimeValue };
 
-/** Real-double tensor. `data` is column-major to match numbl's
- *  `RuntimeTensor.data`. The shape array is owned by the value; do
- *  not mutate. */
+/** Real or complex double tensor. `data` is the real lane,
+ *  column-major to match numbl's `RuntimeTensor.data`. `imag` is the
+ *  imaginary lane (same length and orientation as `data`); absent for
+ *  real-only tensors. Mirrors the C representation's split-buffer
+ *  layout — codegen / interpreter dispatch on `imag !== undefined`
+ *  the way the C side dispatches on `imag != NULL`. The shape array
+ *  is owned by the value; do not mutate. */
 export interface RuntimeTensor {
   readonly mtoc2Tag: "tensor";
   readonly shape: number[];
   readonly data: Float64Array;
+  readonly imag?: Float64Array;
 }
 
 /** Single-quoted char-array (`'foo'`). Distinct from `"foo"` strings
@@ -109,6 +114,29 @@ export function makeTensor(shape: number[], data: Float64Array): RuntimeTensor {
     );
   }
   return { mtoc2Tag: "tensor", shape: shape.slice(), data };
+}
+
+/** Complex tensor with both lanes. `data` is the real lane, `imag`
+ *  the imaginary lane; both must have the same length and match the
+ *  product of `shape`. */
+export function makeComplexTensor(
+  shape: number[],
+  data: Float64Array,
+  imag: Float64Array
+): RuntimeTensor {
+  let total = 1;
+  for (const s of shape) total *= s;
+  if (data.length !== total || imag.length !== total) {
+    throw new Error(
+      `makeComplexTensor: shape [${shape.join(",")}] requires ${total} elements, got ${data.length}/${imag.length}`
+    );
+  }
+  return { mtoc2Tag: "tensor", shape: shape.slice(), data, imag };
+}
+
+/** True iff this tensor carries an imaginary lane. */
+export function isComplexTensor(v: RuntimeTensor): boolean {
+  return v.imag !== undefined;
 }
 
 export function makeChar(value: string): RuntimeChar {

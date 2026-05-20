@@ -12,8 +12,11 @@ import {
   scalarLogical,
   scalarComplex,
   signFromNumber,
+  tensorComplex,
+  tensorComplexFromDims,
   tensorDouble,
   UNKNOWN,
+  type DimInfo,
   type Type,
 } from "../lowering/types.js";
 import {
@@ -29,11 +32,27 @@ export function inferTypeFromValue(v: RuntimeValue): Type {
   if (typeof v === "string") return { kind: "String", exact: v };
   if (isChar(v)) return { kind: "Char", exact: v.value };
   if (isTensor(v)) {
-    // Carry the data as `exact` when it fits the lattice's cap so
-    // dim-vector-consuming builtins (`zeros(size(xs))`,
-    // `reshape(A, [r c])`, `sum(v, ...)` with a vector dim, …) can
-    // read the runtime values via the same `exactRealArray` path
-    // c-aot uses. Above the cap we fall back to shape-only.
+    // Complex tensor → carry both lanes as exact when they fit the
+    // cap; otherwise produce a shape-only complex type.
+    if (v.imag !== undefined) {
+      if (v.data.length <= EXACT_ARRAY_MAX_ELEMENTS) {
+        return tensorComplex(v.shape.slice(), {
+          re: new Float64Array(v.data),
+          im: new Float64Array(v.imag),
+        });
+      }
+      const dims: DimInfo[] = v.shape.map(n => ({
+        kind: "exact" as const,
+        value: n,
+      }));
+      return tensorComplexFromDims(dims);
+    }
+    // Real tensor — carry the data as `exact` when it fits the
+    // lattice's cap so dim-vector-consuming builtins
+    // (`zeros(size(xs))`, `reshape(A, [r c])`, `sum(v, ...)` with a
+    // vector dim, …) can read the runtime values via the same
+    // `exactRealArray` path c-aot uses. Above the cap we fall back
+    // to shape-only.
     if (v.data.length <= EXACT_ARRAY_MAX_ELEMENTS) {
       return tensorDouble(v.shape.slice(), new Float64Array(v.data));
     }
