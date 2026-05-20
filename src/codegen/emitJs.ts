@@ -340,11 +340,166 @@ function emitStmt(s: IRStmt, indent: string, state: RuntimeState): string {
     }
 
     case "IndexSliceStore":
+      return emitIndexSliceStoreJs(s, indent, state);
+  }
+}
+
+function emitIndexSliceStoreJs(
+  s: Extract<IRStmt, { kind: "IndexSliceStore" }>,
+  indent: string,
+  state: RuntimeState
+): string {
+  if (s.base.ty.kind === "Numeric" && s.base.ty.isComplex) {
+    throw new UnsupportedConstruct(
+      `emitJs: complex IndexSliceStore not yet wired (Phase 5)`,
+      s.span
+    );
+  }
+  const rhsExpr = emitExpr(s.rhs, state);
+  const rhsIsScalar =
+    s.rhs.ty.kind === "Numeric" &&
+    s.rhs.ty.dims.every(d => d.kind === "exact" && d.value === 1);
+  const baseName = s.base.cName;
+
+  // Single-slot linear store.
+  if (s.index.length === 1) {
+    const slot = s.index[0];
+    const valExpr = rhsIsScalar
+      ? `_mtoc2_rhs`
+      : `_mtoc2_rhs.data[_mtoc2_k]`;
+    if (slot.kind === "Colon") {
+      return (
+        `${indent}{ ` +
+        `const _mtoc2_rhs = ${rhsExpr}; ` +
+        `const _mtoc2_n = ${baseName}.data.length; ` +
+        `for (let _mtoc2_k = 0; _mtoc2_k < _mtoc2_n; _mtoc2_k++) ` +
+        `${baseName}.data[_mtoc2_k] = ${valExpr}; ` +
+        `}`
+      );
+    }
+    if (slot.kind === "Range") {
+      useRuntimeByName(state, "mtoc2_loop_count");
+      useRuntimeByName(state, "mtoc2_range_value");
+      const sE = emitExpr(slot.start, state);
+      const stE = emitExpr(slot.step, state);
+      const eE = emitExpr(slot.end, state);
+      return (
+        `${indent}{ ` +
+        `const _mtoc2_rhs = ${rhsExpr}; ` +
+        `const _mtoc2_s = ${sE}, _mtoc2_e = ${eE}, _mtoc2_st = ${stE}; ` +
+        `const _mtoc2_n = mtoc2_loop_count(_mtoc2_s, _mtoc2_e, _mtoc2_st); ` +
+        `for (let _mtoc2_k = 0; _mtoc2_k < _mtoc2_n; _mtoc2_k++) { ` +
+        `const _mtoc2_v = mtoc2_range_value(_mtoc2_s, _mtoc2_st, _mtoc2_e, _mtoc2_n, _mtoc2_k); ` +
+        `${baseName}.data[Math.trunc(_mtoc2_v) - 1] = ${valExpr}; ` +
+        `} ` +
+        `}`
+      );
+    }
+    if (slot.kind === "IndexVec") {
+      const idxE = emitExpr(slot.expr, state);
+      return (
+        `${indent}{ ` +
+        `const _mtoc2_rhs = ${rhsExpr}; ` +
+        `const _mtoc2_ix = ${idxE}; ` +
+        `const _mtoc2_ixd = _mtoc2_ix.mtoc2Tag === "tensor" ? _mtoc2_ix.data : [_mtoc2_ix]; ` +
+        `const _mtoc2_n = _mtoc2_ixd.length; ` +
+        `for (let _mtoc2_k = 0; _mtoc2_k < _mtoc2_n; _mtoc2_k++) ` +
+        `${baseName}.data[Math.trunc(_mtoc2_ixd[_mtoc2_k]) - 1] = ${valExpr}; ` +
+        `}`
+      );
+    }
+    throw new UnsupportedConstruct(
+      `emitJs: IndexSliceStore single-slot '${slot.kind}' not yet wired`,
+      s.span
+    );
+  }
+
+  // Multi-slot per-axis store. Mirrors emitIndexSliceJs's multi-slot
+  // form but writes into the base rather than reading into a fresh
+  // tensor. RHS may be scalar (broadcast to every cell) or tensor
+  // (cells read column-major).
+  const ndim = s.index.length;
+  const setup: string[] = [`const _mtoc2_rhs = ${rhsExpr};`];
+  const idxFns: string[] = [];
+  const dims: string[] = [];
+  for (let i = 0; i < ndim; i++) {
+    const slot = s.index[i];
+    if (slot.kind === "Colon") {
+      setup.push(`const _mtoc2_n_${i} = ${baseName}.shape[${i}] ?? 1;`);
+      dims.push(`_mtoc2_n_${i}`);
+      idxFns.push(`(_mtoc2_k_${i} + 1)`);
+    } else if (slot.kind === "Range") {
+      useRuntimeByName(state, "mtoc2_loop_count");
+      useRuntimeByName(state, "mtoc2_range_value");
+      const sE = emitExpr(slot.start, state);
+      const stE = emitExpr(slot.step, state);
+      const eE = emitExpr(slot.end, state);
+      setup.push(
+        `const _mtoc2_s_${i} = ${sE}, _mtoc2_e_${i} = ${eE}, _mtoc2_st_${i} = ${stE};`
+      );
+      setup.push(
+        `const _mtoc2_n_${i} = mtoc2_loop_count(_mtoc2_s_${i}, _mtoc2_e_${i}, _mtoc2_st_${i});`
+      );
+      dims.push(`_mtoc2_n_${i}`);
+      idxFns.push(
+        `mtoc2_range_value(_mtoc2_s_${i}, _mtoc2_st_${i}, _mtoc2_e_${i}, _mtoc2_n_${i}, _mtoc2_k_${i})`
+      );
+    } else if (slot.kind === "Scalar") {
+      const v = emitExpr(slot.expr, state);
+      setup.push(`const _mtoc2_s_${i} = ${v};`);
+      setup.push(`const _mtoc2_n_${i} = 1;`);
+      dims.push(`1`);
+      idxFns.push(`_mtoc2_s_${i}`);
+    } else if (slot.kind === "IndexVec") {
+      const idxE = emitExpr(slot.expr, state);
+      setup.push(
+        `const _mtoc2_ix_${i} = ${idxE}; ` +
+          `const _mtoc2_ixd_${i} = _mtoc2_ix_${i}.mtoc2Tag === "tensor" ? _mtoc2_ix_${i}.data : [_mtoc2_ix_${i}];`
+      );
+      setup.push(`const _mtoc2_n_${i} = _mtoc2_ixd_${i}.length;`);
+      dims.push(`_mtoc2_n_${i}`);
+      idxFns.push(`_mtoc2_ixd_${i}[_mtoc2_k_${i}]`);
+    } else {
       throw new UnsupportedConstruct(
-        `emitJs: '${s.kind}' is not yet wired (Phase 2 minimal subset)`,
+        `emitJs: IndexSliceStore multi-slot '${slot.kind}' not yet wired`,
         s.span
       );
+    }
   }
+  const lines: string[] = [`${indent}{`];
+  for (const ln of setup) lines.push(`${indent}  ${ln}`);
+  for (let i = ndim - 1; i >= 0; i--) {
+    lines.push(
+      `${indent}  for (let _mtoc2_k_${i} = 0; _mtoc2_k_${i} < _mtoc2_n_${i}; _mtoc2_k_${i}++) {`
+    );
+  }
+  const srcTerms: string[] = [];
+  for (let i = 0; i < ndim; i++) {
+    const strideParts: string[] = [];
+    for (let j = 0; j < i; j++)
+      strideParts.push(`(${baseName}.shape[${j}] ?? 1)`);
+    const stride = strideParts.length === 0 ? "1" : strideParts.join(" * ");
+    srcTerms.push(`(Math.trunc(${idxFns[i]}) - 1) * ${stride}`);
+  }
+  const rhsTerms: string[] = [];
+  for (let i = 0; i < ndim; i++) {
+    const strideParts: string[] = [];
+    for (let j = 0; j < i; j++) strideParts.push(dims[j]);
+    const stride = strideParts.length === 0 ? "1" : strideParts.join(" * ");
+    rhsTerms.push(`_mtoc2_k_${i} * ${stride}`);
+  }
+  lines.push(`${indent}    const _mtoc2_dst = ${srcTerms.join(" + ")};`);
+  if (rhsIsScalar) {
+    lines.push(`${indent}    ${baseName}.data[_mtoc2_dst] = _mtoc2_rhs;`);
+  } else {
+    lines.push(`${indent}    const _mtoc2_src = ${rhsTerms.join(" + ")};`);
+    lines.push(
+      `${indent}    ${baseName}.data[_mtoc2_dst] = _mtoc2_rhs.data[_mtoc2_src];`
+    );
+  }
+  for (let i = ndim - 1; i >= 0; i--) lines.push(`${indent}  }`);
+  lines.push(`${indent}}`);
+  return lines.join("\n");
 }
 
 function emitMultiAssignCall(
