@@ -125,6 +125,27 @@ function generate(): string {
     return `  ${JSON.stringify(key)}: ${JSON.stringify(stripped)},`;
   });
 
+  // Per-file list of imported snippet basenames (e.g.
+  // `tensor_elemwise_real.js` → `["tensor_alloc_nd.js"]`). The codegen
+  // path turns each entry into the corresponding registered snippet
+  // name (`mtoc2_<basename without ext>`) so activation pulls JS deps
+  // in alongside the C deps declared in the registry.
+  const jsImportEntries = jsPaths.map(p => {
+    const body = readFileSync(join(runtimeDir, p), "utf8");
+    const imports = new Set<string>();
+    for (const m of body.matchAll(
+      /^\s*import\s+.*?from\s+["']([^"']+)["']/gm
+    )) {
+      imports.add(basename(m[1]));
+    }
+    const key = basename(p);
+    const list = Array.from(imports)
+      .sort()
+      .map(b => JSON.stringify(b))
+      .join(", ");
+    return `  ${JSON.stringify(key)}: [${list}],`;
+  });
+
   // Re-export every named export from each .js snippet via its
   // relative path so the interpreter (Phase 3) can `import { foo }
   // from "./snippets.gen.js"` and call helpers directly — the same
@@ -154,6 +175,15 @@ function generate(): string {
     " *  variables that resolve to `globalThis.<name>` at call time. */",
     "export const JS_SNIPPETS: Record<string, string> = {",
     ...jsEntries,
+    "};",
+    "",
+    "/** Per-JS-snippet list of basenames it imports from sibling JS",
+    " *  snippets (e.g. `tensor_elemwise_real.js` → ",
+    " *  `['tensor_alloc_nd.js']`). The codegen path converts each entry",
+    " *  to a registered snippet name (`mtoc2_<basename without .js>`) so",
+    " *  cross-snippet JS deps activate alongside the explicit C deps. */",
+    "export const JS_IMPORTS: Record<string, string[]> = {",
+    ...jsImportEntries,
     "};",
     "",
   ].join("\n");

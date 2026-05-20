@@ -177,3 +177,51 @@ export const JS_SNIPPETS: Record<string, string> = {
   "tensor_zeros_nd.js": "// JS sibling of `tensor_zeros_nd.h`. Float64Array initialises to\n// zeros automatically, so `_zeros_nd` is just an alias for the\n// allocator.\n\nfunction mtoc2_tensor_zeros_nd(ndim, dims) {\n  return mtoc2_tensor_alloc_nd(ndim, dims);\n}\n",
   "tensor_zeros_square.js": "// JS sibling of `tensor_zeros_square.h`. Single-eval helper for\n// `zeros(n)` with a runtime `n` — keeps the source-level expression\n// from being evaluated twice (the C side passes `n` as a parameter\n// to avoid macro-style double-evaluation; the JS analogue keeps the\n// parallel call shape so the emitter stays structurally aligned).\n\nfunction mtoc2_tensor_zeros_square(n) {\n  return mtoc2_tensor_zeros_nd(2, [n, n]);\n}\n",
 };
+
+/** Per-JS-snippet list of basenames it imports from sibling JS
+ *  snippets (e.g. `tensor_elemwise_real.js` → 
+ *  `['tensor_alloc_nd.js']`). The codegen path converts each entry
+ *  to a registered snippet name (`mtoc2_<basename without .js>`) so
+ *  cross-snippet JS deps activate alongside the explicit C deps. */
+export const JS_IMPORTS: Record<string, string[]> = {
+  "loop_count.js": [],
+  "range_value.js": [],
+  "scalar_index.js": [],
+  "tensor_make_range.js": ["loop_count.js", "range_value.js", "tensor_alloc_nd.js"],
+  "assert_fmt.js": ["format_engine.js"],
+  "disp_double.js": ["format_double.js"],
+  "disp_tensor.js": ["format_double.js"],
+  "error_fmt.js": ["format_engine.js"],
+  "format_double.js": [],
+  "format_engine.js": [],
+  "fprintf.js": ["format_engine.js"],
+  "sprintf.js": ["format_engine.js"],
+  "plot_dispatch.js": [],
+  "cscalar.js": [],
+  "tictoc.js": [],
+  "tensor.js": [],
+  "tensor_alloc.js": ["tensor.js"],
+  "tensor_alloc_nd.js": ["tensor.js"],
+  "tensor_from_matrix.js": ["tensor_alloc.js"],
+  "tensor_from_row.js": ["tensor_alloc.js"],
+  "tensor_elemwise_real.js": ["tensor_alloc_nd.js"],
+  "tensor_elemwise_real_fn.js": ["tensor_alloc_nd.js"],
+  "tensor_eye.js": ["tensor_alloc.js"],
+  "tensor_fill_nd.js": ["tensor_alloc_nd.js"],
+  "tensor_fill_square.js": ["tensor_fill_nd.js"],
+  "tensor_flip.js": ["tensor_alloc_nd.js"],
+  "tensor_linspace.js": ["tensor_alloc.js"],
+  "tensor_meshgrid.js": ["tensor_alloc.js"],
+  "tensor_mtimes_real.js": ["tensor_alloc.js"],
+  "tensor_norm.js": [],
+  "tensor_ones_nd.js": ["tensor_alloc_nd.js"],
+  "tensor_ones_square.js": ["tensor_ones_nd.js"],
+  "tensor_reduce_real.js": ["tensor_alloc_nd.js"],
+  "tensor_reshape_nd.js": ["tensor_alloc_nd.js"],
+  "tensor_size.js": ["tensor_alloc.js"],
+  "tensor_sort_real.js": ["tensor_alloc_nd.js"],
+  "tensor_transpose.js": ["tensor_alloc.js"],
+  "tensor_unary_real_math.js": ["tensor_alloc_nd.js"],
+  "tensor_zeros_nd.js": ["tensor_alloc_nd.js"],
+  "tensor_zeros_square.js": ["tensor_zeros_nd.js"],
+};

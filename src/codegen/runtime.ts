@@ -14,7 +14,11 @@
  * pulls dependencies in first.
  */
 
-import { C_SNIPPETS, JS_SNIPPETS } from "../builtins/runtime/snippets.gen.js";
+import {
+  C_SNIPPETS,
+  JS_SNIPPETS,
+  JS_IMPORTS,
+} from "../builtins/runtime/snippets.gen.js";
 import { getBuiltin } from "../builtins/index.js";
 import type { Builtin } from "../builtins/registry.js";
 
@@ -40,6 +44,11 @@ export interface RuntimeSnippet {
    *  pulls these in first so their definitions come before this
    *  snippet's. Cycles are not supported — keep the graph acyclic. */
   deps: ReadonlyArray<string>;
+  /** `.h` filename this snippet was loaded from (e.g.
+   *  `tensor_alloc_nd.h`). Used to build the JS-import dep map at
+   *  activation time. Optional because user-supplied inline snippets
+   *  have no on-disk file. */
+  srcFilename?: string;
 }
 
 /**
@@ -94,7 +103,7 @@ function loadSnippet(
   // site looking it up separately.
   const jsName = filename.replace(/\.h$/, ".js");
   const jsCode = JS_SNIPPETS[jsName];
-  const snippet: RuntimeSnippet = { headers, code, deps };
+  const snippet: RuntimeSnippet = { headers, code, deps, srcFilename: filename };
   if (jsCode !== undefined) snippet.jsCode = jsCode;
   return snippet;
 }
@@ -702,12 +711,46 @@ export function lookupBuiltin(
   return getBuiltin(name);
 }
 
+/** Reverse map: `.h` basename → registered snippet name. Built lazily
+ *  the first time `useRuntimeByName` resolves JS-import deps, since
+ *  the registry must be fully constructed before this map is built.
+ *  Identifies which snippet supplies each cross-snippet JS import. */
+let H_FILENAME_TO_NAME: Map<string, string> | undefined;
+
+function getFilenameToName(): Map<string, string> {
+  if (H_FILENAME_TO_NAME !== undefined) return H_FILENAME_TO_NAME;
+  const m = new Map<string, string>();
+  for (const [name, snip] of REGISTRY.entries()) {
+    if (snip.srcFilename !== undefined) {
+      m.set(snip.srcFilename, name);
+    }
+  }
+  H_FILENAME_TO_NAME = m;
+  return m;
+}
+
 /** Activate a snippet by its registered name. Pulls its `deps` in first
- *  so they appear before it in the final emission order. Idempotent. */
+ *  so they appear before it in the final emission order. Also pulls in
+ *  JS-import deps inferred from the snippet's paired `.js` sibling
+ *  (built by `scripts/build_runtime_snippets.ts` into `JS_IMPORTS`),
+ *  so cross-snippet JS calls resolve at runtime even when the C deps
+ *  field doesn't enumerate them. Idempotent. */
 export function useRuntimeByName(state: RuntimeState, name: string): void {
   if (state.active.has(name)) return;
   const s = lookupSnippet(state, name);
   for (const d of s.deps) useRuntimeByName(state, d);
+  if (s.srcFilename !== undefined) {
+    const jsName = s.srcFilename.replace(/\.h$/, ".js");
+    const imports = JS_IMPORTS[jsName];
+    if (imports !== undefined && imports.length > 0) {
+      const map = getFilenameToName();
+      for (const importedBasename of imports) {
+        const hName = importedBasename.replace(/\.js$/, ".h");
+        const depName = map.get(hName);
+        if (depName !== undefined) useRuntimeByName(state, depName);
+      }
+    }
+  }
   state.active.add(name);
 }
 
