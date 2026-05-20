@@ -29,6 +29,7 @@ test_prod_negative_values();
 test_mean_runtime();
 test_empty_logical_via_zeros();
 test_complex_reductions();
+test_default_axis_on_empty_input();
 
 function test_scalar_identity()
   % Scalar identity for every reducer.
@@ -301,4 +302,22 @@ function test_complex_reductions()
   %!numbl:opaque z
   disp(any(z));
   disp(all(z));
+end
+
+% Default-axis reduction on a statically empty input: numbl uses
+% `firstReduceDim` (collapse to scalar when fewer than 2 dims are
+% > 1), so every reducer returns its identity even for non-square
+% empties like `zeros(0, 5)`. Pinned here so a future refactor of
+% chooseDefaultAxis doesn't quietly drift back to the per-axis
+% reduce that returned `[]` empty tensors.
+function test_default_axis_on_empty_input()
+  disp(sum([]));                  % 0
+  disp(prod([]));                 % 1
+  disp(mean([]));                 % NaN
+  disp(any([]));                  % 0
+  disp(all([]));                  % 1
+  disp(sum(zeros(0, 5)));         % 0 (scalar — numbl collapse)
+  disp(prod(zeros(0, 5)));        % 1
+  disp(sum(zeros(5, 0)));         % 0
+  disp(prod(zeros(5, 0)));        % 1
 end

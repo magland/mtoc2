@@ -159,40 +159,50 @@ function classifyDimArg(name: string, dimType: Type | undefined): AxisChoice {
  *  for the genuinely ambiguous case (`unknown` leading dim followed
  *  by at least one known-non-1 or another `unknown`). */
 function chooseDefaultAxis(name: string, t: NumericType): AxisAll | AxisFixed {
-  // Concrete shape: numbl's firstReduceDim. If every dim is 1 ⇒
-  // scalar collapse (treat as 'all'); else pick the first dim with
-  // size > 1.
+  // Concrete shape: numbl's `firstReduceDim` rule
+  // (helpers/reduction-helpers.ts) — count dims > 1; collapse to
+  // scalar when at most one dim is > 1 (matches `sum([1 2 3]) = 6`
+  // AND `sum([]) = 0` / `sum(zeros(0, 5)) = 0`); else reduce along
+  // the first dim > 1. Using `!== 1` here (the prior rule) would
+  // route empty shapes like `[0, 0]` and `[0, 5]` to a per-axis
+  // reduce and produce a non-scalar empty tensor — numbl produces
+  // the scalar identity instead.
   if (t.shape !== undefined) {
-    const nonSingleton = t.shape.findIndex(s => s !== 1);
-    if (nonSingleton === -1) return { kind: "all" };
-    return { kind: "fixed", dim: nonSingleton + 1 };
+    const numGt1 = t.shape.filter(s => s > 1).length;
+    if (numGt1 <= 1) return { kind: "all" };
+    return { kind: "fixed", dim: t.shape.findIndex(s => s > 1) + 1 };
   }
-  // Lattice walk. First dim known to be ≠ 1 wins; an `unknown` before
-  // any non-1 exact dim is ambiguous unless every later dim is `1`.
+  // Lattice walk. Same rule as the concrete-shape path but
+  // articulated dim-by-dim:
+  //   - exact == 0 or 1: doesn't count as a non-singleton.
+  //   - exact > 1: counts. First one is the axis-fixed candidate.
+  //   - unknown: ambiguous. If every later dim is `1` we still know
+  //     the result is scalar (any runtime length of one axis reduces
+  //     to a scalar); otherwise we can't decide statically.
+  let knownGt1 = 0;
+  let firstGt1Idx = -1;
   for (let i = 0; i < t.dims.length; i++) {
     const d = t.dims[i];
-    if (d.kind === "exact" && d.value !== 1) {
-      return { kind: "fixed", dim: i + 1 };
-    }
-    if (d.kind === "unknown") {
-      // Hit `unknown` before any known-non-1 dim. If every later dim
-      // is statically 1, the leading axis is the only candidate —
-      // output is scalar regardless of its runtime length (whether
-      // 1×… or N×1×… both reduce to a single scalar).
-      if (t.dims.slice(i + 1).every(isDimOne)) {
-        return { kind: "all" };
+    if (d.kind === "exact") {
+      if (d.value > 1) {
+        knownGt1++;
+        if (firstGt1Idx === -1) firstGt1Idx = i;
       }
-      throw new UnsupportedConstruct(
-        `'${name}' on a tensor with ambiguous lattice ` +
-          `(${t.dims.map(d => (d.kind === "exact" ? String(d.value) : "?")).join("×")}): can't deduce the ` +
-          `reduction axis — pass an explicit dim (e.g. ` +
-          `${name}(A, 1)) or 'all'`
-      );
+      continue;
     }
-    // exact value 1: skip, no contribution.
+    // unknown
+    if (t.dims.slice(i + 1).every(isDimOne) && knownGt1 === 0) {
+      return { kind: "all" };
+    }
+    throw new UnsupportedConstruct(
+      `'${name}' on a tensor with ambiguous lattice ` +
+        `(${t.dims.map(d => (d.kind === "exact" ? String(d.value) : "?")).join("×")}): can't deduce the ` +
+        `reduction axis — pass an explicit dim (e.g. ` +
+        `${name}(A, 1)) or 'all'`
+    );
   }
-  // All dims are statically 1: scalar.
-  return { kind: "all" };
+  if (knownGt1 <= 1) return { kind: "all" };
+  return { kind: "fixed", dim: firstGt1Idx + 1 };
 }
 
 /** Squeeze trailing singleton dims subject to a 2-axis floor (matches
@@ -499,6 +509,27 @@ export function reductionTransfer(argTypes: Type[], spec: KernelSpec): Type {
     resolved = chooseDefaultAxis(spec.name, inputType);
   } else {
     resolved = axis;
+  }
+
+  // Default-axis min/max on statically empty input: numbl returns
+  // `[]` (a 0×0 empty), but the c-aot runtime helper
+  // `mtoc2_<min|max>_all` returns a `double` — emitting it through
+  // the normal tensor-Call path would type-mismatch at `cc`. Reject
+  // until a tensor-returning variant of the helper lands; users can
+  // pass an explicit dim arg as a workaround. sum/prod/mean/any/all
+  // collapse to the scalar identity via the regular fold path so
+  // they aren't affected.
+  if (
+    axis.kind === "default" &&
+    inputType.shape !== undefined &&
+    inputType.shape.some(d => d === 0) &&
+    (spec.name === "min" || spec.name === "max")
+  ) {
+    throw new UnsupportedConstruct(
+      `'${spec.name}' on a statically empty input with default axis is not ` +
+        `yet supported (numbl returns []); pass an explicit dim arg or ` +
+        `non-empty input`
+    );
   }
 
   const nonEmpty = provablyNonEmpty(inputType);
