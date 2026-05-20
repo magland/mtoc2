@@ -261,6 +261,14 @@ export function defineUnaryRealMath(opts: UnaryRealMathOpts): Builtin {
         useRuntime("mtoc2_tensor_unary_real_math");
         return `mtoc2_tensor_${name}(${argsC[0]})`;
       }
+      // `cFnReal` for scalar path. If it's a mtoc2_-prefixed helper
+      // (e.g. `mtoc2_round_half_away`, `mtoc2_signum`), it lives in
+      // `tensor_unary_real_math.h`; activate that snippet so the
+      // helper is declared even when no tensor path uses it.
+      // libc math functions (cos, sin, sqrt, …) don't need this.
+      if (cFnReal.startsWith("mtoc2_")) {
+        useRuntime("mtoc2_tensor_unary_real_math");
+      }
       return `${cFnReal}(${argsC[0]})`;
     },
     emitJs({ argsJs, argTypes, useRuntime }) {

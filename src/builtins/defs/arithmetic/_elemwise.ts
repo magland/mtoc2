@@ -447,6 +447,14 @@ export function defineElemwiseRealBinaryFn(opts: {
    *  `mod`/`rem`, etc. */
   jsScalarExpr?: (aJs: string, bJs: string) => string;
 }): Builtin {
+  // When the scalar `cFn` is a mtoc2_-prefixed helper (e.g.
+  // `mtoc2_mod_real`), the scalar emit needs to activate the runtime
+  // snippet that defines it — even when no tensor path uses it.
+  // libc functions (`fmod`, `atan2`, `hypot`, …) are declared via
+  // `<math.h>` and don't need activation.
+  const scalarRuntimeDep = opts.cFn.startsWith("mtoc2_")
+    ? opts.runtimeDep
+    : undefined;
   return buildElemwiseRealBinary({
     name: opts.name,
     helperBase: opts.helperBase,
@@ -455,6 +463,7 @@ export function defineElemwiseRealBinaryFn(opts: {
     signRule: opts.signRule,
     scalarExpr: (a, b) => `${opts.cFn}(${a}, ${b})`,
     runtimeDep: opts.runtimeDep,
+    ...(scalarRuntimeDep !== undefined ? { scalarRuntimeDep } : {}),
     ...(opts.jsScalarExpr !== undefined
       ? { jsScalarExpr: opts.jsScalarExpr }
       : {}),
@@ -475,6 +484,11 @@ function buildElemwiseRealBinary(opts: {
    *  mod) must supply this. */
   jsScalarExpr?: (aJs: string, bJs: string) => string;
   runtimeDep: string;
+  /** Runtime snippet to activate when emitting the C scalar form.
+   *  Used when `scalarExpr` calls a mtoc2_-prefixed helper that lives
+   *  in the same snippet as the tensor helpers. Without this, the
+   *  scalar path emits a call to an undeclared function. */
+  scalarRuntimeDep?: string;
   complexFold?: (
     a: { re: number; im: number },
     b: { re: number; im: number }
@@ -490,6 +504,7 @@ function buildElemwiseRealBinary(opts: {
     signRule,
     scalarExpr,
     runtimeDep,
+    scalarRuntimeDep,
     complexFold,
     complexScalarExpr,
     complexRuntimeDeps,
@@ -603,6 +618,9 @@ function buildElemwiseRealBinary(opts: {
             for (const d of complexRuntimeDeps) useRuntime(d);
           }
           return complexScalarExpr(argsC[0], argsC[1]);
+        }
+        if (scalarRuntimeDep !== undefined) {
+          useRuntime(scalarRuntimeDep);
         }
         return scalarExpr(argsC[0], argsC[1]);
       }
