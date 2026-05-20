@@ -8,6 +8,12 @@
  *   npx tsx scripts/run_test_scripts.ts foo.m bar.m       # specific files
  *   MTOC_TEST_CONCURRENCY=4 npx tsx scripts/run_test_scripts.ts
  *   MTOC_TEST_TIMEOUT_MS=60000 npx tsx scripts/run_test_scripts.ts
+ *   MTOC_TEST_CHECK_LEAKS=1 npx tsx scripts/run_test_scripts.ts
+ *
+ * `MTOC_TEST_CHECK_LEAKS=1` builds the c-aot path with
+ * AddressSanitizer + LeakSanitizer. Default off (asan adds ~3-5x to
+ * the cc step); run on a periodic cadence (e.g. once a day or before
+ * a release tag) to catch owned-value leaks — not every dev loop.
  */
 
 import { execFile } from "node:child_process";
@@ -64,6 +70,13 @@ const TIMEOUT_MS = (() => {
   return 30_000;
 })();
 
+/** When `MTOC_TEST_CHECK_LEAKS=1`, the mtoc2 c-aot path is built with
+ *  AddressSanitizer + LeakSanitizer. Default off — the asan build is
+ *  several times slower (cc step from ~1s to ~4s on the bigger
+ *  scripts). Run with the flag set on a periodic cadence (e.g. once
+ *  a day, or before a release tag) to catch owned-value leaks. */
+const CHECK_LEAKS = process.env.MTOC_TEST_CHECK_LEAKS === "1";
+
 const MAX_DIFF_LINES = 30;
 
 /** Drops applied to every script's stdout before the per-script
@@ -96,8 +109,12 @@ interface Captured {
   stderr: string;
 }
 
-/** Mtoc2 invocations run with `--check-leaks`, which builds the C with
- *  `-fsanitize=address`. Two stderr signals matter:
+/** With `MTOC_TEST_CHECK_LEAKS=1` set, mtoc2 invocations run with
+ *  `--check-leaks`, which builds the C with `-fsanitize=address`.
+ *  Asan adds substantial overhead (3-5x on the cc step), so the
+ *  default-off mode keeps the dev loop fast; run with the flag set
+ *  periodically to catch leaks in the always-copy/free-at-scope-exit
+ *  invariant. Two stderr signals matter when it IS on:
  *
  *  - A `LeakSanitizer:` report at exit means an `mtoc2_tensor_t` (or
  *    other owned buffer) was not freed. We pass `LSAN_OPTIONS=exitcode=0`
@@ -110,12 +127,16 @@ interface Captured {
  *    the binary with non-zero exit; execFile throws and that path is
  *    surfaced as a real error. */
 async function captureMtoc2(scriptPath: string): Promise<Captured> {
-  const args = ["tsx", cliPath, "run", "--check-leaks", scriptPath];
+  const args = ["tsx", cliPath, "run"];
+  if (CHECK_LEAKS) args.push("--check-leaks");
+  args.push(scriptPath);
   const r = await execFileAsync("npx", args, {
     maxBuffer: 16 * 1024 * 1024,
     timeout: TIMEOUT_MS,
     killSignal: "SIGKILL",
-    env: { ...process.env, LSAN_OPTIONS: "exitcode=0" },
+    env: CHECK_LEAKS
+      ? { ...process.env, LSAN_OPTIONS: "exitcode=0" }
+      : process.env,
   });
   return { stdout: r.stdout, stderr: r.stderr ?? "" };
 }

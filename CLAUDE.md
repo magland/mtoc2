@@ -198,6 +198,11 @@ Both runners are commit-time gates. The c-aot runner is the strict
 oracle; the all-modes runner is what keeps the interpreter and
 js-aot backends from quietly drifting as features land.
 
+`MTOC_TEST_CHECK_LEAKS=1` opts both runners into AddressSanitizer +
+LeakSanitizer on the c-aot path. Asan slows cc 3-5x, so this is
+NOT part of the regular dev loop — run periodically (e.g. once a
+day or before a release tag) to catch owned-value leaks.
+
 Two test layers, strict separation:
 
 - **Cross-runner**

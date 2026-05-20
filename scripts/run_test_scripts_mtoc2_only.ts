@@ -11,6 +11,7 @@
  *   npx tsx scripts/run_test_scripts_mtoc2_only.ts foo.m bar.m    # specific
  *   MTOC_TEST_CONCURRENCY=4  npx tsx scripts/run_test_scripts_mtoc2_only.ts
  *   MTOC_TEST_TIMEOUT_MS=60000 npx tsx scripts/run_test_scripts_mtoc2_only.ts
+ *   MTOC_TEST_CHECK_LEAKS=1  npx tsx scripts/run_test_scripts_mtoc2_only.ts
  *
  * Each `<script>.m` requires a sibling `<script>.expected` text file
  * holding the expected stdout. A missing or empty `.expected` is an
@@ -73,6 +74,10 @@ const TIMEOUT_MS = (() => {
   return 30_000;
 })();
 
+/** When `MTOC_TEST_CHECK_LEAKS=1`, build with `--check-leaks` (asan +
+ *  LSan). Default off — asan slows cc 3-5x. */
+const CHECK_LEAKS = process.env.MTOC_TEST_CHECK_LEAKS === "1";
+
 const MAX_DIFF_LINES = 30;
 
 /** Global drops applied before per-script directives. Matches the
@@ -88,12 +93,16 @@ interface Captured {
 }
 
 async function captureMtoc2(scriptPath: string): Promise<Captured> {
-  const args = ["tsx", cliPath, "run", "--check-leaks", scriptPath];
+  const args = ["tsx", cliPath, "run"];
+  if (CHECK_LEAKS) args.push("--check-leaks");
+  args.push(scriptPath);
   const r = await execFileAsync("npx", args, {
     maxBuffer: 16 * 1024 * 1024,
     timeout: TIMEOUT_MS,
     killSignal: "SIGKILL",
-    env: { ...process.env, LSAN_OPTIONS: "exitcode=0" },
+    env: CHECK_LEAKS
+      ? { ...process.env, LSAN_OPTIONS: "exitcode=0" }
+      : process.env,
   });
   return { stdout: r.stdout, stderr: r.stderr ?? "" };
 }

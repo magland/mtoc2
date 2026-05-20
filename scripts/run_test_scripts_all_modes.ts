@@ -11,6 +11,7 @@
  *   npx tsx scripts/run_test_scripts_all_modes.ts foo.m bar.m    # specific
  *   MTOC_TEST_CONCURRENCY=4 npx tsx scripts/run_test_scripts_all_modes.ts
  *   MTOC_TEST_TIMEOUT_MS=60000 npx tsx scripts/run_test_scripts_all_modes.ts
+ *   MTOC_TEST_CHECK_LEAKS=1 npx tsx scripts/run_test_scripts_all_modes.ts
  *
  * This is a commit-time gate alongside the c-aot-only cross-runner
  * (`scripts/run_test_scripts.ts`). Both must pass before a change
@@ -22,6 +23,10 @@
  * isn't wired yet) declare it expected-to-fail via
  * `% mtoc2-test-xfail-<backend>: <reason>` so a clean run stays
  * clean and real regressions stand out.
+ *
+ * `MTOC_TEST_CHECK_LEAKS=1` adds `--check-leaks` to the c-aot mode
+ * (AddressSanitizer + LeakSanitizer). Default off — asan slows cc
+ * 3-5x. Run with the flag periodically to catch owned-value leaks.
  */
 
 import { execFile } from "node:child_process";
@@ -78,6 +83,11 @@ const TIMEOUT_MS = (() => {
   return 30_000;
 })();
 
+/** When set, the c-aot mode is built with `--check-leaks` (asan +
+ *  LSan). Default off — asan slows cc 3-5x; run periodically to
+ *  catch owned-value leaks. */
+const CHECK_LEAKS = process.env.MTOC_TEST_CHECK_LEAKS === "1";
+
 const MAX_DIFF_LINES = 30;
 
 /** Drops applied to every script's stdout before the per-script
@@ -123,9 +133,9 @@ const ALL_MODES: ReadonlyArray<Mode> = [
 
 /** Capture stdout (and stderr) for one (script, mode) pair.
  *
- *  Only the `mtoc2-c-aot` mode passes `--check-leaks`, which builds the
- *  C with `-fsanitize=address`. Two stderr signals matter on that
- *  path:
+ *  When `MTOC_TEST_CHECK_LEAKS=1` is set, the `mtoc2-c-aot` mode
+ *  passes `--check-leaks`, which builds the C with
+ *  `-fsanitize=address`. Two stderr signals matter on that path:
  *
  *  - A `LeakSanitizer:` report at exit means an `mtoc2_tensor_t` (or
  *    other owned buffer) was not freed. We pass `LSAN_OPTIONS=exitcode=0`
@@ -164,11 +174,13 @@ async function captureForMode(
         ? "js-aot"
         : "c-aot";
   const args = ["tsx", cliPath, "run", "--exec", execFlag];
-  if (mode === "mtoc2-c-aot") args.push("--check-leaks");
+  if (mode === "mtoc2-c-aot" && CHECK_LEAKS) args.push("--check-leaks");
   args.push(scriptPath);
   const r = await execFileAsync("npx", args, {
     ...baseOpts,
-    env: { ...process.env, LSAN_OPTIONS: "exitcode=0" },
+    env: CHECK_LEAKS
+      ? { ...process.env, LSAN_OPTIONS: "exitcode=0" }
+      : process.env,
   });
   return { stdout: r.stdout, stderr: r.stderr ?? "" };
 }

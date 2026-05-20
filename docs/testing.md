@@ -224,6 +224,20 @@ script (`run_test_scripts.ts path/to/foo.m` for c-aot only, or
 `run_test_scripts_all_modes.ts path/to/foo.m` when the change spans
 backends).
 
+### Periodic: leak-check sweep
+
+Both runners accept `MTOC_TEST_CHECK_LEAKS=1`, which builds the c-aot
+path with `--check-leaks` (AddressSanitizer + LeakSanitizer) to
+catch missing `mtoc2_tensor_t` frees and other heap bugs in the
+always-copy / free-at-scope-exit invariant. Asan slows the cc step
+3-5x, so this is **not** part of the regular dev loop — run on a
+periodic cadence (once a day, or before a release tag):
+
+```
+MTOC_TEST_CHECK_LEAKS=1 npx tsx scripts/run_test_scripts.ts
+MTOC_TEST_CHECK_LEAKS=1 npx tsx scripts/run_test_scripts_all_modes.ts
+```
+
 ## Test corpus organization
 
 `test_scripts/` is organized as topic files (one `.m` per topic, with
