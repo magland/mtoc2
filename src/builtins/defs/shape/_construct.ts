@@ -369,11 +369,49 @@ export function defineShapeConstructor(
       return `${ndHelper}(${jsPrefix}${resolved.ndim}, [${dimList}])`;
     },
     call({ args, argTypes }) {
-      const resolved = resolveShape(name, argTypes);
-      const shape = exactShapeOf(resolved);
-      // Scalar-collapse case: every axis is exactly 1 — return the
-      // fill value as a plain number.
-      if (shape !== undefined && shape.every(s => s === 1)) {
+      // The interpreter sees runtime values for every dim — there's
+      // no opaque/exact distinction, since `inferTypeFromValue` always
+      // sets exact on scalars. We therefore don't go through
+      // `resolveShape` here (its strict negative-int check would fire
+      // on legitimately runtime-derived negative dims that the C
+      // helper would just clamp to 0). Instead, read each runtime arg
+      // directly and forward to the helper, which clamps negatives.
+      if (argTypes.length < minArgs || argTypes.length > MTOC2_MAX_NDIM) {
+        throw new UnsupportedConstruct(
+          `'${name}' supports ${minArgs}..${MTOC2_MAX_NDIM} arg(s), got ${argTypes.length}`
+        );
+      }
+      // Form B: single multi-element tensor arg carrying the dim vector
+      // (`zeros(size(xs))` / `zeros([2 3 4])`). The first-arg tensor's
+      // data IS the dim list.
+      let dimsArr: number[];
+      if (argTypes.length === 1 && isNumeric(argTypes[0]) && !isScalar(argTypes[0])) {
+        const t = args[0] as { data: ArrayLike<number> };
+        dimsArr = [];
+        for (let i = 0; i < t.data.length; i++) {
+          const v = Math.trunc(t.data[i]);
+          dimsArr.push(v < 0 ? 0 : v);
+        }
+      } else {
+        dimsArr = [];
+        for (let i = 0; i < args.length; i++) {
+          const v = args[i];
+          const n = typeof v === "number" ? v : Number(v);
+          const t = Math.trunc(n);
+          dimsArr.push(t < 0 ? 0 : t);
+        }
+        // MATLAB's `zeros(n)` / `ones(n)` is an n×n square. Treat the
+        // single-scalar form as square here too.
+        if (dimsArr.length === 1) dimsArr.push(dimsArr[0]);
+      }
+      // Trim trailing exact-1 axes down to a 2-axis floor; pad up to
+      // 2 if shorter. Matches `normalizeAxes` for the static path.
+      while (dimsArr.length > 2 && dimsArr[dimsArr.length - 1] === 1) {
+        dimsArr.pop();
+      }
+      while (dimsArr.length < 2) dimsArr.push(1);
+      // Scalar-collapse: every dim 1 → return the fill scalar.
+      if (dimsArr.every(s => s === 1)) {
         return [fillValue];
       }
       const helper = JS_SHAPE_HELPERS[ndHelper];
@@ -383,18 +421,8 @@ export function defineShapeConstructor(
             `(needs an entry in JS_SHAPE_HELPERS keyed by '${ndHelper}')`
         );
       }
-      const dimsArr: number[] = [];
-      for (const ax of resolved.axes) {
-        if (ax.kind === "exact") {
-          dimsArr.push(ax.value);
-        } else {
-          const v = args[ax.argIndex];
-          const n = typeof v === "number" ? v : Number(v);
-          dimsArr.push(Math.trunc(n));
-        }
-      }
       const fv = cFillValue !== undefined ? fillValue : undefined;
-      return [helper(fv, resolved.ndim, dimsArr)];
+      return [helper(fv, dimsArr.length, dimsArr)];
     },
   };
 }

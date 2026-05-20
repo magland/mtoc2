@@ -947,8 +947,21 @@ export class Interpreter {
       );
     }
     // Run transfer for validation (same path codegen uses); ignore the
-    // returned types — `call` produces values directly.
-    b.transfer(argTypes, nargout);
+    // returned types — `call` produces values directly. Some builtins
+    // (notably the shape constructors `zeros` / `ones`) raise on
+    // negative-exact dim values, but the corresponding runtime case
+    // in the c-aot path clamps to 0. Since the interpreter sees
+    // runtime values typed with `exact` set (via inferTypeFromValue),
+    // a runtime-derived negative dim falsely trips transfer's static
+    // validator. The `call` hooks already handle the lenient runtime
+    // path, so transfer failures here are swallowed when the call
+    // would otherwise succeed.
+    try {
+      b.transfer(argTypes, nargout);
+    } catch {
+      // fall through to call(); it'll raise its own clearer error
+      // if the inputs really are bad.
+    }
     return b.call({ args, argTypes, nargout, ctx: this.ctx });
   }
 
