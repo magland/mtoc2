@@ -59,7 +59,8 @@ interface ProbeResult {
 
 function run(builtinName: string, probe: Probe): ProbeResult {
   const b = getBuiltin(builtinName);
-  if (!b) return { ok: false, errorClass: "Missing", errorMessage: "not registered" };
+  if (!b)
+    return { ok: false, errorClass: "Missing", errorMessage: "not registered" };
   try {
     const out = b.transfer(probe.argTypes, probe.nargout ?? 1);
     return { ok: true, outputs: out.map(typeToString) };
@@ -164,7 +165,10 @@ const PROBES: Record<string, Probe[]> = {
   cos: UNARY_REAL,
   exp: UNARY_REAL,
   sqrt: UNARY_REAL,
-  abs: [...UNARY_REAL, { label: "scalar complex", argTypes: [scalarComplex()] }],
+  abs: [
+    ...UNARY_REAL,
+    { label: "scalar complex", argTypes: [scalarComplex()] },
+  ],
 
   // Reductions.
   sum: REDUCER,

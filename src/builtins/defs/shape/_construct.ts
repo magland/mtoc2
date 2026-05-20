@@ -66,7 +66,9 @@ const JS_SHAPE_HELPERS: Record<string, ShapeNdHelper> = {
     mtoc2_tensor_ones_nd(ndim, dims) as unknown as RuntimeTensor,
   mtoc2_tensor_fill_nd: (v, ndim, dims) => {
     if (v === undefined) {
-      throw new Error("internal: mtoc2_tensor_fill_nd called without fill value");
+      throw new Error(
+        "internal: mtoc2_tensor_fill_nd called without fill value"
+      );
     }
     return mtoc2_tensor_fill_nd(v, ndim, dims) as unknown as RuntimeTensor;
   },
@@ -348,9 +350,7 @@ export function defineShapeConstructor(
       // `ndim, [...]` for plain zeros/ones. The JS-side
       // `mtoc2_tensor_fill_nd` takes (value, ndim, dims), matching.
       const jsPrefix =
-        cFillValue !== undefined
-          ? `${fillValueAsJsLiteral(fillValue)}, `
-          : "";
+        cFillValue !== undefined ? `${fillValueAsJsLiteral(fillValue)}, ` : "";
       if (shape !== undefined) {
         if (shape.every(s => s === 1)) {
           if (cFillValue !== undefined) return fillValueAsJsLiteral(fillValue);
@@ -389,7 +389,11 @@ export function defineShapeConstructor(
       // (`zeros(size(xs))` / `zeros([2 3 4])`). The first-arg tensor's
       // data IS the dim list.
       let dimsArr: number[];
-      if (argTypes.length === 1 && isNumeric(argTypes[0]) && !isScalar(argTypes[0])) {
+      if (
+        argTypes.length === 1 &&
+        isNumeric(argTypes[0]) &&
+        !isScalar(argTypes[0])
+      ) {
         const t = args[0] as { data: ArrayLike<number> };
         dimsArr = [];
         for (let i = 0; i < t.data.length; i++) {

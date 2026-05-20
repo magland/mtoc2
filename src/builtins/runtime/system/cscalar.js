@@ -10,20 +10,42 @@
 export function mtoc2_cmake(re, im) {
   return { re, im };
 }
-export function mtoc2_creal(z) { return z.re; }
-export function mtoc2_cimag(z) { return z.im; }
-export function mtoc2_cadd(a, b) { return { re: a.re + b.re, im: a.im + b.im }; }
-export function mtoc2_csub(a, b) { return { re: a.re - b.re, im: a.im - b.im }; }
+export function mtoc2_creal(z) {
+  return z.re;
+}
+export function mtoc2_cimag(z) {
+  return z.im;
+}
+export function mtoc2_cadd(a, b) {
+  return { re: a.re + b.re, im: a.im + b.im };
+}
+export function mtoc2_csub(a, b) {
+  return { re: a.re - b.re, im: a.im - b.im };
+}
 export function mtoc2_cmul(a, b) {
   return { re: a.re * b.re - a.im * b.im, im: a.re * b.im + a.im * b.re };
 }
-export function mtoc2_cneg(z) { return { re: -z.re, im: -z.im }; }
-export function mtoc2_cconj(z) { return { re: z.re, im: -z.im }; }
-export function mtoc2_cabs(z) { return Math.hypot(z.re, z.im); }
-export function mtoc2_cangle(z) { return Math.atan2(z.im, z.re); }
-export function mtoc2_cnonzero(z) { return z.re !== 0 || z.im !== 0; }
-export function mtoc2_ceq(a, b) { return a.re === b.re && a.im === b.im; }
-export function mtoc2_cne(a, b) { return a.re !== b.re || a.im !== b.im; }
+export function mtoc2_cneg(z) {
+  return { re: -z.re, im: -z.im };
+}
+export function mtoc2_cconj(z) {
+  return { re: z.re, im: -z.im };
+}
+export function mtoc2_cabs(z) {
+  return Math.hypot(z.re, z.im);
+}
+export function mtoc2_cangle(z) {
+  return Math.atan2(z.im, z.re);
+}
+export function mtoc2_cnonzero(z) {
+  return z.re !== 0 || z.im !== 0;
+}
+export function mtoc2_ceq(a, b) {
+  return a.re === b.re && a.im === b.im;
+}
+export function mtoc2_cne(a, b) {
+  return a.re !== b.re || a.im !== b.im;
+}
 
 // `cpow(a, b) = exp(b * log(a))`. Matches numbl / C99 `cpow` for
 // finite inputs; special zero / pole cases follow the same path
@@ -54,8 +76,12 @@ export function mtoc2_csqrt(z) {
   const im = (z.im >= 0 ? 1 : -1) * Math.sqrt((r - z.re) / 2);
   return { re, im };
 }
-export function mtoc2_cexp(z) { return cexp(z); }
-export function mtoc2_clog(z) { return clog(z); }
+export function mtoc2_cexp(z) {
+  return cexp(z);
+}
+export function mtoc2_clog(z) {
+  return clog(z);
+}
 export function mtoc2_clog2(z) {
   const l = clog(z);
   const lg2 = Math.log(2);
@@ -115,7 +141,7 @@ export function mtoc2_cceil(z) {
 }
 export function mtoc2_cround(z) {
   // MATLAB rounds each component half-away-from-zero.
-  const half = (x) => Math.sign(x) * Math.round(Math.abs(x));
+  const half = x => Math.sign(x) * Math.round(Math.abs(x));
   return { re: half(z.re), im: half(z.im) };
 }
 export function mtoc2_cfix(z) {

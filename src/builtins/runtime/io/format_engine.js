@@ -67,8 +67,7 @@ function applyWidth(spec, str) {
   const afterPercent = spec.slice(1);
   const flagAndWidth = afterPercent.match(/^([-+ #]*)(0?)(\d+)?/);
   const zeroFlag = flagAndWidth ? flagAndWidth[2] === "0" : false;
-  const width =
-    flagAndWidth && flagAndWidth[3] ? parseInt(flagAndWidth[3]) : 0;
+  const width = flagAndWidth && flagAndWidth[3] ? parseInt(flagAndWidth[3]) : 0;
   if (width <= str.length) return str;
   const zeroPad = !leftAlign && zeroFlag;
   const padLen = width - str.length;
@@ -242,9 +241,7 @@ export function mtoc2_sprintf_format(fmt, args) {
               result += sVal;
             }
           } else if (ch === "c") {
-            result += String.fromCharCode(
-              Math.round(toNumber(flat[argIdx++]))
-            );
+            result += String.fromCharCode(Math.round(toNumber(flat[argIdx++])));
           } else {
             result += spec + ch;
             argIdx++;

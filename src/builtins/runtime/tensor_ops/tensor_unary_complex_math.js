@@ -37,21 +37,51 @@ function cUnary(a, fn) {
   return r;
 }
 
-export function mtoc2_tensor_sqrt_complex(a) { return cUnary(a, mtoc2_csqrt); }
-export function mtoc2_tensor_exp_complex(a) { return cUnary(a, mtoc2_cexp); }
-export function mtoc2_tensor_log_complex(a) { return cUnary(a, mtoc2_clog); }
-export function mtoc2_tensor_log2_complex(a) { return cUnary(a, mtoc2_clog2); }
-export function mtoc2_tensor_log10_complex(a) { return cUnary(a, mtoc2_clog10); }
-export function mtoc2_tensor_sin_complex(a) { return cUnary(a, mtoc2_csin); }
-export function mtoc2_tensor_cos_complex(a) { return cUnary(a, mtoc2_ccos); }
-export function mtoc2_tensor_tan_complex(a) { return cUnary(a, mtoc2_ctan); }
-export function mtoc2_tensor_atan_complex(a) { return cUnary(a, mtoc2_catan); }
-export function mtoc2_tensor_floor_complex(a) { return cUnary(a, mtoc2_cfloor); }
-export function mtoc2_tensor_ceil_complex(a) { return cUnary(a, mtoc2_cceil); }
-export function mtoc2_tensor_round_complex(a) { return cUnary(a, mtoc2_cround); }
-export function mtoc2_tensor_fix_complex(a) { return cUnary(a, mtoc2_cfix); }
-export function mtoc2_tensor_sign_complex(a) { return cUnary(a, mtoc2_csign); }
-export function mtoc2_tensor_conj_complex(a) { return cUnary(a, mtoc2_cconj); }
+export function mtoc2_tensor_sqrt_complex(a) {
+  return cUnary(a, mtoc2_csqrt);
+}
+export function mtoc2_tensor_exp_complex(a) {
+  return cUnary(a, mtoc2_cexp);
+}
+export function mtoc2_tensor_log_complex(a) {
+  return cUnary(a, mtoc2_clog);
+}
+export function mtoc2_tensor_log2_complex(a) {
+  return cUnary(a, mtoc2_clog2);
+}
+export function mtoc2_tensor_log10_complex(a) {
+  return cUnary(a, mtoc2_clog10);
+}
+export function mtoc2_tensor_sin_complex(a) {
+  return cUnary(a, mtoc2_csin);
+}
+export function mtoc2_tensor_cos_complex(a) {
+  return cUnary(a, mtoc2_ccos);
+}
+export function mtoc2_tensor_tan_complex(a) {
+  return cUnary(a, mtoc2_ctan);
+}
+export function mtoc2_tensor_atan_complex(a) {
+  return cUnary(a, mtoc2_catan);
+}
+export function mtoc2_tensor_floor_complex(a) {
+  return cUnary(a, mtoc2_cfloor);
+}
+export function mtoc2_tensor_ceil_complex(a) {
+  return cUnary(a, mtoc2_cceil);
+}
+export function mtoc2_tensor_round_complex(a) {
+  return cUnary(a, mtoc2_cround);
+}
+export function mtoc2_tensor_fix_complex(a) {
+  return cUnary(a, mtoc2_cfix);
+}
+export function mtoc2_tensor_sign_complex(a) {
+  return cUnary(a, mtoc2_csign);
+}
+export function mtoc2_tensor_conj_complex(a) {
+  return cUnary(a, mtoc2_cconj);
+}
 
 // `imag`, `real`, `angle`, `abs` on a complex tensor all return a
 // REAL tensor (the imag lane is NOT allocated).

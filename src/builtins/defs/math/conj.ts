@@ -115,7 +115,9 @@ export const conj: Builtin = {
     if (isMultiElement(a)) {
       if (a.isComplex) {
         return [
-          jsTensorConjComplex(args[0] as RuntimeTensor) as unknown as RuntimeTensor,
+          jsTensorConjComplex(
+            args[0] as RuntimeTensor
+          ) as unknown as RuntimeTensor,
         ];
       }
       return [args[0]];

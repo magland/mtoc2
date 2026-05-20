@@ -103,7 +103,12 @@ function loadSnippet(
   // site looking it up separately.
   const jsName = filename.replace(/\.h$/, ".js");
   const jsCode = JS_SNIPPETS[jsName];
-  const snippet: RuntimeSnippet = { headers, code, deps, srcFilename: filename };
+  const snippet: RuntimeSnippet = {
+    headers,
+    code,
+    deps,
+    srcFilename: filename,
+  };
   if (jsCode !== undefined) snippet.jsCode = jsCode;
   return snippet;
 }

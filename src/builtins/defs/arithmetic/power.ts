@@ -54,10 +54,7 @@ import {
   elemwiseResultShape,
   needsBroadcast,
 } from "./_elemwise.js";
-import {
-  isComplexValue,
-  type RuntimeTensor,
-} from "../../../runtime/value.js";
+import { isComplexValue, type RuntimeTensor } from "../../../runtime/value.js";
 import {
   mtoc2_cpow,
   mtoc2_tensor_power_tt,
@@ -304,12 +301,8 @@ export const power: Builtin = {
       if (aN.isComplex || bN.isComplex) {
         const av = args[0];
         const bv = args[1];
-        const ax = isComplexValue(av)
-          ? av
-          : { re: Number(av), im: 0 };
-        const bx = isComplexValue(bv)
-          ? bv
-          : { re: Number(bv), im: 0 };
+        const ax = isComplexValue(av) ? av : { re: Number(av), im: 0 };
+        const bx = isComplexValue(bv) ? bv : { re: Number(bv), im: 0 };
         const out = mtoc2_cpow(ax, bx);
         if (out.im === 0 && !aN.isComplex && !bN.isComplex) return [out.re];
         return [out];

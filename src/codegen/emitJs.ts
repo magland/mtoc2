@@ -343,7 +343,9 @@ function emitStmt(s: IRStmt, indent: string, state: RuntimeState): string {
       const rhs = emitExpr(s.rhs, state);
       const path = s.fieldPath
         .map(f =>
-          /^[A-Za-z_][A-Za-z0-9_]*$/.test(f) ? `.${f}` : `[${JSON.stringify(f)}]`
+          /^[A-Za-z_][A-Za-z0-9_]*$/.test(f)
+            ? `.${f}`
+            : `[${JSON.stringify(f)}]`
         )
         .join("");
       return `${indent}${s.base.cName}${path} = ${rhs};`;
@@ -374,9 +376,7 @@ function emitIndexSliceStoreJs(
   // Single-slot linear store.
   if (s.index.length === 1) {
     const slot = s.index[0];
-    const valExpr = rhsIsScalar
-      ? `_mtoc2_rhs`
-      : `_mtoc2_rhs.data[_mtoc2_k]`;
+    const valExpr = rhsIsScalar ? `_mtoc2_rhs` : `_mtoc2_rhs.data[_mtoc2_k]`;
     if (slot.kind === "Colon") {
       return (
         `${indent}{ ` +

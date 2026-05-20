@@ -85,7 +85,9 @@ export const real: Builtin = {
     if (isMultiElement(a)) {
       if (a.isComplex) {
         return [
-          jsTensorRealComplex(args[0] as RuntimeTensor) as unknown as RuntimeTensor,
+          jsTensorRealComplex(
+            args[0] as RuntimeTensor
+          ) as unknown as RuntimeTensor,
         ];
       }
       return [args[0]];

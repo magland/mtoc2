@@ -70,7 +70,10 @@ export const sprintfBuiltin: Builtin = {
       return [jsSprintfStr(fmt, ...rest)];
     }
     return [
-      jsSprintfChar(fmt, ...rest) as unknown as import("../../../runtime/value.js").RuntimeChar,
+      jsSprintfChar(
+        fmt,
+        ...rest
+      ) as unknown as import("../../../runtime/value.js").RuntimeChar,
     ];
   },
 };

@@ -127,8 +127,12 @@ export function defineShortCircuit(
       const bN = argTypes[1] as NumericType;
       const anyComplex = aN.isComplex || bN.isComplex;
       if (anyComplex) useRuntime("mtoc2_cscalar");
-      const lhs = aN.isComplex ? `mtoc2_cnonzero(${argsJs[0]})` : `(${argsJs[0]})`;
-      const rhs = bN.isComplex ? `mtoc2_cnonzero(${argsJs[1]})` : `(${argsJs[1]})`;
+      const lhs = aN.isComplex
+        ? `mtoc2_cnonzero(${argsJs[0]})`
+        : `(${argsJs[0]})`;
+      const rhs = bN.isComplex
+        ? `mtoc2_cnonzero(${argsJs[1]})`
+        : `(${argsJs[1]})`;
       return `((${lhs} ${cOp} ${rhs}) ? 1 : 0)`;
     },
     call({ args, argTypes }) {

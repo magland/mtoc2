@@ -176,10 +176,10 @@ export const meshgrid: Builtin = {
       };
       return [o.X, o.Y];
     }
-    const o = jsMeshgrid(
-      xv,
-      args[1] as RuntimeTensor
-    ) as unknown as { X: RuntimeTensor; Y: RuntimeTensor };
+    const o = jsMeshgrid(xv, args[1] as RuntimeTensor) as unknown as {
+      X: RuntimeTensor;
+      Y: RuntimeTensor;
+    };
     return [o.X, o.Y];
   },
 };

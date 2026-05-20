@@ -11,9 +11,7 @@ export function mtoc2_format_complex(z) {
   if (im === 0) return mtoc2_format_double(re);
   if (re === 0) return mtoc2_format_double(im) + "i";
   if (im < 0) {
-    return (
-      mtoc2_format_double(re) + " - " + mtoc2_format_double(-im) + "i"
-    );
+    return mtoc2_format_double(re) + " - " + mtoc2_format_double(-im) + "i";
   }
   return mtoc2_format_double(re) + " + " + mtoc2_format_double(im) + "i";
 }

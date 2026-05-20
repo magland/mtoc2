@@ -1,6 +1,11 @@
 import { TypeError, UnsupportedConstruct } from "../../../lowering/errors.js";
 import { isMultiElement } from "../../../lowering/types.js";
-import { type Builtin, requireEmitC, requireEmitJs, requireCall } from "../../registry.js";
+import {
+  type Builtin,
+  requireEmitC,
+  requireEmitJs,
+  requireCall,
+} from "../../registry.js";
 import { requireRealOrComplex } from "../_shared.js";
 import { rdivide } from "./rdivide.js";
 

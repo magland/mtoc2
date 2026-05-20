@@ -10,14 +10,10 @@ export function mtoc2_tensor_mtimes_complex_scalar(a, b) {
     throw new Error("mtoc2_tensor_mtimes_complex_scalar: inputs must be 2-D");
   }
   if (a.shape[0] !== 1 || b.shape[1] !== 1) {
-    throw new Error(
-      "mtoc2_tensor_mtimes_complex_scalar: requires 1×k * k×1"
-    );
+    throw new Error("mtoc2_tensor_mtimes_complex_scalar: requires 1×k * k×1");
   }
   if (a.shape[1] !== b.shape[0]) {
-    throw new Error(
-      "mtoc2_tensor_mtimes_complex_scalar: inner-dim mismatch"
-    );
+    throw new Error("mtoc2_tensor_mtimes_complex_scalar: inner-dim mismatch");
   }
   const k = a.shape[1];
   const aim = a.imag;

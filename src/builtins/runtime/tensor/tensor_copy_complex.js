@@ -9,8 +9,9 @@ export function mtoc2_tensor_copy_complex(t) {
     mtoc2Tag: "tensor",
     shape: t.shape.slice(),
     data: new Float64Array(t.data),
-    imag: t.imag !== undefined
-      ? new Float64Array(t.imag)
-      : new Float64Array(t.data.length),
+    imag:
+      t.imag !== undefined
+        ? new Float64Array(t.imag)
+        : new Float64Array(t.data.length),
   };
 }

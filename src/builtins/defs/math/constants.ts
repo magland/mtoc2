@@ -15,7 +15,12 @@
  */
 import { TypeError, UnsupportedConstruct } from "../../../lowering/errors.js";
 import { scalarDouble } from "../../../lowering/types.js";
-import { type Builtin, requireEmitC, requireEmitJs, requireCall } from "../../registry.js";
+import {
+  type Builtin,
+  requireEmitC,
+  requireEmitJs,
+  requireCall,
+} from "../../registry.js";
 import { defineShapeConstructor } from "../shape/_construct.js";
 
 function constBuiltin(

@@ -133,7 +133,9 @@ export const uminus: Builtin = {
         ];
       }
       return [
-        mtoc2_tensor_uminus(args[0] as RuntimeTensor) as unknown as RuntimeTensor,
+        mtoc2_tensor_uminus(
+          args[0] as RuntimeTensor
+        ) as unknown as RuntimeTensor,
       ];
     }
     if (isNumeric(ty) && ty.isComplex) {

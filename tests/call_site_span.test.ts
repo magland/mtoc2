@@ -37,9 +37,12 @@ function lineOfOffset(source: string, offset: number): number {
 
 describe("arity error span points at the call site, not the definition", () => {
   it("too few args", () => {
-    const source = ["foo(1);", "function y = foo(a, b)", "  y = a + b;", "end"].join(
-      "\n"
-    );
+    const source = [
+      "foo(1);",
+      "function y = foo(a, b)",
+      "  y = a + b;",
+      "end",
+    ].join("\n");
     const { error } = lowerAndCatch(source);
     expect(error.message).toMatch(/foo.*expects 2 arg\(s\), got 1/);
     expect(error.span).toBeDefined();

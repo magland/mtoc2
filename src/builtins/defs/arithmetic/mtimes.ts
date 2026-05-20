@@ -8,7 +8,12 @@ import {
   type NumericType,
   type Sign,
 } from "../../../lowering/types.js";
-import { type Builtin, requireEmitC, requireEmitJs, requireCall } from "../../registry.js";
+import {
+  type Builtin,
+  requireEmitC,
+  requireEmitJs,
+  requireCall,
+} from "../../registry.js";
 import type { RuntimeTensor } from "../../../runtime/value.js";
 import {
   mtoc2_tensor_mtimes_real,

@@ -148,7 +148,9 @@ export const notBuiltin: Builtin = {
           `'not' complex-tensor 'call' not yet wired`
         );
       }
-      return [jsTensorNot(args[0] as RuntimeTensor) as unknown as RuntimeTensor];
+      return [
+        jsTensorNot(args[0] as RuntimeTensor) as unknown as RuntimeTensor,
+      ];
     }
     const a = argTypes[0] as NumericType;
     if (a.isComplex) {

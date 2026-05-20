@@ -772,9 +772,7 @@ function buildElemwiseRealBinary(opts: {
         if (aMulti && bMulti) {
           const at = aVal as RuntimeTensor;
           const bt = bVal as RuntimeTensor;
-          const op = needsBroadcast(aN, bN)
-            ? cxHelpers.bcast_tt
-            : cxHelpers.tt;
+          const op = needsBroadcast(aN, bN) ? cxHelpers.bcast_tt : cxHelpers.tt;
           return [op(at, bt)];
         }
         if (aMulti) {

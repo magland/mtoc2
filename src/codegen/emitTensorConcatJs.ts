@@ -74,8 +74,7 @@ function emitTensorConcatJsStatic(
       const cell = row[j];
       const cellColsHere = cellCols[i][j];
       const cellStr = emit(cell, state);
-      const cellIsComplex =
-        cell.ty.kind === "Numeric" && cell.ty.isComplex;
+      const cellIsComplex = cell.ty.kind === "Numeric" && cell.ty.isComplex;
 
       if (cellRows === 1 && cellColsHere === 1) {
         const dstIdx = `${rowOff} + ${colOff} * ${totalRows}`;
@@ -107,9 +106,7 @@ function emitTensorConcatJsStatic(
           // Emit the temp binding outside the loops by re-ordering
           // — easier: emit the loops inline using nested IIFE.
           lines.push(`    const ${tmp} = ${cellStr};`);
-          lines.push(
-            `    _mtoc2_t.data[${dstIdx}] = ${tmp}.data[${srcIdx}];`
-          );
+          lines.push(`    _mtoc2_t.data[${dstIdx}] = ${tmp}.data[${srcIdx}];`);
           lines.push(
             `    _mtoc2_t.imag[${dstIdx}] = ${tmp}.imag !== undefined ? ${tmp}.imag[${srcIdx}] : 0;`
           );

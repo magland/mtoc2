@@ -90,26 +90,54 @@ function cBcastKernel(a, b, fn) {
 }
 
 // ── plus ──────────────────────────────────────────────────────────────────
-export function mtoc2_tensor_plus_complex_tt(a, b) { return cTtKernel(a, b, mtoc2_cadd); }
-export function mtoc2_tensor_plus_complex_ts(a, s) { return cTsKernel(a, s, mtoc2_cadd); }
-export function mtoc2_tensor_plus_complex_bcast_tt(a, b) { return cBcastKernel(a, b, mtoc2_cadd); }
+export function mtoc2_tensor_plus_complex_tt(a, b) {
+  return cTtKernel(a, b, mtoc2_cadd);
+}
+export function mtoc2_tensor_plus_complex_ts(a, s) {
+  return cTsKernel(a, s, mtoc2_cadd);
+}
+export function mtoc2_tensor_plus_complex_bcast_tt(a, b) {
+  return cBcastKernel(a, b, mtoc2_cadd);
+}
 
 // ── minus ─────────────────────────────────────────────────────────────────
-export function mtoc2_tensor_minus_complex_tt(a, b) { return cTtKernel(a, b, mtoc2_csub); }
-export function mtoc2_tensor_minus_complex_ts(a, s) { return cTsKernel(a, s, mtoc2_csub); }
-export function mtoc2_tensor_minus_complex_st(s, a) { return cStKernel(s, a, mtoc2_csub); }
-export function mtoc2_tensor_minus_complex_bcast_tt(a, b) { return cBcastKernel(a, b, mtoc2_csub); }
+export function mtoc2_tensor_minus_complex_tt(a, b) {
+  return cTtKernel(a, b, mtoc2_csub);
+}
+export function mtoc2_tensor_minus_complex_ts(a, s) {
+  return cTsKernel(a, s, mtoc2_csub);
+}
+export function mtoc2_tensor_minus_complex_st(s, a) {
+  return cStKernel(s, a, mtoc2_csub);
+}
+export function mtoc2_tensor_minus_complex_bcast_tt(a, b) {
+  return cBcastKernel(a, b, mtoc2_csub);
+}
 
 // ── times ─────────────────────────────────────────────────────────────────
-export function mtoc2_tensor_times_complex_tt(a, b) { return cTtKernel(a, b, mtoc2_cmul); }
-export function mtoc2_tensor_times_complex_ts(a, s) { return cTsKernel(a, s, mtoc2_cmul); }
-export function mtoc2_tensor_times_complex_bcast_tt(a, b) { return cBcastKernel(a, b, mtoc2_cmul); }
+export function mtoc2_tensor_times_complex_tt(a, b) {
+  return cTtKernel(a, b, mtoc2_cmul);
+}
+export function mtoc2_tensor_times_complex_ts(a, s) {
+  return cTsKernel(a, s, mtoc2_cmul);
+}
+export function mtoc2_tensor_times_complex_bcast_tt(a, b) {
+  return cBcastKernel(a, b, mtoc2_cmul);
+}
 
 // ── rdivide ───────────────────────────────────────────────────────────────
-export function mtoc2_tensor_rdivide_complex_tt(a, b) { return cTtKernel(a, b, mtoc2_cdiv); }
-export function mtoc2_tensor_rdivide_complex_ts(a, s) { return cTsKernel(a, s, mtoc2_cdiv); }
-export function mtoc2_tensor_rdivide_complex_st(s, a) { return cStKernel(s, a, mtoc2_cdiv); }
-export function mtoc2_tensor_rdivide_complex_bcast_tt(a, b) { return cBcastKernel(a, b, mtoc2_cdiv); }
+export function mtoc2_tensor_rdivide_complex_tt(a, b) {
+  return cTtKernel(a, b, mtoc2_cdiv);
+}
+export function mtoc2_tensor_rdivide_complex_ts(a, s) {
+  return cTsKernel(a, s, mtoc2_cdiv);
+}
+export function mtoc2_tensor_rdivide_complex_st(s, a) {
+  return cStKernel(s, a, mtoc2_cdiv);
+}
+export function mtoc2_tensor_rdivide_complex_bcast_tt(a, b) {
+  return cBcastKernel(a, b, mtoc2_cdiv);
+}
 
 // ── uminus ────────────────────────────────────────────────────────────────
 export function mtoc2_tensor_uminus_complex(a) {

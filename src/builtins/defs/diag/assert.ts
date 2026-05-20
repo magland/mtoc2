@@ -4,7 +4,12 @@
  */
 
 import { TypeError, UnsupportedConstruct } from "../../../lowering/errors.js";
-import { isNumeric, isScalar, isText, typeToString } from "../../../lowering/types.js";
+import {
+  isNumeric,
+  isScalar,
+  isText,
+  typeToString,
+} from "../../../lowering/types.js";
 import type { Builtin } from "../../registry.js";
 import { exactDouble } from "../_shared.js";
 import {
@@ -111,10 +116,7 @@ export const assert: Builtin = {
   },
   call({ args, argTypes }) {
     const cond = argTypes[0];
-    const v =
-      typeof args[0] === "number"
-        ? args[0]
-        : Number(args[0] as object);
+    const v = typeof args[0] === "number" ? args[0] : Number(args[0] as object);
     const truthy = v !== 0 && !Number.isNaN(v);
     if (truthy) return [];
     const unwrapped = args.slice(1).map(unwrapFmtArg);

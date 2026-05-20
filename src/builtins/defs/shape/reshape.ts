@@ -407,12 +407,11 @@ export const reshape: Builtin = {
         dims.push(-1);
       } else {
         const v = args[axis.argIndex + 1];
-        dims.push(
-          Math.trunc(typeof v === "number" ? v : Number(v as object))
-        );
+        dims.push(Math.trunc(typeof v === "number" ? v : Number(v as object)));
       }
     }
-    const reshapeFn = isNumeric(a) && a.isComplex ? jsReshapeComplex : jsReshape;
+    const reshapeFn =
+      isNumeric(a) && a.isComplex ? jsReshapeComplex : jsReshape;
     return [
       reshapeFn(
         args[0] as RuntimeTensor,

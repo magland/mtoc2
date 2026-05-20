@@ -22,8 +22,7 @@ export const round = defineUnaryRealMath({
   // +Inf, so we render the matlabRound formula inline. (Kept inline
   // rather than as a paired `.js` snippet because it's a single
   // expression and avoids snippet activation overhead.)
-  jsExpr: arg =>
-    `(Math.sign(${arg}) * Math.round(Math.abs(${arg})))`,
+  jsExpr: arg => `(Math.sign(${arg}) * Math.round(Math.abs(${arg})))`,
   signRule: roundingSignRule(true, true),
   complex: { cFnComplex: "mtoc2_cround", jsFnComplex: cRound },
 });

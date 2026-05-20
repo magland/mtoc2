@@ -3,8 +3,10 @@
 // the C side so cross-runner output stays byte-for-byte.
 
 export function mtoc2_cdiv(a, b) {
-  const ar = a.re, ai = a.im;
-  const br = b.re, bi = b.im;
+  const ar = a.re,
+    ai = a.im;
+  const br = b.re,
+    bi = b.im;
   if (Math.abs(br) >= Math.abs(bi)) {
     const r = bi / br;
     const den = br + r * bi;

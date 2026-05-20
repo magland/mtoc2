@@ -69,10 +69,7 @@ import {
   mtoc2_tensor_round_complex,
   mtoc2_tensor_sign_complex,
 } from "../../runtime/snippets.gen.js";
-import {
-  isComplexValue,
-  type RuntimeTensor,
-} from "../../../runtime/value.js";
+import { isComplexValue, type RuntimeTensor } from "../../../runtime/value.js";
 
 /** JS-side tensor kernels keyed by builtin name. Matches the C
  *  side's `mtoc2_tensor_<name>` pattern; activations land via the

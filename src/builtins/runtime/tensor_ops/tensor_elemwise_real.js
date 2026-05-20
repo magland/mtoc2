@@ -88,21 +88,49 @@ const opMinus = (x, y) => x - y;
 const opTimes = (x, y) => x * y;
 const opRdivide = (x, y) => x / y;
 
-export function mtoc2_tensor_plus_tt(a, b) { return tt_kernel(a, b, opPlus); }
-export function mtoc2_tensor_minus_tt(a, b) { return tt_kernel(a, b, opMinus); }
-export function mtoc2_tensor_times_tt(a, b) { return tt_kernel(a, b, opTimes); }
-export function mtoc2_tensor_rdivide_tt(a, b) { return tt_kernel(a, b, opRdivide); }
+export function mtoc2_tensor_plus_tt(a, b) {
+  return tt_kernel(a, b, opPlus);
+}
+export function mtoc2_tensor_minus_tt(a, b) {
+  return tt_kernel(a, b, opMinus);
+}
+export function mtoc2_tensor_times_tt(a, b) {
+  return tt_kernel(a, b, opTimes);
+}
+export function mtoc2_tensor_rdivide_tt(a, b) {
+  return tt_kernel(a, b, opRdivide);
+}
 
-export function mtoc2_tensor_plus_ts(a, s) { return ts_kernel(a, s, opPlus); }
-export function mtoc2_tensor_minus_ts(a, s) { return ts_kernel(a, s, opMinus); }
-export function mtoc2_tensor_times_ts(a, s) { return ts_kernel(a, s, opTimes); }
-export function mtoc2_tensor_rdivide_ts(a, s) { return ts_kernel(a, s, opRdivide); }
+export function mtoc2_tensor_plus_ts(a, s) {
+  return ts_kernel(a, s, opPlus);
+}
+export function mtoc2_tensor_minus_ts(a, s) {
+  return ts_kernel(a, s, opMinus);
+}
+export function mtoc2_tensor_times_ts(a, s) {
+  return ts_kernel(a, s, opTimes);
+}
+export function mtoc2_tensor_rdivide_ts(a, s) {
+  return ts_kernel(a, s, opRdivide);
+}
 
 // Non-commutative ops also need scalar-OP-tensor.
-export function mtoc2_tensor_minus_st(s, a) { return st_kernel(s, a, opMinus); }
-export function mtoc2_tensor_rdivide_st(s, a) { return st_kernel(s, a, opRdivide); }
+export function mtoc2_tensor_minus_st(s, a) {
+  return st_kernel(s, a, opMinus);
+}
+export function mtoc2_tensor_rdivide_st(s, a) {
+  return st_kernel(s, a, opRdivide);
+}
 
-export function mtoc2_tensor_plus_bcast_tt(a, b) { return bcast_kernel(a, b, opPlus); }
-export function mtoc2_tensor_minus_bcast_tt(a, b) { return bcast_kernel(a, b, opMinus); }
-export function mtoc2_tensor_times_bcast_tt(a, b) { return bcast_kernel(a, b, opTimes); }
-export function mtoc2_tensor_rdivide_bcast_tt(a, b) { return bcast_kernel(a, b, opRdivide); }
+export function mtoc2_tensor_plus_bcast_tt(a, b) {
+  return bcast_kernel(a, b, opPlus);
+}
+export function mtoc2_tensor_minus_bcast_tt(a, b) {
+  return bcast_kernel(a, b, opMinus);
+}
+export function mtoc2_tensor_times_bcast_tt(a, b) {
+  return bcast_kernel(a, b, opTimes);
+}
+export function mtoc2_tensor_rdivide_bcast_tt(a, b) {
+  return bcast_kernel(a, b, opRdivide);
+}

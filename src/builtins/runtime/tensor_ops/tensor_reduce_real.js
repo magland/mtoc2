@@ -150,33 +150,38 @@ function logical_dim(t, dim, emptyResult, shortPredicate) {
 // ── Sum ─────────────────────────────────────────────────────────────────
 const sumInit = 0;
 const sumAccum = (a, x) => a + x;
-const idFinalize = (a) => a;
-export const mtoc2_sum_all = (t) => accum_all(t, sumInit, sumAccum, idFinalize);
-export const mtoc2_sum_dim = (t, d) => accum_dim(t, d, sumInit, sumAccum, idFinalize);
+const idFinalize = a => a;
+export const mtoc2_sum_all = t => accum_all(t, sumInit, sumAccum, idFinalize);
+export const mtoc2_sum_dim = (t, d) =>
+  accum_dim(t, d, sumInit, sumAccum, idFinalize);
 
 // ── Prod ────────────────────────────────────────────────────────────────
 const prodInit = 1;
 const prodAccum = (a, x) => a * x;
-export const mtoc2_prod_all = (t) => accum_all(t, prodInit, prodAccum, idFinalize);
-export const mtoc2_prod_dim = (t, d) => accum_dim(t, d, prodInit, prodAccum, idFinalize);
+export const mtoc2_prod_all = t =>
+  accum_all(t, prodInit, prodAccum, idFinalize);
+export const mtoc2_prod_dim = (t, d) =>
+  accum_dim(t, d, prodInit, prodAccum, idFinalize);
 
 // ── Mean ────────────────────────────────────────────────────────────────
 const meanFinalize = (a, n) => (n === 0 ? NaN : a / n);
-export const mtoc2_mean_all = (t) => accum_all(t, sumInit, sumAccum, meanFinalize);
-export const mtoc2_mean_dim = (t, d) => accum_dim(t, d, sumInit, sumAccum, meanFinalize);
+export const mtoc2_mean_all = t =>
+  accum_all(t, sumInit, sumAccum, meanFinalize);
+export const mtoc2_mean_dim = (t, d) =>
+  accum_dim(t, d, sumInit, sumAccum, meanFinalize);
 
 // ── Min / max ───────────────────────────────────────────────────────────
-export const mtoc2_min_all = (t) => minmax_all(t, "min");
+export const mtoc2_min_all = t => minmax_all(t, "min");
 export const mtoc2_min_dim = (t, d) => minmax_dim(t, d, "min");
-export const mtoc2_max_all = (t) => minmax_all(t, "max");
+export const mtoc2_max_all = t => minmax_all(t, "max");
 export const mtoc2_max_dim = (t, d) => minmax_dim(t, d, "max");
 
 // ── Any / all ───────────────────────────────────────────────────────────
 // any: short-circuits on nonzero; emptyResult = 0.
-const anyShort = (x) => x !== 0;
-export const mtoc2_any_all = (t) => logical_all(t, 0, anyShort);
+const anyShort = x => x !== 0;
+export const mtoc2_any_all = t => logical_all(t, 0, anyShort);
 export const mtoc2_any_dim = (t, d) => logical_dim(t, d, 0, anyShort);
 // all: short-circuits on zero; emptyResult = 1.
-const allShort = (x) => x === 0;
-export const mtoc2_all_all = (t) => logical_all(t, 1, allShort);
+const allShort = x => x === 0;
+export const mtoc2_all_all = t => logical_all(t, 1, allShort);
 export const mtoc2_all_dim = (t, d) => logical_dim(t, d, 1, allShort);

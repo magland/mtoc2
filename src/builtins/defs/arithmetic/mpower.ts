@@ -11,7 +11,12 @@
 
 import { TypeError, UnsupportedConstruct } from "../../../lowering/errors.js";
 import { isMultiElement } from "../../../lowering/types.js";
-import { type Builtin, requireEmitC, requireEmitJs, requireCall } from "../../registry.js";
+import {
+  type Builtin,
+  requireEmitC,
+  requireEmitJs,
+  requireCall,
+} from "../../registry.js";
 import { power } from "./power.js";
 
 export const mpower: Builtin = {

@@ -10,17 +10,19 @@ import {
   EXACT_ARRAY_MAX_ELEMENTS,
 } from "../../../lowering/types.js";
 import { TypeError, UnsupportedConstruct } from "../../../lowering/errors.js";
-import { type Builtin, requireEmitC, requireEmitJs, requireCall } from "../../registry.js";
+import {
+  type Builtin,
+  requireEmitC,
+  requireEmitJs,
+  requireCall,
+} from "../../registry.js";
 import {
   requireRealOrComplex,
   exactComplex,
   exactComplexArray,
 } from "../_shared.js";
 import { defineUnaryRealMath } from "./_unary_real.js";
-import {
-  isComplexValue,
-  type RuntimeTensor,
-} from "../../../runtime/value.js";
+import { isComplexValue, type RuntimeTensor } from "../../../runtime/value.js";
 import {
   mtoc2_cabs,
   mtoc2_tensor_abs_complex as jsTensorAbsComplex,

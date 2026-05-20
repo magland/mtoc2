@@ -9,7 +9,12 @@
  */
 
 import { TypeError, UnsupportedConstruct } from "../../../lowering/errors.js";
-import { isNumeric, isScalar, scalarLogical, type Type } from "../../../lowering/types.js";
+import {
+  isNumeric,
+  isScalar,
+  scalarLogical,
+  type Type,
+} from "../../../lowering/types.js";
 import type { Builtin } from "../../registry.js";
 import {
   requireScalarRealOrComplex,
@@ -118,21 +123,13 @@ export function defineCompare(
         const av = args[0];
         const bv = args[1];
         const aRe =
-          typeof av === "number"
-            ? av
-            : (av as { re: number; im: number }).re;
+          typeof av === "number" ? av : (av as { re: number; im: number }).re;
         const aIm =
-          typeof av === "number"
-            ? 0
-            : (av as { re: number; im: number }).im;
+          typeof av === "number" ? 0 : (av as { re: number; im: number }).im;
         const bRe =
-          typeof bv === "number"
-            ? bv
-            : (bv as { re: number; im: number }).re;
+          typeof bv === "number" ? bv : (bv as { re: number; im: number }).re;
         const bIm =
-          typeof bv === "number"
-            ? 0
-            : (bv as { re: number; im: number }).im;
+          typeof bv === "number" ? 0 : (bv as { re: number; im: number }).im;
         if (kind === "eq") return [aRe === bRe && aIm === bIm ? 1 : 0];
         if (kind === "ne") return [aRe !== bRe || aIm !== bIm ? 1 : 0];
         return [fold(aRe, bRe) ? 1 : 0];

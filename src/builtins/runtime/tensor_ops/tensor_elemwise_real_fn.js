@@ -62,7 +62,7 @@ function bcast(a, b, fn) {
 function mtoc2_mod_real_js(a, b) {
   if (b === 0) return a;
   let r = a % b;
-  if (r !== 0 && (r < 0) !== (b < 0)) r += b;
+  if (r !== 0 && r < 0 !== b < 0) r += b;
   return r;
 }
 

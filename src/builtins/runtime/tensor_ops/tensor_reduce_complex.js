@@ -27,10 +27,7 @@ function complexAccumDim(t, dim, init, accum, finalize) {
   if (dim < 1) throw new Error(`reducer _dim: dim must be >= 1 (got ${dim})`);
   if (dim > t.shape.length) {
     // No-op axis: return a fresh complex copy.
-    const out = mtoc2_tensor_alloc_nd_complex(
-      t.shape.length,
-      t.shape.slice()
-    );
+    const out = mtoc2_tensor_alloc_nd_complex(t.shape.length, t.shape.slice());
     out.data.set(t.data);
     if (t.imag !== undefined) out.imag.set(t.imag);
     return out;
@@ -69,19 +66,19 @@ const cProdAccum = (a, x) => ({
   re: a.re * x.re - a.im * x.im,
   im: a.re * x.im + a.im * x.re,
 });
-const cIdFinalize = (a) => a;
+const cIdFinalize = a => a;
 const cMeanFinalize = (a, n) =>
   n === 0 ? { re: NaN, im: NaN } : { re: a.re / n, im: a.im / n };
 
-export const mtoc2_sum_complex_all = (t) =>
+export const mtoc2_sum_complex_all = t =>
   complexAccumAll(t, cSumInit, cSumAccum, cIdFinalize);
 export const mtoc2_sum_complex_dim = (t, d) =>
   complexAccumDim(t, d, cSumInit, cSumAccum, cIdFinalize);
-export const mtoc2_prod_complex_all = (t) =>
+export const mtoc2_prod_complex_all = t =>
   complexAccumAll(t, cProdInit, cProdAccum, cIdFinalize);
 export const mtoc2_prod_complex_dim = (t, d) =>
   complexAccumDim(t, d, cProdInit, cProdAccum, cIdFinalize);
-export const mtoc2_mean_complex_all = (t) =>
+export const mtoc2_mean_complex_all = t =>
   complexAccumAll(t, cSumInit, cSumAccum, cMeanFinalize);
 export const mtoc2_mean_complex_dim = (t, d) =>
   complexAccumDim(t, d, cSumInit, cSumAccum, cMeanFinalize);
@@ -117,10 +114,7 @@ function complexBetter(aRe, aIm, bRe, bIm, cmp) {
 function complexMinmaxDim(t, dim, cmp) {
   if (dim < 1) throw new Error(`reducer _dim: dim must be >= 1 (got ${dim})`);
   if (dim > t.shape.length) {
-    const out = mtoc2_tensor_alloc_nd_complex(
-      t.shape.length,
-      t.shape.slice()
-    );
+    const out = mtoc2_tensor_alloc_nd_complex(t.shape.length, t.shape.slice());
     out.data.set(t.data);
     if (t.imag !== undefined) out.imag.set(t.imag);
     return out;
@@ -160,9 +154,9 @@ function complexMinmaxDim(t, dim, cmp) {
   return out;
 }
 
-export const mtoc2_min_complex_all = (t) => complexMinmaxAll(t, "<");
+export const mtoc2_min_complex_all = t => complexMinmaxAll(t, "<");
 export const mtoc2_min_complex_dim = (t, d) => complexMinmaxDim(t, d, "<");
-export const mtoc2_max_complex_all = (t) => complexMinmaxAll(t, ">");
+export const mtoc2_max_complex_all = t => complexMinmaxAll(t, ">");
 export const mtoc2_max_complex_dim = (t, d) => complexMinmaxDim(t, d, ">");
 
 // any / all — real result; toBool per element (either lane nonzero).
@@ -216,11 +210,11 @@ function complexLogicalDim(t, dim, emptyResult, shortPredicate) {
   return out;
 }
 
-const cAnyShort = (x) => x;
-const cAllShort = (x) => !x;
-export const mtoc2_any_complex_all = (t) => complexLogicalAll(t, 0, cAnyShort);
+const cAnyShort = x => x;
+const cAllShort = x => !x;
+export const mtoc2_any_complex_all = t => complexLogicalAll(t, 0, cAnyShort);
 export const mtoc2_any_complex_dim = (t, d) =>
   complexLogicalDim(t, d, 0, cAnyShort);
-export const mtoc2_all_complex_all = (t) => complexLogicalAll(t, 1, cAllShort);
+export const mtoc2_all_complex_all = t => complexLogicalAll(t, 1, cAllShort);
 export const mtoc2_all_complex_dim = (t, d) =>
   complexLogicalDim(t, d, 1, cAllShort);

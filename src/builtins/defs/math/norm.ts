@@ -19,10 +19,7 @@ import {
 } from "../../../lowering/types.js";
 import { TypeError, UnsupportedConstruct } from "../../../lowering/errors.js";
 import type { Builtin } from "../../registry.js";
-import {
-  isComplexValue,
-  type RuntimeTensor,
-} from "../../../runtime/value.js";
+import { isComplexValue, type RuntimeTensor } from "../../../runtime/value.js";
 import {
   mtoc2_cabs,
   mtoc2_norm2_real as jsNorm2Real,

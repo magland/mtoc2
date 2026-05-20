@@ -83,7 +83,9 @@ export const imag: Builtin = {
     if (isMultiElement(a)) {
       if (a.isComplex) {
         return [
-          jsTensorImagComplex(args[0] as RuntimeTensor) as unknown as RuntimeTensor,
+          jsTensorImagComplex(
+            args[0] as RuntimeTensor
+          ) as unknown as RuntimeTensor,
         ];
       }
       // Real tensor → zero-filled tensor of the same shape.

@@ -6,8 +6,7 @@ import { mtoc2_tensor_alloc_nd } from "../tensor/tensor_alloc_nd.js";
 
 export function mtoc2_tensor_flip(a, dimIdx) {
   const r = mtoc2_tensor_alloc_nd(a.shape.length, a.shape);
-  const axisSize =
-    dimIdx >= 0 && dimIdx < a.shape.length ? a.shape[dimIdx] : 1;
+  const axisSize = dimIdx >= 0 && dimIdx < a.shape.length ? a.shape[dimIdx] : 1;
   if (axisSize <= 1) {
     r.data.set(a.data);
     return r;
