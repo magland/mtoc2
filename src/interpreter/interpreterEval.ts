@@ -1,7 +1,6 @@
 /**
- * Expression evaluation: evalExpr (the big switch), indexTensor,
- * tryExtractDottedName. Attached to `Interpreter.prototype` from
- * `interpreter.ts`.
+ * Expression evaluation: evalExpr (the big switch) and indexTensor.
+ * Attached to `Interpreter.prototype` from `interpreter.ts`.
  *
  * Mirrors numbl's interpreterExec.ts (where eval lives) split apart
  * here so each file stays under ~600 lines.
@@ -25,6 +24,7 @@ import {
   type RuntimeValue,
 } from "../runtime/value.js";
 import { UnsupportedConstruct } from "../lowering/errors.js";
+import { tryExtractDottedName } from "../parser/astUtils.js";
 import { Environment } from "./environment.js";
 import { mtoc2_tensor_make_range as jsMakeRange } from "../builtins/runtime/snippets.gen.js";
 import { Interpreter } from "./interpreter.js";
@@ -335,7 +335,7 @@ export function evalExpr(this: Interpreter, e: Expr): RuntimeValue {
         }
       }
       // Try to extract a dotted name like `pkg.fn` / `pkg.sub.fn`.
-      const dotted = this.tryExtractDottedName(e.base);
+      const dotted = tryExtractDottedName(e.base);
       if (dotted !== null && this.env.get(dotted.split(".")[0]) === undefined) {
         const argVals = e.args.map(a => this.evalExpr(a));
         const qualified = `${dotted}.${e.name}`;
@@ -592,27 +592,6 @@ export function indexTensor(
   while (dims.length > 2 && dims[dims.length - 1] === 1) dims.pop();
   while (dims.length < 2) dims.push(1);
   return makeTensor(dims, out);
-}
-
-// ── Dotted-name extraction ────────────────────────────────────────────────
-
-/** Try to extract a dotted identifier chain like `pkg.sub.foo` from a
- *  Member-rooted expression, returning the dotted string. Returns
- *  null if the chain bottoms out at something other than an Ident. */
-export function tryExtractDottedName(
-  this: Interpreter,
-  e: Expr
-): string | null {
-  void this;
-  const parts: string[] = [];
-  let cur: Expr = e;
-  while (cur.type === "Member") {
-    parts.unshift(cur.name);
-    cur = cur.base;
-  }
-  if (cur.type !== "Ident") return null;
-  parts.unshift(cur.name);
-  return parts.join(".");
 }
 
 // Used internally by the anonymous-function handler so a fresh child

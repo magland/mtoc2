@@ -140,7 +140,6 @@ export class Interpreter {
     rawArgs: ReadonlyArray<Expr>,
     span: Span
   ) => RuntimeValue;
-  declare tryExtractDottedName: (e: Expr) => string | null;
 
   // ── Methods added by interpreterFunctions.ts ──────────────────────────
   declare callByName: (

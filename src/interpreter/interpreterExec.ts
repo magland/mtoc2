@@ -16,6 +16,7 @@ import {
   type RuntimeValue,
 } from "../runtime/value.js";
 import { UnsupportedConstruct } from "../lowering/errors.js";
+import { tryExtractDottedName } from "../parser/astUtils.js";
 import {
   mtoc2_disp_double,
   mtoc2_toc_print,
@@ -61,7 +62,7 @@ export function execStmt(this: Interpreter, s: Stmt): void {
         results = this.callByName(s.expr.name, argVals, nargout, s.span);
       } else if (s.expr.type === "MethodCall") {
         const me = s.expr;
-        const dotted = this.tryExtractDottedName(me.base);
+        const dotted = tryExtractDottedName(me.base);
         if (
           dotted !== null &&
           this.env.get(dotted.split(".")[0]) === undefined

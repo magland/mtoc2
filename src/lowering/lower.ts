@@ -35,6 +35,7 @@
 import type { AbstractSyntaxTree, Expr, Stmt, Span } from "../parser/index.js";
 import { BinaryOperation, UnaryOperation } from "../parser/index.js";
 import { offsetToLineCol } from "../parser/sourceLoc.js";
+import { tryExtractDottedName } from "../parser/astUtils.js";
 import { UnsupportedConstruct, TypeError } from "./errors.js";
 import {
   type Type,
@@ -1665,20 +1666,10 @@ export function cIdentForUserName(name: string): string {
   return name;
 }
 
-/** Walk a chain of Ident / Member nodes (no calls, no indexing) and
- *  return the dotted-name they form, e.g. `Member(Ident("pkg"),
- *  "sub")` → `"pkg.sub"`. Returns null for any other shape. Used to
- *  detect `pkg.foo(...)` and `pkg.sub.foo(...)` package call shapes
- *  before falling through to instance-method dispatch. Mirrors
- *  numbl's interpreter helper of the same name. */
-export function tryExtractDottedName(e: Expr): string | null {
-  if (e.type === "Ident") return e.name;
-  if (e.type === "Member") {
-    const base = tryExtractDottedName(e.base);
-    if (base) return `${base}.${e.name}`;
-  }
-  return null;
-}
+// Re-export so existing call sites (`lowerMethodCall`,
+// `lowerMultiAssign`, and `lowerProgram` itself) keep working without
+// import-path churn.
+export { tryExtractDottedName } from "../parser/astUtils.js";
 
 /** If the lowered cond's type carries an exact scalar value, return
  *  its boolean interpretation; otherwise null. This is the ONLY place
