@@ -12,12 +12,16 @@
  *   MTOC_TEST_CONCURRENCY=4 npx tsx scripts/run_test_scripts_all_modes.ts
  *   MTOC_TEST_TIMEOUT_MS=60000 npx tsx scripts/run_test_scripts_all_modes.ts
  *
- * The c-aot-vs-numbl cross-runner (`scripts/run_test_scripts.ts`) is
- * the strict commit-time gate. This all-modes sweep is the surface
- * signal for interpreter / js-aot backend gaps; scripts known to fail
- * on a backend can declare it expected-to-fail via
- * `% mtoc2-test-xfail-<backend>: <reason>` so a clean run stays clean
- * and real regressions stand out.
+ * This is a commit-time gate alongside the c-aot-only cross-runner
+ * (`scripts/run_test_scripts.ts`). Both must pass before a change
+ * lands — the c-aot runner is the byte-for-byte oracle against
+ * numbl; this all-modes runner ensures the interpreter and js-aot
+ * backends don't quietly drift away from c-aot.
+ *
+ * Scripts that hit a backend gap (e.g. a builtin's `call` hook
+ * isn't wired yet) declare it expected-to-fail via
+ * `% mtoc2-test-xfail-<backend>: <reason>` so a clean run stays
+ * clean and real regressions stand out.
  */
 
 import { execFile } from "node:child_process";

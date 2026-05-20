@@ -204,21 +204,25 @@ the cross-runner parallelizes better and stays the oracle.
 Before landing a change:
 
 - `npx tsc` clean.
-- `npx tsx scripts/run_test_scripts.ts` full pass.
-- `npx vitest run` (when there are vitest cases).
+- `npx tsx scripts/run_test_scripts.ts` full pass — c-aot vs numbl,
+  byte-for-byte, the strict oracle.
+- `npx tsx scripts/run_test_scripts_all_modes.ts` full pass —
+  interpreter / js-aot / c-aot all against numbl. Known backend gaps
+  are marked `% mtoc2-test-xfail-<backend>:` per script; the runner
+  is expected to exit 0. Failures here mean a backend has rotted
+  away from the others.
+- `npx vitest run`.
 - `npm run lint`.
 - `npm run format:check`.
 - `npm run build:snippets:check` if you touched any `.h` / `.js`
   under `src/builtins/runtime/` (otherwise `snippets.gen.ts` will
   drift).
 
-For changes that touch the interpreter or js-aot backends, also run
-`npx tsx scripts/run_test_scripts_all_modes.ts` to make sure
-coverage parity didn't regress.
-
-The cross-runner is the slow gate — minutes to run a full sweep.
-Run it at checkpoints. For tight iteration, just use `tsc` + a
-targeted script (`run_test_scripts.ts path/to/foo.m`).
+The runners are the slow gates — minutes for a full sweep. Run them
+at checkpoints. For tight iteration, use `tsc` + a single targeted
+script (`run_test_scripts.ts path/to/foo.m` for c-aot only, or
+`run_test_scripts_all_modes.ts path/to/foo.m` when the change spans
+backends).
 
 ## Test corpus organization
 

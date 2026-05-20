@@ -183,17 +183,20 @@ a doc entry.
 A change is "done" when all of these are clean:
 
 - `npx tsc`
-- `npx tsx scripts/run_test_scripts.ts` (c-aot cross-runner, full
-  pass — the strict commit-time gate)
-- `npx vitest run` (if vitest cases exist for the area)
+- `npx tsx scripts/run_test_scripts.ts` — c-aot vs numbl, the
+  byte-for-byte oracle.
+- `npx tsx scripts/run_test_scripts_all_modes.ts` — same scripts
+  against all three mtoc2 backends (interpreter, js-aot, c-aot).
+  Known backend gaps are declared per-script via
+  `% mtoc2-test-xfail-<backend>:` so a clean run stays clean.
+  Failures here mean a backend has rotted away from the others.
+- `npx vitest run`
 - `npm run lint`
 - `npm run format:check`
 
-For changes that touch the interpreter or js-aot path, also run:
-
-- `npx tsx scripts/run_test_scripts_all_modes.ts` — same scripts,
-  exercised against all three mtoc2 backends. Failures here are
-  surface signal for backend gaps, not (usually) regressions.
+Both runners are commit-time gates. The c-aot runner is the strict
+oracle; the all-modes runner is what keeps the interpreter and
+js-aot backends from quietly drifting as features land.
 
 Two test layers, strict separation:
 
