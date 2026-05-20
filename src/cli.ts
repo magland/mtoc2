@@ -31,7 +31,6 @@ import { createInterface } from "node:readline";
 
 import { translateProject, type SourceFile } from "./translate.js";
 import { Workspace, parseFiles } from "./workspace/workspace.js";
-import { translateCToJs } from "./cjs/index.js";
 import { applyPlotRecord, newPlotDispatchState } from "./utils/plotAdapter.js";
 import { PLOT_PREFIX } from "./utils/plotProtocol.js";
 import type { PlotRecord } from "./utils/wasmRunner.worker.js";
@@ -50,10 +49,10 @@ function usage(): never {
   console.error(
     [
       "usage:",
-      "  mtoc2 run [--exec MODE] [--js] [--plot] [--check-leaks] [--dump-c <path>] [--dump-js <path>]",
+      "  mtoc2 run [--exec MODE] [--plot] [--check-leaks] [--dump-c <path>] [--dump-js <path>]",
       "    [--opt PROFILE] [--fast-math|--no-fast-math] [--threads N|auto]",
       "    [--inline-temps|--no-inline-temps] [--path <dir>...] <script.m>",
-      "  mtoc2 eval [--exec MODE] [--js] [--plot] [--check-leaks] [--dump-c <path>] [--dump-js <path>]",
+      "  mtoc2 eval [--exec MODE] [--plot] [--check-leaks] [--dump-c <path>] [--dump-js <path>]",
       "    [--opt PROFILE] [--fast-math|--no-fast-math] [--threads N|auto]",
       '    [--inline-temps|--no-inline-temps] [--path <dir>...] "<code>"',
       "  mtoc2 translate <script.m> [-o out.c]",
@@ -249,36 +248,28 @@ interface RunOptions {
    *  pulls in LeakSanitizer at exit on Linux, so any unfreed
    *  `mtoc2_tensor_t` (or other owned buffer) is reported on stderr
    *  and the process exits non-zero. ~2x slowdown; off by default,
-   *  but the cross-runner enables it for every script. Ignored on the
-   *  `--js` path (the JS runtime relies on GC; there are no manual
-   *  frees to leak). */
+   *  but the cross-runner enables it for every script. Only meaningful
+   *  on the `c-aot` path. */
   checkLeaks?: boolean;
   /** Start numbl's plot server on the first plotting call. The server
    *  serves numbl's `dist-plot-viewer` SPA and opens a browser tab;
-   *  records arriving on the C binary's stdout get translated into
-   *  numbl `PlotInstruction`s and pushed over SSE. Off by default —
-   *  scripts that emit plot records still have those records stripped
-   *  from stdout (so the user's console stays clean), they just aren't
-   *  rendered anywhere. */
+   *  records arriving on the binary's / interpreter's stdout get
+   *  translated into numbl `PlotInstruction`s and pushed over SSE. Off
+   *  by default — scripts that emit plot records still have those
+   *  records stripped from stdout (so the user's console stays clean),
+   *  they just aren't rendered anywhere. */
   plot?: boolean;
-  /** Skip the `cc` step entirely: translate the emitted C to
-   *  JavaScript via the vendored c2js (see `src/cjs/`) and run the
-   *  resulting JS in a child `node` process. Plot records and stdout
-   *  are intercepted the same way as the native path — the JS runtime
-   *  writes the same `\x1emtoc2:plot\t...` lines via `process.stdout`. */
-  js?: boolean;
   /** If set, write the translated C source to this path before
-   *  compiling / translating to JS. Useful for inspecting what mtoc2
-   *  produced without re-running `translate`. */
+   *  compiling. Useful for inspecting what mtoc2 produced without
+   *  re-running `translate`. c-aot only. */
   dumpC?: string;
-  /** If set, write the c2js-translated JavaScript source to this path
-   *  before running it. Only meaningful with `--js`. */
+  /** If set, write the emitted JavaScript source to this path before
+   *  running it. js-aot only. */
   dumpJs?: string;
   /** Resolved optimization settings — profile defaults composed with
-   *  any explicit `--fast-math` / `--threads` overrides. Drives both
-   *  the build flags and (for `--threads`) the codegen. Ignored on
-   *  the `--js` path: the JS runtime is single-threaded and has no
-   *  `-ffast-math` equivalent. */
+   *  any explicit `--fast-math` / `--threads` overrides. Drives the
+   *  c-aot build flags and (for `--threads`) the codegen. Ignored on
+   *  the js-aot and interpreter paths. */
   opt: OptSettings;
 }
 
@@ -387,67 +378,6 @@ async function runCSource(
   process.exit(exitCode);
 }
 
-/** Translate the emitted C to JS via c2js, write it to a temp file,
- *  and run it under a child `node`. Plot records and stdout are
- *  intercepted with the same line-splitter as `runCSource` — the JS
- *  runtime writes `printf` output to `process.stdout`, so the plot
- *  prefix is byte-for-byte identical to the C path. */
-async function runJsSource(
-  translated: TranslatedProject,
-  opts: RunOptions
-): Promise<void> {
-  const cSrc = translated.c;
-  if (translated.extraCSources.length > 0) {
-    console.error(
-      `--js: '.mtoc2.js' user functions with 'cSources' are not yet ` +
-        `supported on the JS target (only the native and wasm targets ` +
-        `compile user .c files today). Run without --js, or remove the ` +
-        `cSources entry.`
-    );
-    process.exit(1);
-  }
-  if (opts.dumpC) writeFileSync(opts.dumpC, cSrc);
-  const jsSrc = translateCToJs(cSrc);
-  if (opts.dumpJs) writeFileSync(opts.dumpJs, jsSrc);
-  const dir = mkdtempSync(join(tmpdir(), "mtoc2-"));
-  const jsFile = join(dir, "out.js");
-  writeFileSync(jsFile, jsSrc);
-
-  const { onDrawnow, flushAndWait } = createPlotHandler(!opts.plot);
-  const plotState = newPlotDispatchState();
-
-  const child = spawn(process.execPath, [jsFile], {
-    stdio: ["ignore", "pipe", "inherit"],
-  });
-
-  const rl = createInterface({ input: child.stdout });
-  rl.on("line", line => {
-    if (line.startsWith(PLOT_PREFIX)) {
-      if (!onDrawnow) return;
-      const body = line.slice(PLOT_PREFIX.length);
-      let record: PlotRecord;
-      try {
-        record = JSON.parse(body) as PlotRecord;
-      } catch {
-        process.stderr.write(`[mtoc2] malformed plot record: ${body}\n`);
-        return;
-      }
-      const batch: PlotInstruction[] = [];
-      applyPlotRecord(record, batch, plotState);
-      if (batch.length > 0) onDrawnow(batch);
-      return;
-    }
-    process.stdout.write(line + "\n");
-  });
-
-  const exitCode: number = await new Promise(res => {
-    child.on("exit", code => res(code ?? 0));
-  });
-  await new Promise<void>(res => rl.on("close", res));
-  await flushAndWait();
-  process.exit(exitCode);
-}
-
 /** Parse the shared flag set for `run` and `eval`. Two-token flags
  *  consume their next arg; unknown options or a missing positional
  *  abort to `usage()`. The optimization flags (`--opt`, `--fast-math`/
@@ -460,7 +390,6 @@ function parseRunEvalArgs(argv: string[]): {
 } {
   let checkLeaks = false;
   let plot = false;
-  let js = false;
   let exec: ExecMode | undefined;
   let dumpC: string | undefined;
   let dumpJs: string | undefined;
@@ -472,7 +401,6 @@ function parseRunEvalArgs(argv: string[]): {
     const a = argv[i];
     if (a === "--check-leaks") checkLeaks = true;
     else if (a === "--plot") plot = true;
-    else if (a === "--js") js = true;
     else if (a === "--exec") {
       const v = argv[++i];
       if (v !== "interpreter" && v !== "js-aot" && v !== "c-aot") {
@@ -552,7 +480,6 @@ function parseRunEvalArgs(argv: string[]): {
     opts: {
       checkLeaks,
       plot,
-      js,
       dumpC,
       dumpJs,
       opt,
@@ -715,7 +642,7 @@ async function main(): Promise<void> {
       opts.opt.threads,
       opts.opt.enableTempInlining
     );
-    await (opts.js ? runJsSource(cSrc, opts) : runCSource(cSrc, opts));
+    await runCSource(cSrc, opts);
     return;
   }
   if (cmd === "eval") {
@@ -743,7 +670,7 @@ async function main(): Promise<void> {
       opts.opt.threads,
       opts.opt.enableTempInlining
     );
-    await (opts.js ? runJsSource(cSrc, opts) : runCSource(cSrc, opts));
+    await runCSource(cSrc, opts);
     return;
   }
   if (cmd === "translate") {

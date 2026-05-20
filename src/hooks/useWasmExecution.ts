@@ -14,11 +14,12 @@ import type { SourceFile } from "../translate";
 
 /** Which backend the run goes through. `"interpreter"` walks the AST
  *  directly in a Web Worker — no codegen, no compile, always
- *  available. `"js"` translates locally (numbl → C → JS) and runs the
- *  JS in a Web Worker; needs no remote service and gives instant
- *  turnaround. `"wasm"` POSTs the C to the public emcc service,
- *  caches the wasm in IndexedDB, and runs that in a worker; slower
- *  first run but full native numeric throughput. */
+ *  available. `"js"` lowers the AST to IR and emits JavaScript via
+ *  `emitJsProgram`, then runs the result in a Web Worker; needs no
+ *  remote service and gives instant turnaround. `"wasm"` POSTs the
+ *  translated C to the public emcc service, caches the wasm in
+ *  IndexedDB, and runs that in a worker; slower first run but full
+ *  native numeric throughput. */
 export type ExecutionMode = "interpreter" | "js" | "wasm";
 
 export type RunStatus =
@@ -49,8 +50,9 @@ export interface RunOptions {
   fastMath?: boolean;
   simd?: boolean;
   optLevel?: WasmOptLevel;
-  /** Run the IR-level `--inline-temps` pass before emitting C. Affects
-   *  both JS and WASM modes (it's a pre-codegen transform). */
+  /** Run the IR-level `--inline-temps` pass before emitting C. Only
+   *  affects the WASM path; the JS path uses `emitJs` directly off
+   *  the lowered IR. */
   enableTempInlining?: boolean;
 }
 
@@ -164,13 +166,11 @@ export function useWasmExecution(): UseWasmExecutionResult {
         return;
       }
 
-      // JS mode: translate + c2js locally, then run in a worker. No
-      // remote service, no compile pill — c2js is fast enough that
-      // the user sees the run immediately.
+      // JS mode: lower + emitJs locally, then run in a worker. No
+      // remote service, no compile pill — emitting JS is fast enough
+      // that the user sees the run immediately.
       if (opts.mode === "js") {
-        const built = buildJs(files, activeName, {
-          enableTempInlining: opts.enableTempInlining,
-        });
+        const built = buildJs(files, activeName);
         if (!built.ok) {
           append({
             channel: "translate_error",

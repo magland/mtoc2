@@ -23,11 +23,8 @@ import SettingsIcon from "@mui/icons-material/Settings";
 import { Splitter } from "../../../numbl/src/components/Splitter";
 import { FileBrowser } from "../../../numbl/src/components/FileBrowser";
 import { CSourcePanel } from "./CSourcePanel";
-import { JsSourcePanel } from "./JsSourcePanel";
 import { ConsolePanel } from "./ConsolePanel";
 import { FiguresPanel } from "./FiguresPanel";
-import { translateCToJs } from "../cjs";
-import { translateProject } from "../translate";
 import { ExecutionSettingsDialog } from "./ExecutionSettingsDialog";
 import { useTranslation } from "../hooks/useTranslation";
 import {
@@ -103,7 +100,6 @@ function activeName(
 }
 
 type OutputTab = "output" | "internals";
-type InternalsSubTab = "c" | "js";
 
 export function IDEWorkspace({ filesApi, header }: IDEWorkspaceProps) {
   const {
@@ -149,7 +145,6 @@ export function IDEWorkspace({ filesApi, header }: IDEWorkspaceProps) {
     readExecutionMode()
   );
   const [outputTab, setOutputTab] = useState<OutputTab>("output");
-  const [internalsSubTab, setInternalsSubTab] = useState<InternalsSubTab>("c");
   const [triggerRenameId, setTriggerRenameId] = useState<string | undefined>();
 
   // Layout sizing — persisted across reloads so the user's chosen
@@ -265,42 +260,6 @@ export function IDEWorkspace({ filesApi, header }: IDEWorkspaceProps) {
     enableTempInlining
   );
 
-  // Derive the JS that the JS-mode worker would actually run. We
-  // re-translate with `includeRuntime: true` here regardless of the
-  // user's "runtime helpers" toggle (which only governs the displayed
-  // C): c2js needs the runtime typedefs (`mtoc2_tensor_t`, etc.) to
-  // parse the source, otherwise it bails with "expected type (got id
-  // …)". This matches the C the JS-mode worker feeds to c2js, so the
-  // panel reflects the running code. Computed regardless of execMode
-  // so flipping to JS doesn't add a render delay; the cost is one
-  // extra translateProject pass.
-  const { js, jsError } = useMemo<{
-    js: string;
-    jsError: string | null;
-  }>(() => {
-    if (!c || error) return { js: "", jsError: null };
-    const result = translateProject(sourceFiles, active ?? "", {
-      includeRuntime: true,
-      enableTempInlining,
-    });
-    if (result.error || !result.c) return { js: "", jsError: null };
-    try {
-      return { js: translateCToJs(result.c), jsError: null };
-    } catch (e) {
-      const message = e instanceof Error ? e.message : String(e);
-      return { js: "", jsError: `c2js: ${message}` };
-    }
-  }, [c, error, sourceFiles, active, enableTempInlining]);
-
-  // When JS mode is gone (mode flipped to wasm), keep the user on a
-  // sub-tab they can actually see — prefer C over JS when only one is
-  // shown.
-  useEffect(() => {
-    if (execMode !== "js" && internalsSubTab === "js") {
-      setInternalsSubTab("c");
-    }
-  }, [execMode, internalsSubTab]);
-
   const handleEditorMount: OnMount = editorInstance => {
     setEditorModel(editorInstance.getModel());
   };
@@ -322,9 +281,10 @@ export function IDEWorkspace({ filesApi, header }: IDEWorkspaceProps) {
   const isRunning = exec.status === "running" || exec.status === "compiling";
   // Interpreter walks the AST directly, so a C-translate error doesn't
   // block it — the interpreter has broader coverage than the C path
-  // for in-development features. JS and WASM still need a clean
-  // translation since they run the emitted C (or its c2js'd form).
-  const requiresTranslate = execMode !== "interpreter";
+  // for in-development features. JS mode lowers + emitJs (also
+  // independent of the C pipeline). Only WASM still needs a clean C
+  // translation since it ships the emitted C to the compile service.
+  const requiresTranslate = execMode === "wasm";
   const canRun = !active
     ? false
     : isRunning
@@ -474,73 +434,15 @@ export function IDEWorkspace({ filesApi, header }: IDEWorkspaceProps) {
             flexDirection: "column",
           }}
         >
-          {execMode === "js" && (
-            <Box
-              sx={{
-                px: 1,
-                py: 0.5,
-                borderBottom: 1,
-                borderColor: "divider",
-                display: "flex",
-                alignItems: "center",
-                gap: 0.5,
-                bgcolor: "background.default",
-              }}
-            >
-              <ToggleButtonGroup
-                size="small"
-                exclusive
-                value={internalsSubTab}
-                onChange={(_, v) => {
-                  if (v === "c" || v === "js") setInternalsSubTab(v);
-                }}
-                sx={{
-                  "& .MuiToggleButton-root": {
-                    px: 1.25,
-                    py: 0.25,
-                    fontSize: 11,
-                    textTransform: "none",
-                  },
-                }}
-              >
-                <ToggleButton value="c">C</ToggleButton>
-                <ToggleButton value="js">JS</ToggleButton>
-              </ToggleButtonGroup>
-            </Box>
-          )}
           <Box sx={{ flex: 1, minHeight: 0, position: "relative" }}>
-            <Box
-              sx={{
-                position: "absolute",
-                inset: 0,
-                display:
-                  execMode !== "js" || internalsSubTab === "c"
-                    ? "flex"
-                    : "none",
-                flexDirection: "column",
-              }}
-            >
-              <CSourcePanel
-                c={c}
-                error={error}
-                otherFiles={otherFiles}
-                activeName={active ?? ""}
-                includeRuntime={includeRuntime}
-                onIncludeRuntimeChange={setIncludeRuntime}
-              />
-            </Box>
-            {execMode === "js" && (
-              <Box
-                sx={{
-                  position: "absolute",
-                  inset: 0,
-                  display: internalsSubTab === "js" ? "flex" : "none",
-                  flexDirection: "column",
-                }}
-              >
-                <JsSourcePanel js={js} error={jsError} />
-              </Box>
-            )}
+            <CSourcePanel
+              c={c}
+              error={error}
+              otherFiles={otherFiles}
+              activeName={active ?? ""}
+              includeRuntime={includeRuntime}
+              onIncludeRuntimeChange={setIncludeRuntime}
+            />
           </Box>
         </Box>
       </Box>

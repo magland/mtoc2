@@ -13,7 +13,7 @@
     "run": "tsx src/cli.ts run",
     "test": "vitest run",
     "test:scripts": "tsx scripts/run_test_scripts.ts",
-    "test:scripts:js": "tsx scripts/run_test_scripts_js.ts",
+    "test:scripts:all-modes": "tsx scripts/run_test_scripts_all_modes.ts",
     "test:scripts:mtoc2-only": "tsx scripts/run_test_scripts_mtoc2_only.ts",
     "typecheck": "tsc",
     "format": "prettier --write .",

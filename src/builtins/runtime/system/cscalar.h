@@ -3,19 +3,19 @@
  *
  * Every `double _Complex` operation mtoc2 emits into user code routes
  * through one of these helpers instead of relying on C99's operator
- * overloading or the `I` macro. Native: each is `static inline` and
- * the compiler folds back to the same instructions C99 would have
- * generated. The win is that secondary translators (the c2js JS
- * backend in `src/cjs/`) see plain function calls and don't need to
- * track types through expressions — they can ship a matching set of
- * helpers that operate on a JS `{re, im}` representation.
+ * overloading or the `I` macro. On the C path each is `static inline`
+ * and the compiler folds back to the same instructions C99 would have
+ * generated. The win is parallelism with the js-aot path: the JS
+ * sibling (`cscalar.js`) ships a matching set of helpers that operate
+ * on a `{re, im}` JS representation, so user code emitted by `emitJs`
+ * uses the same call shape the C emitter would have produced.
  *
  * Division and pow are NOT defined here:
  *   - `mtoc2_cdiv` lives in `cdiv.h` because it needs Smith's
  *     algorithm + signed-zero detection to match numbl byte-for-byte.
  *   - `cpow` is emitted directly today (still a libm call, not an
- *     operator); a `mtoc2_cpow` wrapper lands when the c2js side
- *     grows a JS power helper.
+ *     operator); a `mtoc2_cpow` wrapper lands when the JS side grows
+ *     a power helper.
  */
 
 #include <complex.h>
