@@ -10,6 +10,7 @@
 import type { Expr, Stmt, LValue } from "../parser/index.js";
 import {
   isChar as isCharRV,
+  isComplexValue,
   isTensor,
   isTruthy,
   toScalarNumber,
@@ -18,6 +19,7 @@ import {
 import { UnsupportedConstruct } from "../lowering/errors.js";
 import { tryExtractDottedName } from "../parser/astUtils.js";
 import {
+  mtoc2_disp_complex,
   mtoc2_disp_double,
   mtoc2_toc_print,
   mtoc2_toc_handle_print,
@@ -395,6 +397,7 @@ export function autoDisp(
   else if (typeof v === "boolean") mtoc2_disp_double(v ? 1 : 0);
   else if (typeof v === "string") this.ctx.helpers.write(v + "\n");
   else if (isCharRV(v)) this.ctx.helpers.write(v.value + "\n");
+  else if (isComplexValue(v)) mtoc2_disp_complex(v);
   else if (isTensor(v)) {
     // Placeholder until tensor formatting lands as a paired snippet.
     this.ctx.helpers.write(`  [${v.shape.join("x")} tensor]\n`);

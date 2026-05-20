@@ -28,7 +28,12 @@ import {
   exactRealArray,
   exactScalarAsComplex,
 } from "../_shared.js";
-import type { RuntimeTensor, RuntimeValue } from "../../../runtime/value.js";
+import {
+  isComplexValue,
+  isTensor,
+  type RuntimeTensor,
+  type RuntimeValue,
+} from "../../../runtime/value.js";
 import {
   mtoc2_tensor_plus_tt,
   mtoc2_tensor_plus_ts,
@@ -61,6 +66,19 @@ import {
   mtoc2_tensor_mod_bcast_tt,
 } from "../../runtime/snippets.gen.js";
 
+/** Project a runtime scalar into `{re, im}` form for complex
+ *  arithmetic. Real `number` operands pad with `im=0`. Used by every
+ *  scalar-complex `call` path. */
+function scalarAsComplexValue(v: RuntimeValue): { re: number; im: number } {
+  if (typeof v === "number") return { re: v, im: 0 };
+  if (typeof v === "boolean") return { re: v ? 1 : 0, im: 0 };
+  if (isTensor(v) && v.data.length === 1) {
+    return { re: v.data[0], im: v.imag ? v.imag[0] : 0 };
+  }
+  if (isComplexValue(v)) return { re: v.re, im: v.im };
+  throw new Error(`scalarAsComplexValue: not a scalar (got ${typeof v})`);
+}
+
 type TensorHelper2 = (a: RuntimeTensor, b: RuntimeTensor) => RuntimeTensor;
 type TensorHelperTS = (a: RuntimeTensor, s: number) => RuntimeTensor;
 type TensorHelperST = (s: number, a: RuntimeTensor) => RuntimeTensor;
@@ -77,6 +95,28 @@ interface TensorHelperSet {
 // ... }` (no literal "tensor" discriminator). Cast through `unknown`
 // at the registration site so the typed dispatch table below stays
 // the source of truth for what these helpers return at runtime.
+// Complex-tensor helper set. Each entry mirrors a `tensor_<base>_complex_*`
+// JS runtime helper that takes / returns RuntimeTensor objects with both
+// `data` (real lane) and `imag` (imaginary lane) populated. Empty today —
+// helpers land alongside the per-builtin tensor-complex `emitJs`/`call`
+// rollout. When a name is missing, the complex-tensor branch in the
+// generated `call` hook raises with a clear "not yet wired" message.
+type TensorHelperComplexScalar = (
+  a: RuntimeTensor,
+  s: { re: number; im: number }
+) => RuntimeTensor;
+type TensorHelperScalarComplex = (
+  s: { re: number; im: number },
+  a: RuntimeTensor
+) => RuntimeTensor;
+interface ComplexTensorHelperSet {
+  tt: TensorHelper2;
+  ts: TensorHelperComplexScalar;
+  st?: TensorHelperScalarComplex;
+  bcast_tt: TensorHelper2;
+}
+const COMPLEX_TENSOR_HELPERS: Record<string, ComplexTensorHelperSet> = {};
+
 const TENSOR_HELPERS: Record<string, TensorHelperSet> = {
   plus: {
     tt: mtoc2_tensor_plus_tt as unknown as TensorHelper2,
@@ -576,12 +616,30 @@ function buildElemwiseRealBinary(opts: {
       const bN = argTypes[1] as NumericType;
       const aMulti = isMultiElement(aN);
       const bMulti = isMultiElement(bN);
-      if (aN.isComplex || bN.isComplex) {
-        throw new UnsupportedConstruct(
-          `'${name}' complex emitJs not yet wired (Phase 5)`
-        );
-      }
+      const anyComplex = aN.isComplex || bN.isComplex;
       if (!aMulti && !bMulti) {
+        if (anyComplex) {
+          if (complexScalarExpr === undefined) {
+            throw new UnsupportedConstruct(
+              `'${name}' is not defined for complex scalars`
+            );
+          }
+          if (complexRuntimeDeps) {
+            for (const d of complexRuntimeDeps) useRuntime(d);
+          }
+          // JS has no implicit `double → double _Complex` promotion
+          // the way C99 does, so promote real operands to `{re, im}`
+          // form at the call site. The C path passes plain doubles
+          // and lets the C compiler do the cast; here we do it
+          // explicitly so the helper sees {re,im} on both sides.
+          useRuntime("mtoc2_cscalar");
+          const promote = (j: string, isComplexArg: boolean): string =>
+            isComplexArg ? j : `mtoc2_cmake(${j}, 0.0)`;
+          return complexScalarExpr(
+            promote(argsJs[0], aN.isComplex),
+            promote(argsJs[1], bN.isComplex)
+          );
+        }
         return jsScalarExpr(argsJs[0], argsJs[1]);
       }
       const helpers = TENSOR_HELPERS[helperBase];
@@ -595,6 +653,26 @@ function buildElemwiseRealBinary(opts: {
       // rdivide route through `tensor_elemwise_real`; atan2/hypot/mod/
       // rem/power route through `tensor_elemwise_real_fn`.
       useRuntime(runtimeDep);
+      if (anyComplex) {
+        useRuntime("mtoc2_tensor_elemwise_complex");
+        useRuntime("mtoc2_cscalar");
+        const base = `mtoc2_tensor_${helperBase}_complex`;
+        const promote = (j: string, isComplexArg: boolean): string =>
+          isComplexArg ? j : `mtoc2_cmake(${j}, 0.0)`;
+        if (aMulti && bMulti) {
+          return needsBroadcast(aN, bN)
+            ? `${base}_bcast_tt(${argsJs[0]}, ${argsJs[1]})`
+            : `${base}_tt(${argsJs[0]}, ${argsJs[1]})`;
+        }
+        if (aMulti) {
+          return `${base}_ts(${argsJs[0]}, ${promote(argsJs[1], bN.isComplex)})`;
+        }
+        // scalar OP tensor
+        if (commutative) {
+          return `${base}_ts(${argsJs[1]}, ${promote(argsJs[0], aN.isComplex)})`;
+        }
+        return `${base}_st(${promote(argsJs[0], aN.isComplex)}, ${argsJs[1]})`;
+      }
       if (aMulti && bMulti) {
         if (needsBroadcast(aN, bN)) {
           return `mtoc2_tensor_${helperBase}_bcast_tt(${argsJs[0]}, ${argsJs[1]})`;
@@ -612,16 +690,29 @@ function buildElemwiseRealBinary(opts: {
     call({ args, argTypes }) {
       const aN = argTypes[0] as NumericType;
       const bN = argTypes[1] as NumericType;
-      if (aN.isComplex || bN.isComplex) {
-        throw new UnsupportedConstruct(
-          `'${name}' complex 'call' not yet wired (Phase 5)`
-        );
-      }
       const aMulti = isMultiElement(aN);
       const bMulti = isMultiElement(bN);
+      const anyComplex = aN.isComplex || bN.isComplex;
       const aVal = args[0] as RuntimeValue;
       const bVal = args[1] as RuntimeValue;
       if (!aMulti && !bMulti) {
+        if (anyComplex) {
+          if (complexFold === undefined) {
+            throw new UnsupportedConstruct(
+              `'${name}' is not defined for complex scalars`
+            );
+          }
+          const ax = scalarAsComplexValue(aVal);
+          const bx = scalarAsComplexValue(bVal);
+          const out = complexFold(ax, bx);
+          // Collapse to a real number when the imag lane is zero,
+          // so downstream `disp(...)` and arithmetic stay on the
+          // real path. This matches numbl's runtime collapse rule.
+          if (out.im === 0 && !aN.isComplex && !bN.isComplex) {
+            return [out.re];
+          }
+          return [out];
+        }
         const av = typeof aVal === "number" ? aVal : Number(aVal);
         const bv = typeof bVal === "number" ? bVal : Number(bVal);
         return [fold(av, bv)];
@@ -631,6 +722,37 @@ function buildElemwiseRealBinary(opts: {
         throw new UnsupportedConstruct(
           `'${name}' tensor 'call' not yet wired (no helper for helperBase '${helperBase}')`
         );
+      }
+      if (anyComplex) {
+        const cxHelpers = COMPLEX_TENSOR_HELPERS[helperBase];
+        if (!cxHelpers) {
+          throw new UnsupportedConstruct(
+            `'${name}' complex-tensor 'call' not yet wired`
+          );
+        }
+        const promote = (v: RuntimeValue): { re: number; im: number } =>
+          scalarAsComplexValue(v);
+        if (aMulti && bMulti) {
+          const at = aVal as RuntimeTensor;
+          const bt = bVal as RuntimeTensor;
+          const op = needsBroadcast(aN, bN)
+            ? cxHelpers.bcast_tt
+            : cxHelpers.tt;
+          return [op(at, bt)];
+        }
+        if (aMulti) {
+          const at = aVal as RuntimeTensor;
+          return [cxHelpers.ts(at, promote(bVal))];
+        }
+        // scalar OP tensor
+        const bt = bVal as RuntimeTensor;
+        if (commutative) return [cxHelpers.ts(bt, promote(aVal))];
+        if (cxHelpers.st === undefined) {
+          throw new UnsupportedConstruct(
+            `internal: '${name}' is non-commutative but has no _st complex JS helper`
+          );
+        }
+        return [cxHelpers.st(promote(aVal), bt)];
       }
       if (aMulti && bMulti) {
         const at = aVal as RuntimeTensor;

@@ -7,8 +7,9 @@ import {
   structTypedefName,
 } from "../../../lowering/types.js";
 import type { Builtin } from "../../registry.js";
-import { isChar, isTensor } from "../../../runtime/value.js";
+import { isChar, isComplexValue, isTensor } from "../../../runtime/value.js";
 import {
+  mtoc2_disp_complex,
   mtoc2_disp_double,
   mtoc2_disp_struct,
   mtoc2_disp_tensor,
@@ -80,11 +81,12 @@ export const disp: Builtin = {
     }
     return `mtoc2_disp_double(${argsC[0]})`;
   },
-  // Minimal scalar-real call hook for the interpreter. Text /
-  // tensor / complex paths land in Phase 5 alongside the JS-side
-  // runtime helpers.
   emitJs({ argsJs, argTypes, useRuntime }) {
     const t = argTypes[0];
+    if (isNumeric(t) && t.isComplex && isScalar(t)) {
+      useRuntime("mtoc2_disp_complex");
+      return `mtoc2_disp_complex(${argsJs[0]})`;
+    }
     if (isNumeric(t) && !t.isComplex && isScalar(t)) {
       useRuntime("mtoc2_disp_double");
       return `mtoc2_disp_double(${argsJs[0]})`;
@@ -109,26 +111,28 @@ export const disp: Builtin = {
       return `mtoc2_disp_struct(${argsJs[0]})`;
     }
     throw new UnsupportedConstruct(
-      `'disp' emitJs for complex args is not yet wired (Phase 5)`
+      `'disp' emitJs for complex tensors is not yet wired`
     );
   },
   call({ args, ctx }) {
     const v = args[0];
+    globalThis.$write = ctx.helpers.write;
     if (typeof v === "number") mtoc2_disp_double(v);
     else if (typeof v === "boolean") mtoc2_disp_double(v ? 1 : 0);
     else if (typeof v === "string") ctx.helpers.write(v + "\n");
     else if (isChar(v)) ctx.helpers.write(v.value + "\n");
+    else if (isComplexValue(v)) mtoc2_disp_complex(v);
     else if (isTensor(v)) {
-      // The tensor disp snippet writes via `$write` (free var) — make
-      // sure it's bound to the host's write before we call it. The
-      // interpreter's constructor already does this, but a builtin
-      // can also be called directly from a unit test.
-      globalThis.$write = ctx.helpers.write;
+      // Complex tensor display lands when the JS complex tensor disp
+      // helper exists; for now, fall through to the real-only helper
+      // for real tensors and throw a clear error otherwise.
+      if (v.imag !== undefined) {
+        throw new UnsupportedConstruct(
+          `'disp' 'call' for complex tensors is not yet wired`
+        );
+      }
       mtoc2_disp_tensor(v);
     } else if (v && typeof v === "object") {
-      // Struct (plain object with field-name keys). Dispatch through
-      // the generic struct disp helper.
-      globalThis.$write = ctx.helpers.write;
       mtoc2_disp_struct(v as Record<string, unknown>);
     } else {
       throw new UnsupportedConstruct(
