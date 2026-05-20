@@ -109,6 +109,55 @@ interface Captured {
   stderr: string;
 }
 
+/** See the matching constant in `run_test_scripts_all_modes.ts` —
+ *  retry budget for transient subprocess failures (tsx cold-start race,
+ *  no-stderr SIGKILL, …). Real script-level errors (recognized by
+ *  `looksLikeScriptError`) are NOT retried. Overridable via
+ *  `MTOC_TEST_RETRIES`. */
+const SUBPROCESS_RETRIES: number = (() => {
+  const fromEnv = process.env.MTOC_TEST_RETRIES;
+  if (fromEnv) {
+    const n = Number.parseInt(fromEnv, 10);
+    if (Number.isFinite(n) && n >= 0) return n;
+  }
+  return 2;
+})();
+
+function looksLikeScriptError(stderr: string): boolean {
+  if (!stderr) return false;
+  return /\b(UnsupportedConstruct|TypeError|SyntaxError|RuntimeError|RangeError|mtoc2:|numbl:|Error:)\b/.test(
+    stderr
+  );
+}
+
+async function withSubprocessRetry<T>(
+  label: string,
+  scriptPath: string,
+  fn: () => Promise<T>
+): Promise<T> {
+  let lastErr: unknown;
+  for (let attempt = 0; attempt <= SUBPROCESS_RETRIES; attempt++) {
+    try {
+      return await fn();
+    } catch (e) {
+      const err = e as Error & { stderr?: string };
+      const stderr = err.stderr ?? "";
+      if (looksLikeScriptError(stderr) || attempt >= SUBPROCESS_RETRIES) {
+        throw e;
+      }
+      lastErr = e;
+      const relName = scriptPath.startsWith(repoRoot)
+        ? scriptPath.slice(repoRoot.length + 1)
+        : scriptPath;
+      console.error(
+        `  retry ${attempt + 1}/${SUBPROCESS_RETRIES} ${label} ${relName}: ${err.message.split("\n")[0]}`
+      );
+      await new Promise(r => setTimeout(r, 200 * (attempt + 1)));
+    }
+  }
+  throw lastErr;
+}
+
 /** With `MTOC_TEST_CHECK_LEAKS=1` set, mtoc2 invocations run with
  *  `--check-leaks`, which builds the C with `-fsanitize=address`.
  *  Asan adds substantial overhead (3-5x on the cc step), so the
@@ -278,12 +327,9 @@ async function runOne(scriptPath: string): Promise<Result> {
 
   let expectedRaw: string;
   try {
-    expectedRaw = await captureStdout("npx", [
-      "tsx",
-      numblCliPath,
-      "run",
-      scriptPath,
-    ]);
+    expectedRaw = await withSubprocessRetry("numbl", scriptPath, () =>
+      captureStdout("npx", ["tsx", numblCliPath, "run", scriptPath])
+    );
   } catch (e) {
     const msg = (e as Error).message.split("\n")[0];
     return {
@@ -296,7 +342,9 @@ async function runOne(scriptPath: string): Promise<Result> {
 
   let actual: Captured;
   try {
-    actual = await captureMtoc2(scriptPath);
+    actual = await withSubprocessRetry("mtoc2", scriptPath, () =>
+      captureMtoc2(scriptPath)
+    );
   } catch (e) {
     const err = e as Error & { stderr?: string };
     const tail = (err.stderr ?? "").trim();

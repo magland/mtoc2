@@ -111,6 +111,34 @@ interface Captured {
   stderr: string;
 }
 
+/** Max retries for a single (script, mode) capture that fails with no
+ *  recognizable script-side error in stderr. The cross-runner spawns
+ *  many `npx tsx ...` subprocesses concurrently; under load `tsx`
+ *  cold-start can race with file resolution and the spawn fails before
+ *  the script ever runs. Real script failures (UnsupportedConstruct /
+ *  TypeError / SyntaxError / RuntimeError / mtoc2: ...) are NOT
+ *  retried — the test should report them as-is. Overridable via
+ *  `MTOC_TEST_RETRIES`. */
+const SUBPROCESS_RETRIES: number = (() => {
+  const fromEnv = process.env.MTOC_TEST_RETRIES;
+  if (fromEnv) {
+    const n = Number.parseInt(fromEnv, 10);
+    if (Number.isFinite(n) && n >= 0) return n;
+  }
+  return 2;
+})();
+
+/** Heuristic: does this stderr look like a real script-level failure
+ *  the user wants to see, rather than a subprocess-spawn race? We
+ *  retry only when the stderr lacks any recognizable script-error
+ *  marker. Markers cover both mtoc2 and numbl error vocabularies. */
+function looksLikeScriptError(stderr: string): boolean {
+  if (!stderr) return false;
+  return /\b(UnsupportedConstruct|TypeError|SyntaxError|RuntimeError|RangeError|mtoc2:|numbl:|Error:)\b/.test(
+    stderr
+  );
+}
+
 /** The backends each script is run through. `numbl` is the language
  *  reference; the `mtoc2_*` modes correspond to the `--exec MODE` flag
  *  on mtoc2's CLI (interpreter / js-aot / c-aot).
@@ -183,6 +211,42 @@ async function captureForMode(
       : process.env,
   });
   return { stdout: r.stdout, stderr: r.stderr ?? "" };
+}
+
+/** Wrap `captureForMode` with bounded retries on transient subprocess
+ *  failures. A failure whose stderr matches `looksLikeScriptError` is
+ *  treated as a real script-level error and surfaced immediately (no
+ *  retry); everything else (tsx cold-start race, ENOENT during spawn,
+ *  no-stderr SIGKILL, …) gets up to `SUBPROCESS_RETRIES` retries with
+ *  short backoff. Each retry logs to stderr so flake patterns stay
+ *  visible. */
+async function captureForModeWithRetry(
+  scriptPath: string,
+  mode: Mode
+): Promise<Captured> {
+  let lastErr: unknown;
+  for (let attempt = 0; attempt <= SUBPROCESS_RETRIES; attempt++) {
+    try {
+      return await captureForMode(scriptPath, mode);
+    } catch (e) {
+      const err = e as Error & { stderr?: string };
+      const stderr = err.stderr ?? "";
+      if (looksLikeScriptError(stderr) || attempt >= SUBPROCESS_RETRIES) {
+        throw e;
+      }
+      lastErr = e;
+      const relName = scriptPath.startsWith(repoRoot)
+        ? scriptPath.slice(repoRoot.length + 1)
+        : scriptPath;
+      console.error(
+        `  retry ${attempt + 1}/${SUBPROCESS_RETRIES} ${mode} ${relName}: ${err.message.split("\n")[0]}`
+      );
+      await new Promise(r => setTimeout(r, 200 * (attempt + 1)));
+    }
+  }
+  // Unreachable: the loop either returns on success or throws on
+  // attempt === SUBPROCESS_RETRIES.
+  throw lastErr;
 }
 
 function diff(
@@ -382,7 +446,7 @@ async function runOne(scriptPath: string): Promise<Result> {
   const errored: string[] = [];
   for (const mode of ALL_MODES) {
     try {
-      captures.set(mode, await captureForMode(scriptPath, mode));
+      captures.set(mode, await captureForModeWithRetry(scriptPath, mode));
     } catch (e) {
       const err = e as Error & { stderr?: string };
       const tail = (err.stderr ?? "").trim();
