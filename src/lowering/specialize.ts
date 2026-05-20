@@ -18,7 +18,7 @@
 
 import type { Stmt } from "../parser/index.js";
 import type { Span } from "../parser/index.js";
-import { TypeError } from "./errors.js";
+import { TypeError, UnsupportedConstruct } from "./errors.js";
 import type { IRExpr, IRFunc, IRStmt } from "./ir.js";
 import {
   type Type,
@@ -30,6 +30,25 @@ import {
 } from "./types.js";
 import type { Lowerer } from "./lower.js";
 import { cIdentForUserName } from "./lower.js";
+
+/** Per-source-function specialization cap. Exact-value tracking
+ *  shards each user function's spec cache by arg value, so a call
+ *  site like `for k = 1:1000; total = total + sq(k); end` (without
+ *  loop-body widening of `k`) would otherwise create 1000 specs and
+ *  bloat the emitted C/JS. The cap is a safety net — well-typed
+ *  programs sit far below it; pathological exact-tracking explosions
+ *  abort with a clear error pointing at the offending function.
+ *
+ *  Read once at module load from `MTOC2_MAX_SPECS_PER_FUNCTION` so a
+ *  user with a legitimate dense-specialization need can raise it
+ *  without recompiling. Defaults to 256. */
+const MAX_SPECS_PER_FUNCTION: number = (() => {
+  const raw = process.env.MTOC2_MAX_SPECS_PER_FUNCTION;
+  if (!raw) return 256;
+  const n = Number.parseInt(raw, 10);
+  if (Number.isFinite(n) && n > 0) return n;
+  return 256;
+})();
 
 type FuncStmt = Extract<Stmt, { type: "Function" }>;
 
@@ -169,6 +188,29 @@ export function specializeUserFunction(
     }
     return cached;
   }
+
+  // Cap distinct specializations per source-level function. Each
+  // exact-tracked literal arg shards into its own spec, so a tight
+  // value-keyed call site (e.g. unrolled `sq(1) + sq(2) + ... + sq(N)`)
+  // can produce hundreds of specs and bloat the emitted code. Above
+  // the cap, abort with a clear error pointing at the offending
+  // function and span; users with a legitimate need can raise the cap
+  // via `MTOC2_MAX_SPECS_PER_FUNCTION`. The key is `<source>|<file>`
+  // so a homonymous function in two files counts independently.
+  const countKey = `${source}|${file}`;
+  const priorCount = this.specCountPerSource.get(countKey) ?? 0;
+  if (priorCount >= MAX_SPECS_PER_FUNCTION) {
+    throw new UnsupportedConstruct(
+      `function '${decl.name}' has exceeded the per-function ` +
+        `specialization cap (${MAX_SPECS_PER_FUNCTION}). This usually ` +
+        `means exact-value tracking is sharding a call site into one ` +
+        `spec per distinct input; widen the inputs (e.g. via ` +
+        `'%!numbl:opaque') or raise the cap via the ` +
+        `MTOC2_MAX_SPECS_PER_FUNCTION env var.`,
+      errSpan
+    );
+  }
+  this.specCountPerSource.set(countKey, priorCount + 1);
 
   // Per-spec output list: truncate to the caller's requested nargout.
   // A 3-output function called as `[a] = f(...)` or `x = f(...)`

@@ -163,6 +163,16 @@ export class Lowerer {
    *  `specializeUserFunction`'s cache-hit branch and consumed by the
    *  same function after body lowering. */
   recursiveSpecsConsumed: Set<string> = new Set();
+  /** Number of distinct specializations created so far per
+   *  `<sourceName>|<definingFile>`. Read by
+   *  `specializeUserFunction`'s cache-miss branch; when the count for
+   *  any one source-level function crosses `MAX_SPECS_PER_FUNCTION`,
+   *  translation aborts with a clear error rather than letting the
+   *  spec map (and the emitted C / JS) grow without bound. Exact-
+   *  value tracking shards the cache by arg value, so a tight call
+   *  with hundreds of distinct literal args (or value-keyed loop
+   *  bodies) is the typical trigger. */
+  specCountPerSource: Map<string, number> = new Map();
 
   constructor(public workspace: Workspace) {
     this.currentFile = workspace.mainFile;
