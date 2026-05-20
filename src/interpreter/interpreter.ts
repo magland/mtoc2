@@ -976,6 +976,12 @@ export class Interpreter {
     for (let i = 0; i < args.length; i++) {
       child.set(fn.params[i], args[i]);
     }
+    // Bind the pseudo-variables `nargin` and `nargout` so the body
+    // can read them. Matches the c-aot path, which folds them at
+    // lowering time into compile-time constants (the lowerer reads
+    // them off the specialization key). Here they're just locals.
+    child.set("nargin", args.length);
+    child.set("nargout", nargout);
     const inner = new Interpreter(this.ctx, {
       env: child,
       ...(this.workspace !== undefined ? { workspace: this.workspace } : {}),
