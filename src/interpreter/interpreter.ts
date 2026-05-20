@@ -91,6 +91,29 @@ export class Interpreter {
   private readonly active = new Set<string>();
   /** Source file for `Workspace.resolve` call-site attribution. */
   private readonly currentFile: string;
+  /** Active index slot stack — pushed on entering an index slot
+   *  (FuncCall args / Index expression / AssignLValue indices) so a
+   *  nested `end` keyword inside an expression like `v(end-1)`
+   *  resolves to the size of the axis being indexed. Top of stack
+   *  is the innermost slot. */
+  private readonly endStack: Array<{
+    baseTensor: { shape: ReadonlyArray<number>; data: ArrayLike<number> };
+    axis: number | "linear";
+  }> = [];
+
+  /** Helper: resolve the current `end` keyword against the top of
+   *  `endStack`. Throws if there's no active slot (the parser should
+   *  have caught this, but the interpreter walks the raw AST). */
+  private resolveEnd(): number {
+    if (this.endStack.length === 0) {
+      throw new UnsupportedConstruct(
+        `interpreter: 'end' used outside an index slot`
+      );
+    }
+    const top = this.endStack[this.endStack.length - 1];
+    if (top.axis === "linear") return top.baseTensor.data.length;
+    return top.baseTensor.shape[top.axis] ?? 1;
+  }
 
   constructor(
     ctx: RuntimeContext,
@@ -282,11 +305,15 @@ export class Interpreter {
       // being indexed (or `numel` for linear single-slot).
       const ndim = lv.indices.length;
       const idxVals = lv.indices.map((ix, i) => {
-        if (ix.type === "EndKeyword") {
-          if (ndim === 1) return baseVal.data.length;
-          return baseVal.shape[i] ?? 1;
+        this.endStack.push({
+          baseTensor: baseVal,
+          axis: ndim === 1 ? "linear" : i,
+        });
+        try {
+          return this.evalExpr(ix);
+        } finally {
+          this.endStack.pop();
         }
-        return this.evalExpr(ix);
       });
       for (const iv of idxVals) {
         if (typeof iv !== "number") {
@@ -438,11 +465,15 @@ export class Interpreter {
           // `end` inside the index list resolves to the size of the
           // axis being indexed (or `numel` for linear single-slot).
           const idxVals = e.args.map((a, i) => {
-            if (a.type === "EndKeyword") {
-              if (e.args.length === 1) return envVal.data.length;
-              return envVal.shape[i] ?? 1;
+            this.endStack.push({
+              baseTensor: envVal,
+              axis: e.args.length === 1 ? "linear" : i,
+            });
+            try {
+              return this.evalExpr(a);
+            } finally {
+              this.endStack.pop();
             }
-            return this.evalExpr(a);
           });
           for (const v of idxVals) {
             if (typeof v !== "number") {
@@ -615,7 +646,17 @@ export class Interpreter {
           const n = baseVal.data.length;
           return makeTensor([n, 1], new Float64Array(baseVal.data));
         }
-        const idxVals = e.indices.map(ix => this.evalExpr(ix));
+        const idxVals = e.indices.map((ix, i) => {
+          this.endStack.push({
+            baseTensor: baseVal,
+            axis: e.indices.length === 1 ? "linear" : i,
+          });
+          try {
+            return this.evalExpr(ix);
+          } finally {
+            this.endStack.pop();
+          }
+        });
         for (const v of idxVals) {
           if (typeof v !== "number") {
             throw new UnsupportedConstruct(
@@ -650,6 +691,9 @@ export class Interpreter {
         return baseVal.data[offset];
       }
 
+      case "EndKeyword":
+        return this.resolveEnd();
+
       case "IndexCell":
       case "Member":
       case "MemberDynamic":
@@ -659,7 +703,6 @@ export class Interpreter {
       case "FuncHandle":
       case "Cell":
       case "ClassInstantiation":
-      case "EndKeyword":
       case "Colon":
       case "MetaClass":
         throw new UnsupportedConstruct(
