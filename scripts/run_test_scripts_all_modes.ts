@@ -99,12 +99,13 @@ interface Captured {
  *  reference; the `mtoc2_*` modes correspond to the `--exec MODE` flag
  *  on mtoc2's CLI (interpreter / js-aot / c-aot).
  *
- *  `mtoc2-interpreter` is intentionally omitted from the active set —
- *  the tree-walking interpreter is still incomplete and fails on most
- *  scripts today. Re-add it to `ALL_MODES` once it's caught up enough
- *  to clear the existing test_scripts suite. The `captureForMode`
- *  dispatch below still handles the mode, so this is a one-line
- *  reactivation. */
+ *  All three mtoc2 backends are active in `ALL_MODES`. Tests covering
+ *  features still pending in a backend (e.g. complex tensor codegen
+ *  in js-aot, LogicalMask slot reads in either non-C backend) will
+ *  fail and surface in the runner output. The cross-runner script
+ *  `run_test_scripts.ts` continues to gate the c-aot path against
+ *  numbl byte-for-byte; the all-modes runner exists to track the
+ *  other two against the same reference. */
 type Mode = "numbl" | "mtoc2-interpreter" | "mtoc2-js-aot" | "mtoc2-c-aot";
 
 const ALL_MODES: ReadonlyArray<Mode> = [
