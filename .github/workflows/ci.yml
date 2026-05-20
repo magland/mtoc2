@@ -2,10 +2,10 @@ name: CI
 
 # mtoc2 imports numbl's parser and several IDE components directly from a
 # sibling `../numbl` source tree. Every job below checks numbl out next to
-# the mtoc2 checkout so those relative imports resolve. The cross-runner
-# (`scripts/run_test_scripts.ts`) is intentionally not run here — it shells
-# out to `cc` per script and runs locally as part of the dev loop. CI here
-# covers lint + format + typecheck + vitest.
+# the mtoc2 checkout, pinned to the SHA in mtoc2's `NUMBL_VERSION`, so
+# the sibling-relative imports resolve against a known-validated upstream.
+# `tsc` catches structural AST drift; semantic drift is caught by the
+# `cross-runner` job below.
 
 on:
   push:
@@ -23,11 +23,16 @@ jobs:
         with:
           path: mtoc2
 
-      - name: Checkout numbl (sibling)
+      - name: Resolve pinned numbl SHA
+        id: numbl-version
+        run: echo "sha=$(cat mtoc2/NUMBL_VERSION)" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout numbl (sibling, pinned to NUMBL_VERSION)
         uses: actions/checkout@v4
         with:
           repository: flatironinstitute/numbl
           path: numbl
+          ref: ${{ steps.numbl-version.outputs.sha }}
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -61,11 +66,16 @@ jobs:
         with:
           path: mtoc2
 
-      - name: Checkout numbl (sibling)
+      - name: Resolve pinned numbl SHA
+        id: numbl-version
+        run: echo "sha=$(cat mtoc2/NUMBL_VERSION)" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout numbl (sibling, pinned to NUMBL_VERSION)
         uses: actions/checkout@v4
         with:
           repository: flatironinstitute/numbl
           path: numbl
+          ref: ${{ steps.numbl-version.outputs.sha }}
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -85,3 +95,50 @@ jobs:
       - name: Run tests
         run: npm run test
         working-directory: mtoc2
+
+  cross-runner:
+    name: Cross-runner (all backends vs numbl)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout mtoc2
+        uses: actions/checkout@v4
+        with:
+          path: mtoc2
+
+      - name: Resolve pinned numbl SHA
+        id: numbl-version
+        run: echo "sha=$(cat mtoc2/NUMBL_VERSION)" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout numbl (sibling, pinned to NUMBL_VERSION)
+        uses: actions/checkout@v4
+        with:
+          repository: flatironinstitute/numbl
+          path: numbl
+          ref: ${{ steps.numbl-version.outputs.sha }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: mtoc2/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+        working-directory: mtoc2
+
+      - name: Build numbl stdlib
+        run: npm install && npm run bundle:stdlib
+        working-directory: numbl
+
+      # The all-modes runner is a strict superset of the c-aot-only
+      # runner: it spawns numbl + all three mtoc2 backends (interpreter,
+      # js-aot, c-aot) per script and diffs each against numbl byte-for-
+      # byte. Per-script `% mtoc2-test-xfail-<backend>:` directives let
+      # individual scripts excuse a backend; no current script excuses
+      # c-aot, so this also gates the strict oracle.
+      - name: Run all-modes cross-runner
+        run: npm run test:scripts:all-modes
+        working-directory: mtoc2
+        env:
+          MTOC_TEST_TIMEOUT_MS: "120000"
