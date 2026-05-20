@@ -25,10 +25,37 @@ import { Interpreter } from "./interpreter.js";
 
 // ── Dispatch ──────────────────────────────────────────────────────────────
 
-/** Resolve `name` against (in order): the global builtin registry,
- *  workspace-loaded `.mtoc2.js` user functions, and the workspace
- *  function index (via numbl's `resolveFunction`). Returns one value
- *  per `nargout`. */
+/** Operator-builtin dispatch. The Binary / Unary / conjugate-transpose
+ *  paths in `evalExpr` use this instead of `callByName` because MATLAB
+ *  operators do NOT resolve through the workspace function index —
+ *  `a * b` always goes to the `mtimes` builtin (or a class operator
+ *  overload, when one applies; mtoc2 v1 has no operator overloads
+ *  yet), even when a `mtimes.m` workspace file exists. The c-aot
+ *  lowerer's `lowerBinary` / `lowerUnary` paths bypass `workspace.resolve`
+ *  for the same reason. */
+export function callOpBuiltin(
+  this: Interpreter,
+  name: string,
+  args: RuntimeValue[],
+  span: Span
+): RuntimeValue {
+  const b = getBuiltin(name);
+  if (b === undefined) {
+    throw new RuntimeError(
+      `internal: operator builtin '${name}' not registered`,
+      span
+    );
+  }
+  const argTypes = args.map(inferTypeFromValue);
+  return this.invokeBuiltin(b, args, argTypes, 1, name)[0];
+}
+
+/** Resolve `name` against the workspace + builtin registry per MATLAB
+ *  precedence (local function in current file > workspace functions >
+ *  class methods > builtins; numbl's `resolveFunction` is the source
+ *  of truth). Used by source-level `name(args)` calls (FuncCall,
+ *  MultiAssign, named handles). Operator paths bypass this — see
+ *  `callOpBuiltin` above. Returns one value per `nargout`. */
 export function callByName(
   this: Interpreter,
   name: string,
@@ -66,15 +93,14 @@ export function callByName(
   }
   const argTypes = args.map(inferTypeFromValue);
 
-  // Global builtin registry first.
-  const b = getBuiltin(name);
-  if (b !== undefined) {
-    return this.invokeBuiltin(b, args, argTypes, nargout, name);
-  }
-
-  // Workspace dispatch — `.mtoc2.js` user functions, workspace
-  // functions, class methods, etc. Without a workspace we can only
-  // reach builtins (vitest unit-tests that hand-build a tiny env).
+  // Workspace dispatch first — numbl's `resolveFunction` applies the
+  // full MATLAB precedence rule (local function in current file >
+  // workspace functions / packages > class methods > builtins), so a
+  // user-supplied `disp.m` correctly shadows the global `disp`
+  // builtin. The prior order (registry → workspace) skipped the
+  // shadow check for any name the registry knew about. Without a
+  // workspace (vitest fixture) we fall straight through to the bare
+  // registry at the bottom.
   if (this.workspace !== undefined) {
     const target = this.workspace.resolve(
       name,
@@ -151,6 +177,14 @@ export function callByName(
         }
       }
     }
+  }
+
+  // Workspace had no verdict, OR no workspace at all. Fall back to
+  // the global builtin registry directly — covers vitest fixtures
+  // and any mtoc2 builtin numbl's resolver doesn't yet know about.
+  const b = getBuiltin(name);
+  if (b !== undefined) {
+    return this.invokeBuiltin(b, args, argTypes, nargout, name);
   }
 
   throw new RuntimeError(`Undefined function or variable '${name}'`, span);

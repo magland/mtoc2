@@ -145,6 +145,11 @@ export class Interpreter {
     nargout: number,
     span: Span
   ) => RuntimeValue[];
+  declare callOpBuiltin: (
+    name: string,
+    args: RuntimeValue[],
+    span: Span
+  ) => RuntimeValue;
   declare callHandle: (
     h: RuntimeHandle,
     args: RuntimeValue[],

@@ -137,7 +137,13 @@ export function evalExpr(this: Interpreter, e: Expr): RuntimeValue {
           e.span
         );
       }
-      return this.callByName(name, [left, right], 1, e.span)[0];
+      // Operator dispatch bypasses `workspace.resolve`: MATLAB
+      // operators always go to the operator builtin (or a class
+      // operator overload, when one applies — not yet supported),
+      // never to a workspace function with the same name. So `a * b`
+      // doesn't dispatch to a user `mtimes.m`. Mirrors the c-aot
+      // lowerer's `lowerBinary`, which calls `getBuiltin` directly.
+      return this.callOpBuiltin(name, [left, right], e.span);
     }
     case "Unary": {
       const a = this.evalExpr(e.operand);
@@ -145,10 +151,13 @@ export function evalExpr(this: Interpreter, e: Expr): RuntimeValue {
       // `'` (conjugate transpose) lowers to `transpose(conj(z))` in
       // the c-aot/js-aot pipeline. The interpreter walks the AST
       // pre-lowering, so we mimic the same composition: conj first,
-      // then transpose.
+      // then transpose. Both calls use the operator-builtin path so
+      // a user `conj.m` / `transpose.m` doesn't intercept the
+      // ctranspose lowering (which is implementation-level, not
+      // user-callable).
       if (e.op === UnaryOperation.Transpose) {
-        const conjed = this.callByName("conj", [a], 1, e.span)[0];
-        return this.callByName("transpose", [conjed], 1, e.span)[0];
+        const conjed = this.callOpBuiltin("conj", [a], e.span);
+        return this.callOpBuiltin("transpose", [conjed], e.span);
       }
       const name = UNOP_BUILTIN[e.op];
       if (!name) {
@@ -157,7 +166,7 @@ export function evalExpr(this: Interpreter, e: Expr): RuntimeValue {
           e.span
         );
       }
-      return this.callByName(name, [a], 1, e.span)[0];
+      return this.callOpBuiltin(name, [a], e.span);
     }
     case "FuncCall": {
       // MATLAB parses `v(args)` the same whether `v` is a function or
