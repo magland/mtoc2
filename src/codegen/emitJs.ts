@@ -361,29 +361,58 @@ function emitIndexSliceStoreJs(
   indent: string,
   state: RuntimeState
 ): string {
-  if (s.base.ty.kind === "Numeric" && s.base.ty.isComplex) {
-    throw new UnsupportedConstruct(
-      `emitJs: complex IndexSliceStore not yet wired (Phase 5)`,
-      s.span
-    );
-  }
+  const baseIsComplex = s.base.ty.kind === "Numeric" && s.base.ty.isComplex;
+  const rhsTy = s.rhs.ty;
+  const rhsIsScalarReal =
+    rhsTy.kind === "Numeric" &&
+    !rhsTy.isComplex &&
+    rhsTy.dims.every(d => d.kind === "exact" && d.value === 1);
+  const rhsIsScalarComplex =
+    rhsTy.kind === "Numeric" &&
+    rhsTy.isComplex &&
+    rhsTy.dims.every(d => d.kind === "exact" && d.value === 1);
+  const rhsIsScalar = rhsIsScalarReal || rhsIsScalarComplex;
+  const rhsIsComplex = rhsTy.kind === "Numeric" && rhsTy.isComplex;
   const rhsExpr = emitExpr(s.rhs, state);
-  const rhsIsScalar =
-    s.rhs.ty.kind === "Numeric" &&
-    s.rhs.ty.dims.every(d => d.kind === "exact" && d.value === 1);
   const baseName = s.base.cName;
+
+  // Per-slot write template. Reads one element from the RHS (a scalar
+  // value or `_mtoc2_rhs.data/imag[k]`) and writes both data + imag
+  // lanes into `baseName` at the given dst offset. Complex base with
+  // real RHS sets imag = 0; real base with complex RHS would drop the
+  // imag lane (we route through `transfer` earlier, so this is rare).
+  const writeAt = (dstOff: string, srcIdx: string): string => {
+    if (rhsIsScalarReal) {
+      const reLine = `${baseName}.data[${dstOff}] = _mtoc2_rhs;`;
+      const imLine = baseIsComplex ? ` ${baseName}.imag[${dstOff}] = 0;` : "";
+      return reLine + imLine;
+    }
+    if (rhsIsScalarComplex) {
+      const reLine = `${baseName}.data[${dstOff}] = _mtoc2_rhs.re;`;
+      const imLine = baseIsComplex
+        ? ` ${baseName}.imag[${dstOff}] = _mtoc2_rhs.im;`
+        : "";
+      return reLine + imLine;
+    }
+    // Tensor RHS: read one element from rhs.data (and rhs.imag when
+    // the rhs is complex).
+    const reLine = `${baseName}.data[${dstOff}] = _mtoc2_rhs.data[${srcIdx}];`;
+    if (!baseIsComplex) return reLine;
+    const imSrc = rhsIsComplex ? `_mtoc2_rhs.imag[${srcIdx}]` : `0`;
+    return reLine + ` ${baseName}.imag[${dstOff}] = ${imSrc};`;
+  };
 
   // Single-slot linear store.
   if (s.index.length === 1) {
     const slot = s.index[0];
-    const valExpr = rhsIsScalar ? `_mtoc2_rhs` : `_mtoc2_rhs.data[_mtoc2_k]`;
     if (slot.kind === "Colon") {
       return (
         `${indent}{ ` +
         `const _mtoc2_rhs = ${rhsExpr}; ` +
         `const _mtoc2_n = ${baseName}.data.length; ` +
-        `for (let _mtoc2_k = 0; _mtoc2_k < _mtoc2_n; _mtoc2_k++) ` +
-        `${baseName}.data[_mtoc2_k] = ${valExpr}; ` +
+        `for (let _mtoc2_k = 0; _mtoc2_k < _mtoc2_n; _mtoc2_k++) { ` +
+        `${writeAt("_mtoc2_k", "_mtoc2_k")} ` +
+        `} ` +
         `}`
       );
     }
@@ -400,7 +429,7 @@ function emitIndexSliceStoreJs(
         `const _mtoc2_n = mtoc2_loop_count(_mtoc2_s, _mtoc2_e, _mtoc2_st); ` +
         `for (let _mtoc2_k = 0; _mtoc2_k < _mtoc2_n; _mtoc2_k++) { ` +
         `const _mtoc2_v = mtoc2_range_value(_mtoc2_s, _mtoc2_st, _mtoc2_e, _mtoc2_n, _mtoc2_k); ` +
-        `${baseName}.data[Math.trunc(_mtoc2_v) - 1] = ${valExpr}; ` +
+        `${writeAt("Math.trunc(_mtoc2_v) - 1", "_mtoc2_k")} ` +
         `} ` +
         `}`
       );
@@ -413,11 +442,34 @@ function emitIndexSliceStoreJs(
         `const _mtoc2_ix = ${idxE}; ` +
         `const _mtoc2_ixd = _mtoc2_ix.mtoc2Tag === "tensor" ? _mtoc2_ix.data : [_mtoc2_ix]; ` +
         `const _mtoc2_n = _mtoc2_ixd.length; ` +
-        `for (let _mtoc2_k = 0; _mtoc2_k < _mtoc2_n; _mtoc2_k++) ` +
-        `${baseName}.data[Math.trunc(_mtoc2_ixd[_mtoc2_k]) - 1] = ${valExpr}; ` +
+        `for (let _mtoc2_k = 0; _mtoc2_k < _mtoc2_n; _mtoc2_k++) { ` +
+        `${writeAt("Math.trunc(_mtoc2_ixd[_mtoc2_k]) - 1", "_mtoc2_k")} ` +
+        `} ` +
         `}`
       );
     }
+    if (slot.kind === "LogicalMask") {
+      // Linear single-slot logical mask write: scan, collect 0-based
+      // truthy positions, write the RHS into each. Scalar RHS
+      // broadcasts; tensor RHS reads positionally.
+      const maskE = emitExpr(slot.expr, state);
+      return (
+        `${indent}{ ` +
+        `const _mtoc2_rhs = ${rhsExpr}; ` +
+        `const _mtoc2_m = ${maskE}; ` +
+        `const _mtoc2_md = _mtoc2_m.data; ` +
+        `const _mtoc2_ix = []; ` +
+        `for (let _mtoc2_mi = 0; _mtoc2_mi < _mtoc2_md.length; _mtoc2_mi++) ` +
+        `if (_mtoc2_md[_mtoc2_mi] !== 0) _mtoc2_ix.push(_mtoc2_mi); ` +
+        `const _mtoc2_n = _mtoc2_ix.length; ` +
+        `for (let _mtoc2_k = 0; _mtoc2_k < _mtoc2_n; _mtoc2_k++) { ` +
+        `${writeAt("_mtoc2_ix[_mtoc2_k]", "_mtoc2_k")} ` +
+        `} ` +
+        `}`
+      );
+    }
+    // Single-slot Scalar writes go through IndexStore, not here.
+    // Any other kind would be a new IndexSliceArg variant.
     throw new UnsupportedConstruct(
       `emitJs: IndexSliceStore single-slot '${slot.kind}' not yet wired`,
       s.span
@@ -469,9 +521,24 @@ function emitIndexSliceStoreJs(
       setup.push(`const _mtoc2_n_${i} = _mtoc2_ixd_${i}.length;`);
       dims.push(`_mtoc2_n_${i}`);
       idxFns.push(`_mtoc2_ixd_${i}[_mtoc2_k_${i}]`);
+    } else if (slot.kind === "LogicalMask") {
+      const maskE = emitExpr(slot.expr, state);
+      setup.push(
+        `const _mtoc2_m_${i} = ${maskE}; ` +
+          `const _mtoc2_md_${i} = _mtoc2_m_${i}.data; ` +
+          `const _mtoc2_ixd_${i} = []; ` +
+          `for (let _mtoc2_mi = 0; _mtoc2_mi < _mtoc2_md_${i}.length; _mtoc2_mi++) ` +
+          `if (_mtoc2_md_${i}[_mtoc2_mi] !== 0) _mtoc2_ixd_${i}.push(_mtoc2_mi + 1);`
+      );
+      setup.push(`const _mtoc2_n_${i} = _mtoc2_ixd_${i}.length;`);
+      dims.push(`_mtoc2_n_${i}`);
+      idxFns.push(`_mtoc2_ixd_${i}[_mtoc2_k_${i}]`);
     } else {
+      // Exhaustive: every IndexSliceArg kind handled above.
+      const _exhaustive: never = slot;
+      void _exhaustive;
       throw new UnsupportedConstruct(
-        `emitJs: IndexSliceStore multi-slot '${slot.kind}' not yet wired`,
+        `emitJs: IndexSliceStore multi-slot unknown kind`,
         s.span
       );
     }
@@ -500,12 +567,10 @@ function emitIndexSliceStoreJs(
   }
   lines.push(`${indent}    const _mtoc2_dst = ${srcTerms.join(" + ")};`);
   if (rhsIsScalar) {
-    lines.push(`${indent}    ${baseName}.data[_mtoc2_dst] = _mtoc2_rhs;`);
+    lines.push(`${indent}    ${writeAt("_mtoc2_dst", "0")}`);
   } else {
     lines.push(`${indent}    const _mtoc2_src = ${rhsTerms.join(" + ")};`);
-    lines.push(
-      `${indent}    ${baseName}.data[_mtoc2_dst] = _mtoc2_rhs.data[_mtoc2_src];`
-    );
+    lines.push(`${indent}    ${writeAt("_mtoc2_dst", "_mtoc2_src")}`);
   }
   for (let i = ndim - 1; i >= 0; i--) lines.push(`${indent}  }`);
   lines.push(`${indent}}`);
@@ -773,14 +838,19 @@ function emitIndexSliceJs(
       `emitJs internal: IndexSlice base must be a Var after ANF (got ${e.base.kind})`
     );
   }
-  if (e.base.ty.kind === "Numeric" && e.base.ty.isComplex) {
-    throw new UnsupportedConstruct(
-      `emitJs: complex IndexSlice not yet wired (Phase 5)`,
-      e.span
-    );
-  }
-  useRuntimeByName(state, "mtoc2_tensor_alloc_nd");
+  const isComplexBase = e.base.ty.kind === "Numeric" && e.base.ty.isComplex;
+  const allocFn = isComplexBase
+    ? "mtoc2_tensor_alloc_nd_complex"
+    : "mtoc2_tensor_alloc_nd";
+  useRuntimeByName(state, allocFn);
   const baseName = e.base.cName;
+  // Per-element copy template — fills both lanes for complex bases.
+  // Used inside every per-slot loop body so the same emit path serves
+  // real and complex slices.
+  const copy = (dstIdx: string, srcIdx: string): string =>
+    isComplexBase
+      ? `_mtoc2_t.data[${dstIdx}] = ${baseName}.data[${srcIdx}]; _mtoc2_t.imag[${dstIdx}] = ${baseName}.imag[${srcIdx}];`
+      : `_mtoc2_t.data[${dstIdx}] = ${baseName}.data[${srcIdx}];`;
 
   // Single-slot linear form. Covers `v(:)`, `v(a:b)`, `v(idx_vec)`,
   // `v(mask)`. Multi-slot Scalar single-slot reads route through
@@ -794,9 +864,10 @@ function emitIndexSliceJs(
       return (
         `(() => { ` +
         `const _mtoc2_n = ${baseName}.data.length; ` +
-        `const _mtoc2_t = mtoc2_tensor_alloc_nd(2, [_mtoc2_n, 1]); ` +
-        `for (let _mtoc2_k = 0; _mtoc2_k < _mtoc2_n; _mtoc2_k++) ` +
-        `_mtoc2_t.data[_mtoc2_k] = ${baseName}.data[_mtoc2_k]; ` +
+        `const _mtoc2_t = ${allocFn}(2, [_mtoc2_n, 1]); ` +
+        `for (let _mtoc2_k = 0; _mtoc2_k < _mtoc2_n; _mtoc2_k++) { ` +
+        `${copy("_mtoc2_k", "_mtoc2_k")} ` +
+        `} ` +
         `return _mtoc2_t; ` +
         `})()`
       );
@@ -813,10 +884,10 @@ function emitIndexSliceJs(
         `(() => { ` +
         `const _mtoc2_s = ${s}; const _mtoc2_e = ${en}; const _mtoc2_st = ${st}; ` +
         `const _mtoc2_n = mtoc2_loop_count(_mtoc2_s, _mtoc2_e, _mtoc2_st); ` +
-        `const _mtoc2_t = mtoc2_tensor_alloc_nd(2, [${rows}, ${cols}]); ` +
+        `const _mtoc2_t = ${allocFn}(2, [${rows}, ${cols}]); ` +
         `for (let _mtoc2_k = 0; _mtoc2_k < _mtoc2_n; _mtoc2_k++) { ` +
         `const _mtoc2_v = mtoc2_range_value(_mtoc2_s, _mtoc2_st, _mtoc2_e, _mtoc2_n, _mtoc2_k); ` +
-        `_mtoc2_t.data[_mtoc2_k] = ${baseName}.data[Math.trunc(_mtoc2_v) - 1]; ` +
+        `${copy("_mtoc2_k", "Math.trunc(_mtoc2_v) - 1")} ` +
         `} ` +
         `return _mtoc2_t; ` +
         `})()`
@@ -839,16 +910,42 @@ function emitIndexSliceJs(
         `const _mtoc2_ix = ${idx}; ` +
         `const _mtoc2_ixd = _mtoc2_ix.mtoc2Tag === "tensor" ? _mtoc2_ix.data : [_mtoc2_ix]; ` +
         `const _mtoc2_n = _mtoc2_ixd.length; ` +
-        `const _mtoc2_t = mtoc2_tensor_alloc_nd(2, [${rows}, ${cols}]); ` +
-        `for (let _mtoc2_k = 0; _mtoc2_k < _mtoc2_n; _mtoc2_k++) ` +
-        `_mtoc2_t.data[_mtoc2_k] = ${baseName}.data[Math.trunc(_mtoc2_ixd[_mtoc2_k]) - 1]; ` +
+        `const _mtoc2_t = ${allocFn}(2, [${rows}, ${cols}]); ` +
+        `for (let _mtoc2_k = 0; _mtoc2_k < _mtoc2_n; _mtoc2_k++) { ` +
+        `${copy("_mtoc2_k", "Math.trunc(_mtoc2_ixd[_mtoc2_k]) - 1")} ` +
+        `} ` +
         `return _mtoc2_t; ` +
         `})()`
       );
     }
-    // LogicalMask — wire when needed.
+    if (slot.kind === "LogicalMask") {
+      // Single-slot logical mask: linear scan, collect 1-based
+      // positions of truthy elements, then gather. Result orientation
+      // follows the base: row base → row, otherwise column.
+      const mask = emitExpr(slot.expr, state);
+      const rows = isRowVec ? "1" : "_mtoc2_n";
+      const cols = isRowVec ? "_mtoc2_n" : "1";
+      return (
+        `(() => { ` +
+        `const _mtoc2_m = ${mask}; ` +
+        `const _mtoc2_md = _mtoc2_m.data; ` +
+        `const _mtoc2_ix = []; ` +
+        `for (let _mtoc2_mi = 0; _mtoc2_mi < _mtoc2_md.length; _mtoc2_mi++) ` +
+        `if (_mtoc2_md[_mtoc2_mi] !== 0) _mtoc2_ix.push(_mtoc2_mi); ` +
+        `const _mtoc2_n = _mtoc2_ix.length; ` +
+        `const _mtoc2_t = ${allocFn}(2, [${rows}, ${cols}]); ` +
+        `for (let _mtoc2_k = 0; _mtoc2_k < _mtoc2_n; _mtoc2_k++) { ` +
+        `${copy("_mtoc2_k", "_mtoc2_ix[_mtoc2_k]")} ` +
+        `} ` +
+        `return _mtoc2_t; ` +
+        `})()`
+      );
+    }
+    // Exhaustive: every IndexSliceArg kind is handled above.
+    const _exhaustive: never = slot;
+    void _exhaustive;
     throw new UnsupportedConstruct(
-      `emitJs: IndexSlice single-slot '${slot.kind}' not yet wired`,
+      `emitJs: IndexSlice single-slot unknown kind`,
       e.span
     );
   }
@@ -898,21 +995,47 @@ function emitIndexSliceJs(
       setup.push(`const _mtoc2_n_${i} = _mtoc2_ixd_${i}.length;`);
       dims.push(`_mtoc2_n_${i}`);
       idxFns.push(`_mtoc2_ixd_${i}[_mtoc2_k_${i}]`);
+    } else if (slot.kind === "LogicalMask") {
+      // Multi-slot logical mask: scan, collect 0-based truthy
+      // positions along this axis. The selected axis size is the
+      // truthy count; each iteration of `_mtoc2_k_${i}` picks the
+      // k-th truthy position (1-based at idxFn-time).
+      const maskE = emitExpr(slot.expr, state);
+      setup.push(
+        `const _mtoc2_m_${i} = ${maskE}; ` +
+          `const _mtoc2_md_${i} = _mtoc2_m_${i}.data; ` +
+          `const _mtoc2_ixd_${i} = []; ` +
+          `for (let _mtoc2_mi = 0; _mtoc2_mi < _mtoc2_md_${i}.length; _mtoc2_mi++) ` +
+          `if (_mtoc2_md_${i}[_mtoc2_mi] !== 0) _mtoc2_ixd_${i}.push(_mtoc2_mi + 1);`
+      );
+      setup.push(`const _mtoc2_n_${i} = _mtoc2_ixd_${i}.length;`);
+      dims.push(`_mtoc2_n_${i}`);
+      idxFns.push(`_mtoc2_ixd_${i}[_mtoc2_k_${i}]`);
     } else {
+      // Exhaustive: every IndexSliceArg kind is handled above.
+      const _exhaustive: never = slot;
+      void _exhaustive;
       throw new UnsupportedConstruct(
-        `emitJs: IndexSlice multi-slot '${slot.kind}' not yet wired`,
+        `emitJs: IndexSlice multi-slot unknown kind`,
         e.span
       );
     }
   }
-  // Pad to rank-2 floor with trailing 1s in the result shape.
+  // Result shape canonicalization: trim trailing statically-known-1
+  // axes down to a 2-axis floor, then pad up to 2 if shorter. Mirrors
+  // numbl's display convention so `t(:, :, 2)` (slot pattern Colon /
+  // Colon / Scalar) produces a 2×3 result rather than 2×3×1, and a
+  // single-axis remainder squares up to 2-axis for disp.
   const resultDims = dims.slice();
+  while (resultDims.length > 2 && resultDims[resultDims.length - 1] === "1") {
+    resultDims.pop();
+  }
   while (resultDims.length < 2) resultDims.push("1");
 
   const lines: string[] = [];
   for (const s of setup) lines.push(s);
   lines.push(
-    `const _mtoc2_t = mtoc2_tensor_alloc_nd(${resultDims.length}, [${resultDims.join(", ")}]);`
+    `const _mtoc2_t = ${allocFn}(${resultDims.length}, [${resultDims.join(", ")}]);`
   );
   for (let i = ndim - 1; i >= 0; i--) {
     lines.push(
@@ -940,9 +1063,7 @@ function emitIndexSliceJs(
   }
   lines.push(`const _mtoc2_src_off = ${srcTerms.join(" + ")};`);
   lines.push(`const _mtoc2_dst_off = ${dstTerms.join(" + ")};`);
-  lines.push(
-    `_mtoc2_t.data[_mtoc2_dst_off] = ${baseName}.data[_mtoc2_src_off];`
-  );
+  lines.push(copy("_mtoc2_dst_off", "_mtoc2_src_off"));
   for (let i = ndim - 1; i >= 0; i--) lines.push(`}`);
   lines.push(`return _mtoc2_t;`);
   return `(() => { ${lines.join(" ")} })()`;

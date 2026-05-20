@@ -1,8 +1,6 @@
 % Indexing & slicing — scalar reads/writes, range/colon slice reads/writes,
 % range-as-value, end keyword, loop-body widening, post-write exact refresh,
 % and indexed-write sign widening.
-%
-% mtoc2-test-xfail-js-aot: emitJs IndexSlice multi-slot 'LogicalMask' not yet wired
 
 test_index_read_2d();
 test_index_read_3d();
