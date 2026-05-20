@@ -25,14 +25,14 @@
  * the comment so it doesn't become an ambush later.
  */
 
-import { allocFloat64Array } from "../../../numbl/src/numbl-core/executors/jsJit/helpers/alloc.js";
-import { RTV } from "../../../numbl/src/numbl-core/runtime/constructors.js";
-import type { RuntimeValue } from "../../../numbl/src/numbl-core/runtime/types.js";
-import type { PlotInstruction } from "../../../numbl/src/graphics/types.js";
 import {
+  allocFloat64Array,
+  RTV,
   dispatchPlotBuiltin,
+  type RuntimeValue,
+  type PlotInstruction,
   type PlotDispatchState,
-} from "../../../numbl/src/numbl-core/runtime/plotBuiltinDispatch.js";
+} from "../numbl/index.js";
 import type { PlotArg, PlotRecord } from "./wasmRunner.worker";
 
 /** Fresh `PlotDispatchState` for a new viewer session. Matches the

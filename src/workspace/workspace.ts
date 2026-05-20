@@ -21,11 +21,13 @@
 
 import type { AbstractSyntaxTree, Stmt, Span } from "../parser/index.js";
 import { parseMFile } from "../parser/index.js";
-import { LoweringContext } from "../../../numbl/src/numbl-core/lowering/loweringContext.js";
-import { resolveFunction } from "../../../numbl/src/numbl-core/functionResolve.js";
-import type { CallSite } from "../../../numbl/src/numbl-core/runtime/runtimeHelpers.js";
-import type { ItemType } from "../../../numbl/src/numbl-core/lowering/itemTypes.js";
-import type { ClassInfo } from "../../../numbl/src/numbl-core/lowering/classInfo.js";
+import {
+  LoweringContext,
+  resolveFunction,
+  type CallSite,
+  type ItemType,
+  type ClassInfo,
+} from "../numbl/index.js";
 
 import { UnsupportedConstruct } from "../lowering/errors.js";
 import type { Type } from "../lowering/types.js";

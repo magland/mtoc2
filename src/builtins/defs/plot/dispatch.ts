@@ -11,7 +11,7 @@ import {
   emitFormatSlotArray,
   validateFormatArgs,
 } from "../io/_format_args.js";
-import { PLOT_ALL_NAMES } from "../../../../../numbl/src/numbl-core/runtime/plotBuiltinDispatch.js";
+import { PLOT_ALL_NAMES } from "../../../numbl/index.js";
 import { mtoc2_plot_dispatch as jsPlotDispatch } from "../../runtime/snippets.gen.js";
 
 function unwrapPlotArg(v: unknown): unknown {

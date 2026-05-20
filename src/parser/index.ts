@@ -1,15 +1,12 @@
 /**
- * Thin re-export of numbl's parser. mtoc2 lives as a sibling of numbl
- * during development and imports parser/lexer/AST shape directly from
- * `../../../numbl/src/numbl-core/parser`. Structural AST drift is
- * caught at `tsc` time.
+ * Parser re-exports for mtoc2 consumers. The actual cross-import to
+ * the sibling numbl checkout lives in `src/numbl/index.ts` — this
+ * module is the historic stable path used by ~25 call sites and
+ * preserves their import shape unchanged.
  *
- * The pinned numbl SHA lives in `NUMBL_VERSION`. CI checks out numbl
- * at exactly that SHA so its `cross-runner` job runs against a known-
- * validated upstream. Local dev may use a different sibling checkout,
- * but `tsc` only catches structural breakage — semantic drift (e.g.
- * resolver precedence) won't surface until the cross-runner is run
- * locally.
+ * Structural AST drift is caught at `tsc` time; semantic drift is
+ * caught by the cross-runner. The pinned numbl SHA lives in
+ * `NUMBL_VERSION`, which CI checks out against.
  */
 
 export {
@@ -17,7 +14,7 @@ export {
   SyntaxError,
   BinaryOperation,
   UnaryOperation,
-} from "../../../numbl/src/numbl-core/parser/index.js";
+} from "../numbl/index.js";
 
 export type {
   Span,
@@ -25,4 +22,4 @@ export type {
   Stmt,
   LValue,
   AbstractSyntaxTree,
-} from "../../../numbl/src/numbl-core/parser/index.js";
+} from "../numbl/index.js";

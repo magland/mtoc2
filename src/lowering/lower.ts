@@ -65,7 +65,7 @@ import {
 } from "./types.js";
 import type { ClassRegistration } from "./classDefs.js";
 import type { Workspace } from "../workspace/workspace.js";
-import type { CallSite } from "../../../numbl/src/numbl-core/runtime/runtimeHelpers.js";
+import type { CallSite } from "../numbl/index.js";
 
 /** Hook for the `%!numbl:printtype` directive's compile-time output.
  *  Defaults to `console.error` (so emitted lines go to stderr and
