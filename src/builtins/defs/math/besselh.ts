@@ -85,4 +85,24 @@ export const besselh: Builtin = {
       ? `mtoc2_besselh0_scalar(${argsC[2]})`
       : `mtoc2_besselh1_scalar(${argsC[2]})`;
   },
+  // js-aot and interpreter parity is deliberately deferred — the
+  // c-aot path leans on POSIX `j0` / `j1` / `y0` / `y1` from
+  // `<math.h>`; JS has no equivalent in the standard library. A
+  // proper port would vendor numbl's `besselj` / `bessely` helpers
+  // (see `../numbl/src/numbl-core/helpers/bessel.ts`). Throwing a
+  // clean UnsupportedConstruct here is better than the framework's
+  // "internal: ... no emitJs hook" surface — every builtin in the
+  // registry now structurally implements all three hooks.
+  emitJs() {
+    throw new UnsupportedConstruct(
+      `'besselh' is not yet implemented for the js-aot backend ` +
+        `(needs a JS port of POSIX j0/j1/y0/y1; see numbl/helpers/bessel.ts)`
+    );
+  },
+  call() {
+    throw new UnsupportedConstruct(
+      `'besselh' is not yet implemented for the interpreter ` +
+        `(needs a JS port of POSIX j0/j1/y0/y1; see numbl/helpers/bessel.ts)`
+    );
+  },
 };
