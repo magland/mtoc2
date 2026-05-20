@@ -8,15 +8,18 @@ import {
   type WasmOptLevel,
 } from "../utils/wasmExecution";
 import { buildJs, runJs } from "../utils/jsExecution";
+import { runInterpreter } from "../utils/interpreterExecution";
 import { evictExpiredWasm } from "../db/wasmCache";
 import type { SourceFile } from "../translate";
 
-/** Which backend the run goes through. `"js"` translates locally
- *  (numbl → C → JS) and runs the JS in a Web Worker; needs no remote
- *  service and gives instant turnaround. `"wasm"` POSTs the C to the
- *  public emcc service, caches the wasm in IndexedDB, and runs that
- *  in a worker; slower first run but full native numeric throughput. */
-export type ExecutionMode = "js" | "wasm";
+/** Which backend the run goes through. `"interpreter"` walks the AST
+ *  directly in a Web Worker — no codegen, no compile, always
+ *  available. `"js"` translates locally (numbl → C → JS) and runs the
+ *  JS in a Web Worker; needs no remote service and gives instant
+ *  turnaround. `"wasm"` POSTs the C to the public emcc service,
+ *  caches the wasm in IndexedDB, and runs that in a worker; slower
+ *  first run but full native numeric throughput. */
+export type ExecutionMode = "interpreter" | "js" | "wasm";
 
 export type RunStatus =
   | "idle"
@@ -134,6 +137,32 @@ export function useWasmExecution(): UseWasmExecutionResult {
         abortRef.current = null;
         setStatus(next);
       };
+
+      // Interpreter mode: tree-walk the AST in a worker. No codegen,
+      // no compile — always available.
+      if (opts.mode === "interpreter") {
+        const result = await runInterpreter(
+          files,
+          activeName,
+          { onEvent: handleEvent },
+          abort.signal
+        );
+        if (result.aborted) {
+          append({ channel: "info", text: "\n[stopped]\n" });
+          finish("aborted");
+          return;
+        }
+        if (result.transportError) {
+          append({
+            channel: "info",
+            text: `\n[interpreter error: ${result.transportError}]\n`,
+          });
+          finish("error");
+          return;
+        }
+        finish(result.success ? "success" : "error");
+        return;
+      }
 
       // JS mode: translate + c2js locally, then run in a worker. No
       // remote service, no compile pill — c2js is fast enough that

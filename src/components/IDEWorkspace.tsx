@@ -84,7 +84,8 @@ function readExecutionMode(): ExecutionMode {
   // throughput of native wasm can toggle to "wasm" — the choice
   // sticks across reloads via this key.
   const v = localStorage.getItem(EXEC_MODE_KEY);
-  return v === "wasm" ? "wasm" : "js";
+  if (v === "wasm" || v === "interpreter") return v;
+  return "js";
 }
 
 function readNumber(key: string, fallback: number): number {
@@ -319,11 +320,26 @@ export function IDEWorkspace({ filesApi, header }: IDEWorkspaceProps) {
   // the user shouldn't be able to fire a second run, and the Run button
   // should already show Stop so they can cancel mid-fetch.
   const isRunning = exec.status === "running" || exec.status === "compiling";
-  const canRun = !!c && !error && !isRunning;
-  const runDisabledReason = !c
-    ? "Nothing to run yet."
-    : error
-      ? "Fix translation errors before running."
+  // Interpreter walks the AST directly, so a C-translate error doesn't
+  // block it — the interpreter has broader coverage than the C path
+  // for in-development features. JS and WASM still need a clean
+  // translation since they run the emitted C (or its c2js'd form).
+  const requiresTranslate = execMode !== "interpreter";
+  const canRun = !active
+    ? false
+    : isRunning
+      ? false
+      : requiresTranslate
+        ? !!c && !error
+        : true;
+  const runDisabledReason = !active
+    ? "Open a file to run."
+    : requiresTranslate
+      ? !c
+        ? "Nothing to run yet."
+        : error
+          ? "Fix translation errors before running."
+          : null
       : null;
 
   const handleRun = () => {
@@ -684,8 +700,10 @@ function EditorToolbar({
       <Tooltip
         title={
           mode === "js"
-            ? "JS mode: translate to JavaScript locally and run in a Web Worker. No remote service needed."
-            : "WASM mode: POST translated C to the compile service, cache the wasm, run in a Web Worker. Native numeric throughput."
+            ? "JS mode (js-aot): translate to JavaScript locally and run in a Web Worker. No remote service needed."
+            : mode === "interpreter"
+              ? "INTERPRET mode: tree-walk the AST directly in a Web Worker. No codegen, no compile."
+              : "C mode (c-aot): POST translated C to the compile service, cache the wasm, run in a Web Worker. Native numeric throughput."
         }
       >
         <ToggleButtonGroup
@@ -693,7 +711,9 @@ function EditorToolbar({
           exclusive
           value={mode}
           onChange={(_, next) => {
-            if (next === "js" || next === "wasm") onModeChange(next);
+            if (next === "js" || next === "wasm" || next === "interpreter") {
+              onModeChange(next);
+            }
           }}
           disabled={isRunning}
           sx={{
@@ -702,7 +722,8 @@ function EditorToolbar({
           }}
         >
           <ToggleButton value="js">JS</ToggleButton>
-          <ToggleButton value="wasm">WASM</ToggleButton>
+          <ToggleButton value="wasm">C</ToggleButton>
+          <ToggleButton value="interpreter">INTERPRET</ToggleButton>
         </ToggleButtonGroup>
       </Tooltip>
       <Tooltip

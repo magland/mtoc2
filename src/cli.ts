@@ -58,10 +58,9 @@ function usage(): never {
       '    [--inline-temps|--no-inline-temps] [--path <dir>...] "<code>"',
       "  mtoc2 translate <script.m> [-o out.c]",
       "",
-      "--exec MODE: one of interpreter | js-aot | js-jit | c-aot (default: c-aot).",
+      "--exec MODE: one of interpreter | js-aot | c-aot (default: c-aot).",
       "    interpreter — tree-walk the AST via builtin.call hooks (always available)",
       "    js-aot      — lower to IR, emit JS via builtin.emitJs, run via 'new Function'",
-      "    js-jit      — placeholder, currently falls back to interpreter",
       "    c-aot       — translate to C, compile via 'cc', execute the binary (default)",
       "",
       `--opt PROFILE: one of ${OPT_PROFILES.join(", ")}.`,
@@ -236,7 +235,7 @@ function translateInline(
   );
 }
 
-type ExecMode = "interpreter" | "js-aot" | "js-jit" | "c-aot";
+type ExecMode = "interpreter" | "js-aot" | "c-aot";
 
 interface RunOptions {
   /** Which execution backend to use. Default `c-aot` matches the
@@ -244,9 +243,7 @@ interface RunOptions {
    *  the binary). `js-aot` uses the new `emitJs` path (no `cc`
    *  involved; runs in this process via `new Function`).
    *  `interpreter` walks the AST via the tree-walking interpreter
-   *  (no codegen at all). `js-jit` is a placeholder — it currently
-   *  falls back to the interpreter (real JIT specialization will
-   *  arrive when liveness/spec data threads through). */
+   *  (no codegen at all). */
   exec?: ExecMode;
   /** Build the C output with `-fsanitize=address -g`. AddressSanitizer
    *  pulls in LeakSanitizer at exit on Linux, so any unfreed
@@ -478,15 +475,14 @@ function parseRunEvalArgs(argv: string[]): {
     else if (a === "--js") js = true;
     else if (a === "--exec") {
       const v = argv[++i];
-      if (v !== "interpreter" && v !== "js-aot" && v !== "js-jit" && v !== "c-aot") {
+      if (v !== "interpreter" && v !== "js-aot" && v !== "c-aot") {
         console.error(
-          `Error: --exec requires one of 'interpreter' | 'js-aot' | 'js-jit' | 'c-aot' (got '${v ?? ""}')`
+          `Error: --exec requires one of 'interpreter' | 'js-aot' | 'c-aot' (got '${v ?? ""}')`
         );
         process.exit(2);
       }
       exec = v;
-    }
-    else if (a === "--path") {
+    } else if (a === "--path") {
       if (i + 1 >= argv.length) {
         console.error("Error: --path requires a directory argument");
         process.exit(2);
@@ -697,8 +693,7 @@ async function main(): Promise<void> {
   if (cmd === "run") {
     const { positional, extraPaths, opts } = parseRunEvalArgs(argv.slice(1));
     const exec = opts.exec ?? "c-aot";
-    if (exec === "interpreter" || exec === "js-jit") {
-      // js-jit currently falls back to the interpreter (placeholder).
+    if (exec === "interpreter") {
       const { workspace, mainName } = buildProjectWorkspaceFromScript(
         positional,
         extraPaths
@@ -726,7 +721,7 @@ async function main(): Promise<void> {
   if (cmd === "eval") {
     const { positional, extraPaths, opts } = parseRunEvalArgs(argv.slice(1));
     const exec = opts.exec ?? "c-aot";
-    if (exec === "interpreter" || exec === "js-jit") {
+    if (exec === "interpreter") {
       const { workspace, mainName } = buildProjectWorkspaceFromInline(
         positional,
         extraPaths
