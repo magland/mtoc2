@@ -162,12 +162,14 @@ function resolveShape(name: string, argTypes: Type[]): ResolvedShape {
     const axes: ResolvedAxis[] = [];
     for (let i = 0; i < arr.length; i++) {
       const v = arr[i];
-      if (!Number.isFinite(v) || !Number.isInteger(v) || v < 0) {
+      if (!Number.isFinite(v) || !Number.isInteger(v)) {
         throw new TypeError(
-          `'${name}' dim ${i + 1} must be a finite non-negative integer (got ${v})`
+          `'${name}' dim ${i + 1} must be a finite integer (got ${v})`
         );
       }
-      axes.push({ kind: "exact", value: v, argIndex: 0 });
+      // Negative dims clamp to 0 (empty axis) to match numbl's runtime
+      // semantics; the C / JS helpers do the same on dynamic args.
+      axes.push({ kind: "exact", value: v < 0 ? 0 : v, argIndex: 0 });
     }
     const norm = normalizeAxes(axes);
     return { axes: norm, ndim: norm.length, isSquare: false };
@@ -191,12 +193,14 @@ function resolveShape(name: string, argTypes: Type[]): ResolvedShape {
       axes.push({ kind: "dynamic", argIndex: i });
       continue;
     }
-    if (!Number.isInteger(v) || v < 0) {
+    if (!Number.isInteger(v)) {
       throw new TypeError(
-        `'${name}' arg ${i + 1} must be a finite non-negative integer (got ${v})`
+        `'${name}' arg ${i + 1} must be a finite integer (got ${v})`
       );
     }
-    axes.push({ kind: "exact", value: v, argIndex: i });
+    // Negative dims clamp to 0 (empty axis) to match numbl's runtime
+    // semantics; the C / JS helpers do the same on dynamic args.
+    axes.push({ kind: "exact", value: v < 0 ? 0 : v, argIndex: i });
   }
   // MATLAB's `zeros(n)` / `ones(n)` is an n×n square. The two axes
   // share `argIndex = 0` so codegen knows to route through the

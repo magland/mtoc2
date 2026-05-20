@@ -1,8 +1,6 @@
 % Shape / construction edge cases: trailing-singleton trim, negative
 % dim clamp, empty-tensor disp, sum on a vector with unknown shape,
 % and exact-tracking discipline around non-finite values.
-%
-% mtoc2-test-xfail-interpreter: zeros() negative-dim clamp is c-aot/js-aot path; interpreter rejects -1 directly
 
 test_construct_trim_trailing();
 test_zeros_negative_dim_clamp();
