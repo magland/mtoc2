@@ -59,6 +59,7 @@ import {
   type WorkspaceLike,
   type InlineSnippet,
 } from "./runtime.js";
+import { emitTensorConcatJs } from "./emitTensorConcatJs.js";
 
 export interface EmitJsOptions {
   /** Workspace context. Threaded through `RuntimeState` so emit-time
@@ -113,9 +114,7 @@ export function emitJsProgram(
   const out: string[] = [];
   if (state.active.size > 0) {
     out.push(
-      includeRuntime
-        ? renderJsRuntimeBodies(state)
-        : runtimePlaceholder(state)
+      includeRuntime ? renderJsRuntimeBodies(state) : runtimePlaceholder(state)
     );
     out.push("");
   }
@@ -263,7 +262,8 @@ function emitStmt(s: IRStmt, indent: string, state: RuntimeState): string {
       // mtoc2's TypeComment can show multiple variables in one block;
       // each gets its own comment line.
       const lines = s.entries.map(
-        en => `${indent}// type ${en.name} (${en.cName}) :: ${typeToShortString(en.ty)}`
+        en =>
+          `${indent}// type ${en.name} (${en.cName}) :: ${typeToShortString(en.ty)}`
       );
       return lines.join("\n");
     }
@@ -271,8 +271,38 @@ function emitStmt(s: IRStmt, indent: string, state: RuntimeState): string {
     case "MultiAssignCall":
       return emitMultiAssignCall(s, indent, state);
 
+    case "IndexStore": {
+      if (s.base.ty.kind === "Numeric" && s.base.ty.isComplex) {
+        throw new UnsupportedConstruct(
+          `emitJs: complex IndexStore not yet wired (Phase 5)`,
+          s.span
+        );
+      }
+      useRuntimeByName(state, "mtoc2_scalar_index");
+      const baseName = s.base.cName;
+      const idxs = s.indices.map(ix => emitExpr(ix, state));
+      let offset: string;
+      if (idxs.length === 1) {
+        offset = `mtoc2_idx_lin_js(${baseName}, ${idxs[0]})`;
+      } else {
+        const terms: string[] = [];
+        for (let i = 0; i < idxs.length; i++) {
+          const checked = `mtoc2_idx_axis_js(${baseName}, ${i}, ${idxs[i]})`;
+          if (i === 0) {
+            terms.push(checked);
+          } else {
+            const strides: string[] = [];
+            for (let j = 0; j < i; j++) strides.push(`${baseName}.shape[${j}]`);
+            terms.push(`${checked} * ${strides.join(" * ")}`);
+          }
+        }
+        offset = terms.join(" + ");
+      }
+      const rhs = emitExpr(s.rhs, state);
+      return `${indent}${baseName}.data[${offset}] = ${rhs};`;
+    }
+
     case "MemberStore":
-    case "IndexStore":
     case "IndexSliceStore":
       throw new UnsupportedConstruct(
         `emitJs: '${s.kind}' is not yet wired (Phase 2 minimal subset)`,
@@ -456,17 +486,68 @@ function emitExpr(e: IRExpr, state: RuntimeState): string {
       return `${e.baseCName}.shape[${e.axis}]`;
     }
 
-    case "TensorConcat":
+    case "TensorConcat": {
+      const ty = e.ty;
+      if (ty.kind === "Numeric" && ty.isComplex) {
+        throw new UnsupportedConstruct(
+          `emitJs: complex TensorConcat not yet wired (Phase 5)`,
+          e.span
+        );
+      }
+      return emitTensorConcatJs(e, state, emitExpr);
+    }
+
+    case "IndexSlice":
+      return emitIndexSliceJs(e, state);
+
     case "HandleLit":
     case "HandleCaptureLoad":
     case "StructLit":
     case "MemberLoad":
-    case "IndexSlice":
       throw new UnsupportedConstruct(
         `emitJs: IR shape '${e.kind}' is not yet wired (Phase 2 minimal subset)`,
         e.span
       );
   }
+}
+
+function emitIndexSliceJs(
+  e: Extract<IRExpr, { kind: "IndexSlice" }>,
+  state: RuntimeState
+): string {
+  if (e.base.kind !== "Var") {
+    throw new Error(
+      `emitJs internal: IndexSlice base must be a Var after ANF (got ${e.base.kind})`
+    );
+  }
+  if (e.base.ty.kind === "Numeric" && e.base.ty.isComplex) {
+    throw new UnsupportedConstruct(
+      `emitJs: complex IndexSlice not yet wired (Phase 5)`,
+      e.span
+    );
+  }
+  // Minimum support for bracket_concat: single-slot Colon (the `v(:)`
+  // / `M(:)` linearization). Other slot kinds (Range, Scalar mix,
+  // IndexVec, LogicalMask, multi-slot per-axis) will land alongside
+  // the broader Phase 5 retrofit.
+  if (e.index.length !== 1 || e.index[0].kind !== "Colon") {
+    throw new UnsupportedConstruct(
+      `emitJs: IndexSlice slot pattern not yet wired ` +
+        `(only single-slot ':' is supported so far)`,
+      e.span
+    );
+  }
+  useRuntimeByName(state, "mtoc2_tensor_alloc_nd");
+  const baseName = e.base.cName;
+  return (
+    `(() => { ` +
+    `const _mtoc2_n = ${baseName}.data.length; ` +
+    `const _mtoc2_t = mtoc2_tensor_alloc_nd(2, [_mtoc2_n, 1]); ` +
+    `for (let _mtoc2_k = 0; _mtoc2_k < _mtoc2_n; _mtoc2_k++) ` +
+    `_mtoc2_t.data[_mtoc2_k] = ${baseName}.data[_mtoc2_k]; ` +
+    `return _mtoc2_t; ` +
+    `})()`
+  );
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────

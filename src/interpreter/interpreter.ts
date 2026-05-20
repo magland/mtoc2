@@ -255,6 +255,73 @@ export class Interpreter {
       return;
     }
     if (lv.type === "Ignore") return;
+    if (lv.type === "Index") {
+      // Scalar tensor write MVP: `v(i) = x` / `M(i,j) = x`. The base
+      // must be a bare Var holding a tensor; the RHS must be a scalar
+      // number. Range / colon / multi-element RHS land separately.
+      if (lv.base.type !== "Ident") {
+        throw new UnsupportedConstruct(
+          `interpreter: indexed assignment requires a bare-variable base ` +
+            `(got '${lv.base.type}')`
+        );
+      }
+      const baseName = lv.base.name;
+      const baseVal = this.env.get(baseName);
+      if (baseVal === undefined || !isTensor(baseVal)) {
+        throw new UnsupportedConstruct(
+          `interpreter: indexed assignment requires '${baseName}' to be ` +
+            `an already-bound tensor`
+        );
+      }
+      if (typeof v !== "number") {
+        throw new UnsupportedConstruct(
+          `interpreter: indexed assignment requires a scalar RHS (got ${typeof v})`
+        );
+      }
+      // `end` inside the index list resolves to the size of the axis
+      // being indexed (or `numel` for linear single-slot).
+      const ndim = lv.indices.length;
+      const idxVals = lv.indices.map((ix, i) => {
+        if (ix.type === "EndKeyword") {
+          if (ndim === 1) return baseVal.data.length;
+          return baseVal.shape[i] ?? 1;
+        }
+        return this.evalExpr(ix);
+      });
+      for (const iv of idxVals) {
+        if (typeof iv !== "number") {
+          throw new UnsupportedConstruct(
+            `interpreter: indexed assignment supports scalar numeric indices only`
+          );
+        }
+      }
+      const ks = idxVals.map(iv => Math.trunc(iv as number));
+      let offset: number;
+      if (ks.length === 1) {
+        if (ks[0] < 1 || ks[0] > baseVal.data.length) {
+          throw new RangeError(
+            `Index in position 1 (${ks[0]}) exceeds array bounds (${baseVal.data.length})`
+          );
+        }
+        offset = ks[0] - 1;
+      } else {
+        offset = 0;
+        let stride = 1;
+        for (let i = 0; i < ks.length; i++) {
+          const dim = baseVal.shape[i] ?? 1;
+          if (ks[i] < 1 || ks[i] > dim) {
+            throw new RangeError(
+              `Index in position ${i + 1} (${ks[i]}) exceeds array bounds (${dim})`
+            );
+          }
+          offset += (ks[i] - 1) * stride;
+          stride *= dim;
+        }
+      }
+      baseVal.data[offset] = v;
+      if (!suppressed) this.autoDisp(baseName, baseVal);
+      return;
+    }
     throw new UnsupportedConstruct(
       `interpreter: lvalue '${lv.type}' is not yet implemented`
     );
@@ -363,6 +430,11 @@ export class Interpreter {
         // disambiguates by checking the env first; mirror that here.
         const envVal = this.env.get(e.name);
         if (envVal !== undefined && isTensor(envVal)) {
+          // Single-slot `v(:)` — column-major linearize to N×1.
+          if (e.args.length === 1 && e.args[0].type === "Colon") {
+            const n = envVal.data.length;
+            return makeTensor([n, 1], new Float64Array(envVal.data));
+          }
           // `end` inside the index list resolves to the size of the
           // axis being indexed (or `numel` for linear single-slot).
           const idxVals = e.args.map((a, i) => {
@@ -420,55 +492,120 @@ export class Interpreter {
 
       case "Tensor": {
         // `[a b c]` (single row) → 1×N tensor; `[a b; c d]` → R×C.
-        // MVP: every cell must evaluate to a scalar number (not a
-        // tensor — the bracket-concat case with tensor cells goes
-        // through TensorConcat on the C side and isn't wired here
-        // yet). 1×1 brackets `[x]` collapse to the inner scalar
-        // (matches MATLAB / mtoc2's lowerer).
-        const rows = e.rows;
-        if (rows.length === 0 || (rows.length === 1 && rows[0].length === 0)) {
+        // Cells may be scalar numbers, scalar tensors, multi-element
+        // tensors of compatible shape, or empty `[]` (filtered per
+        // numbl's `catAlongDim` rule). 1×1 brackets `[x]` collapse to
+        // the inner value (matches MATLAB).
+        const srcRows = e.rows;
+        if (
+          srcRows.length === 0 ||
+          (srcRows.length === 1 && srcRows[0].length === 0)
+        ) {
           return makeTensor([0, 0], new Float64Array(0));
         }
-        const nRows = rows.length;
-        const nCols = rows[0].length;
-        if (nRows === 1 && nCols === 1) {
-          return this.evalExpr(rows[0][0]);
+        if (srcRows.length === 1 && srcRows[0].length === 1) {
+          return this.evalExpr(srcRows[0][0]);
         }
-        for (const row of rows) {
-          if (row.length !== nCols) {
-            throw new UnsupportedConstruct(
-              `interpreter: tensor literal rows have inconsistent lengths`,
-              e.span
-            );
-          }
+
+        interface EvalCell {
+          v: RuntimeValue;
+          rows: number;
+          cols: number;
+          isScalar: boolean;
         }
-        const data = new Float64Array(nRows * nCols);
-        for (let c = 0; c < nCols; c++) {
-          for (let r = 0; r < nRows; r++) {
-            const v = this.evalExpr(rows[r][c]);
-            if (typeof v !== "number") {
+        const keptRows: EvalCell[][] = [];
+        for (const row of srcRows) {
+          const erow: EvalCell[] = [];
+          for (const cellExpr of row) {
+            const v = this.evalExpr(cellExpr);
+            if (typeof v === "number") {
+              erow.push({ v, rows: 1, cols: 1, isScalar: true });
+            } else if (isTensor(v)) {
+              if (v.data.length === 0) continue;
+              const r = v.shape[0] ?? 1;
+              const c = v.shape[1] ?? 1;
+              erow.push({ v, rows: r, cols: c, isScalar: false });
+            } else {
               throw new UnsupportedConstruct(
-                `interpreter: tensor literal cells must currently be scalar numbers (got ${typeof v}); ` +
-                  `tensor-cell concat is not yet wired`,
+                `interpreter: tensor literal cells must be scalar numbers ` +
+                  `or real tensors (got ${typeof v})`,
                 e.span
               );
             }
-            data[r + c * nRows] = v;
+          }
+          if (erow.length > 0) keptRows.push(erow);
+        }
+        if (keptRows.length === 0) {
+          return makeTensor([0, 0], new Float64Array(0));
+        }
+
+        const rowHeights: number[] = [];
+        for (const row of keptRows) {
+          const h = row[0].rows;
+          for (const c of row) {
+            if (c.rows !== h) {
+              throw new Error(
+                `Dimensions of arrays being concatenated are not consistent.`
+              );
+            }
+          }
+          rowHeights.push(h);
+        }
+        const totalCols = keptRows[0].reduce((s, c) => s + c.cols, 0);
+        for (const row of keptRows) {
+          const w = row.reduce((s, c) => s + c.cols, 0);
+          if (w !== totalCols) {
+            throw new Error(
+              `Dimensions of arrays being concatenated are not consistent.`
+            );
           }
         }
-        return makeTensor([nRows, nCols], data);
+        const totalRows = rowHeights.reduce((s, h) => s + h, 0);
+
+        const data = new Float64Array(totalRows * totalCols);
+        let rowOff = 0;
+        for (let i = 0; i < keptRows.length; i++) {
+          const row = keptRows[i];
+          const cellRows = rowHeights[i];
+          let colOff = 0;
+          for (const cell of row) {
+            if (cell.isScalar) {
+              data[rowOff + colOff * totalRows] = cell.v as number;
+              colOff += 1;
+            } else {
+              const t = cell.v as Extract<RuntimeValue, { mtoc2Tag: "tensor" }>;
+              for (let sc = 0; sc < cell.cols; sc++) {
+                for (let sr = 0; sr < cell.rows; sr++) {
+                  data[rowOff + sr + (colOff + sc) * totalRows] =
+                    t.data[sr + sc * cell.rows];
+                }
+              }
+              colOff += cell.cols;
+            }
+          }
+          rowOff += cellRows;
+        }
+        return makeTensor([totalRows, totalCols], data);
       }
 
       case "Index": {
-        // Scalar tensor read MVP: `v(i)` or `M(i, j)`. Range / colon /
-        // logical-mask / vector-of-indices land separately when the
-        // corresponding IR shapes get wired.
+        // Scalar tensor read MVP: `v(i)` or `M(i, j)`. Plus single-slot
+        // `v(:)` (column-major linearize to N×1). Range / multi-slot
+        // colon / logical-mask / vector-of-indices land separately as
+        // they're needed.
         const baseVal = this.evalExpr(e.base);
         if (!isTensor(baseVal)) {
           throw new UnsupportedConstruct(
             `interpreter: indexing into a non-tensor value is not yet wired`,
             e.span
           );
+        }
+        if (e.indices.length === 1 && e.indices[0].type === "Colon") {
+          // `v(:)` — column-major linearize to a column vector. For an
+          // already-column-shaped base this is a copy; for any other
+          // shape it reinterprets the flat buffer as N×1.
+          const n = baseVal.data.length;
+          return makeTensor([n, 1], new Float64Array(baseVal.data));
         }
         const idxVals = e.indices.map(ix => this.evalExpr(ix));
         for (const v of idxVals) {
@@ -642,12 +779,6 @@ export class Interpreter {
         span
       );
     }
-    if (nargout > fn.outputs.length) {
-      throw new UnsupportedConstruct(
-        `'${fn.name}': too many outputs (${nargout} > ${fn.outputs.length})`,
-        span
-      );
-    }
     const child = new Environment();
     for (let i = 0; i < args.length; i++) {
       child.set(fn.params[i], args[i]);
@@ -663,8 +794,15 @@ export class Interpreter {
     } finally {
       this.active.delete(fn.name);
     }
+    // Return the requested nargout, clamped to what the function
+    // actually declares. A 0-output function called as an expression
+    // (`f()` at the top level of an ExprStmt) gets nargout=1 from the
+    // expression evaluator; we honor that by returning [] and letting
+    // the caller see undefined for the missing slot — ExprStmt drops
+    // undefined, so the bare-statement form works naturally.
+    const effective = Math.min(nargout, fn.outputs.length);
     const out: RuntimeValue[] = [];
-    for (let i = 0; i < Math.max(nargout, 1); i++) {
+    for (let i = 0; i < effective; i++) {
       const name = fn.outputs[i];
       const v = child.get(name);
       if (v === undefined) {
