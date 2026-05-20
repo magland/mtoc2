@@ -687,6 +687,12 @@ export interface RuntimeState {
    *  (the snippet-build script, vitest unit tests that bypass the
    *  workspace). */
   workspace?: WorkspaceLike;
+  /** JS-side helper: cName list of the currently-emitting user
+   *  function's outputs. Set by `emitFunction` before walking the
+   *  body and cleared after so `ReturnFromFunction` can emit a
+   *  return matching the function's shape (bare value / array /
+   *  nothing). Undefined at top level. */
+  currentFnOutputs?: ReadonlyArray<string>;
 }
 
 export function newRuntimeState(workspace?: WorkspaceLike): RuntimeState {

@@ -154,7 +154,13 @@ function emitFunction(fn: IRFunc, state: RuntimeState): string {
     lines.push(`  let ${locals.join(", ")};`);
   }
 
+  // Stash the current function's output cNames on the state so any
+  // in-body `ReturnFromFunction` can emit `return <fn outputs>` with
+  // the matching shape (bare value / array / nothing). Cleared after.
+  const prevOutputs = state.currentFnOutputs;
+  state.currentFnOutputs = fn.cOutputs;
   const bodyLines = emitBody(fn.body, "  ", state);
+  state.currentFnOutputs = prevOutputs;
   if (bodyLines.length > 0) lines.push(bodyLines);
 
   // Implicit return at function end based on declared outputs.
@@ -167,6 +173,17 @@ function emitFunction(fn: IRFunc, state: RuntimeState): string {
   }
   lines.push("}");
   return lines.join("\n");
+}
+
+function emitReturnFromFunction(state: RuntimeState, indent: string): string {
+  const outs = state.currentFnOutputs;
+  if (outs === undefined || outs.length === 0) {
+    return `${indent}return;`;
+  }
+  if (outs.length === 1) {
+    return `${indent}return ${outs[0]};`;
+  }
+  return `${indent}return [${outs.join(", ")}];`;
 }
 
 // ── Statement emission ───────────────────────────────────────────────────
@@ -251,19 +268,11 @@ function emitStmt(s: IRStmt, indent: string, state: RuntimeState): string {
     }
 
     case "ReturnFromFunction":
-      // Function body's implicit-return-at-end is emitted in
-      // `emitFunction`; explicit return mid-body bails immediately
-      // with whatever the declared outputs hold at this point.
-      // (`fn.cOutputs` isn't visible here — emitFunction wraps with the
-      // proper return form; an in-body return just `return;` and the
-      // caller's destructure handles a bare `undefined` for 0-output.)
-      // For multi-output bodies that hit a mid-body return we'd need
-      // to plumb the outputs; defer until we hit a test that needs it.
-      throw new UnsupportedConstruct(
-        `emitJs: explicit 'return' inside a function body isn't wired ` +
-          `yet (Phase 2 only handles fall-through return at function end)`,
-        s.span
-      );
+      // Mid-body return: bail with whatever the declared outputs hold
+      // right now. `emitFunction` stashes the active fn's cOutputs on
+      // `state.currentFnOutputs` so the return form here matches the
+      // function-end return (bare value / array / nothing).
+      return emitReturnFromFunction(state, indent);
 
     case "Break":
       return `${indent}break;`;
