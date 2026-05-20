@@ -61,5 +61,41 @@ export const real: Builtin = {
     }
     return `(${argsC[0]})`;
   },
+  emitJs({ argsJs, argTypes, useRuntime }) {
+    const a = argTypes[0] as NumericType;
+    if (isMultiElement(a)) {
+      if (a.isComplex) {
+        throw new UnsupportedConstruct(
+          `'real' complex-tensor emitJs not yet wired (Phase 5)`
+        );
+      }
+      // Real tensor — identity, but the consumer expects a freshly-
+      // owned value; JS GC handles it, so a structural copy via
+      // makeTensor keeps the lifecycle invariant clean.
+      useRuntime("mtoc2_tensor_copy");
+      return `mtoc2_tensor_copy(${argsJs[0]})`;
+    }
+    if (a.isComplex) {
+      useRuntime("mtoc2_cscalar");
+      return `mtoc2_creal(${argsJs[0]})`;
+    }
+    return `(${argsJs[0]})`;
+  },
+  call({ args, argTypes }) {
+    const a = argTypes[0] as NumericType;
+    if (isMultiElement(a)) {
+      if (a.isComplex) {
+        throw new UnsupportedConstruct(
+          `'real' complex-tensor 'call' not yet wired (Phase 5)`
+        );
+      }
+      return [args[0]];
+    }
+    if (a.isComplex) {
+      const z = args[0] as { re: number; im: number };
+      return [z.re];
+    }
+    return [args[0]];
+  },
   elementwise: true,
 };

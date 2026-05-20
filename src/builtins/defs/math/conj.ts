@@ -91,5 +91,38 @@ export const conj: Builtin = {
     }
     return `(${argsC[0]})`;
   },
+  emitJs({ argsJs, argTypes, useRuntime }) {
+    const a = argTypes[0] as NumericType;
+    if (isMultiElement(a)) {
+      if (a.isComplex) {
+        throw new UnsupportedConstruct(
+          `'conj' complex-tensor emitJs not yet wired (Phase 5)`
+        );
+      }
+      useRuntime("mtoc2_tensor_copy");
+      return `mtoc2_tensor_copy(${argsJs[0]})`;
+    }
+    if (a.isComplex) {
+      useRuntime("mtoc2_cscalar");
+      return `mtoc2_cconj(${argsJs[0]})`;
+    }
+    return `(${argsJs[0]})`;
+  },
+  call({ args, argTypes }) {
+    const a = argTypes[0] as NumericType;
+    if (isMultiElement(a)) {
+      if (a.isComplex) {
+        throw new UnsupportedConstruct(
+          `'conj' complex-tensor 'call' not yet wired (Phase 5)`
+        );
+      }
+      return [args[0]];
+    }
+    if (a.isComplex) {
+      const z = args[0] as { re: number; im: number };
+      return [{ re: z.re, im: -z.im }];
+    }
+    return [args[0]];
+  },
   elementwise: true,
 };

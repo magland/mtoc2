@@ -59,5 +59,46 @@ export const imag: Builtin = {
     }
     return `0.0`;
   },
+  emitJs({ argsJs, argTypes, useRuntime }) {
+    const a = argTypes[0] as NumericType;
+    if (isMultiElement(a)) {
+      if (a.isComplex) {
+        throw new UnsupportedConstruct(
+          `'imag' complex-tensor emitJs not yet wired (Phase 5)`
+        );
+      }
+      useRuntime("mtoc2_tensor_elemwise_real");
+      return `mtoc2_tensor_times_ts(${argsJs[0]}, 0)`;
+    }
+    if (a.isComplex) {
+      useRuntime("mtoc2_cscalar");
+      return `mtoc2_cimag(${argsJs[0]})`;
+    }
+    return `0`;
+  },
+  call({ args, argTypes }) {
+    const a = argTypes[0] as NumericType;
+    if (isMultiElement(a)) {
+      if (a.isComplex) {
+        throw new UnsupportedConstruct(
+          `'imag' complex-tensor 'call' not yet wired (Phase 5)`
+        );
+      }
+      // Real tensor → zero-filled tensor of the same shape.
+      const t = args[0] as import("../../../runtime/value.js").RuntimeTensor;
+      return [
+        {
+          mtoc2Tag: "tensor" as const,
+          shape: t.shape.slice(),
+          data: new Float64Array(t.data.length),
+        },
+      ];
+    }
+    if (a.isComplex) {
+      const z = args[0] as { re: number; im: number };
+      return [z.im];
+    }
+    return [0];
+  },
   elementwise: true,
 };

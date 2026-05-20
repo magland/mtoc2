@@ -19,7 +19,8 @@ export type RuntimeValue =
   | boolean
   | string
   | RuntimeTensor
-  | RuntimeChar;
+  | RuntimeChar
+  | RuntimeComplex;
 
 /** Real-double tensor. `data` is column-major to match numbl's
  *  `RuntimeTensor.data`. The shape array is owned by the value; do
@@ -36,6 +37,31 @@ export interface RuntimeTensor {
 export interface RuntimeChar {
   readonly mtoc2Tag: "char";
   readonly value: string;
+}
+
+/** Scalar complex value — JS-side analogue of the `mtoc2_complex_t`
+ *  struct in `cscalar.h`. The cscalar runtime helpers
+ *  (`mtoc2_cmake`, `mtoc2_creal`, etc.) consume and produce this
+ *  shape. We DON'T tag it the way tensor / char are tagged because
+ *  emitJs literals (`{re: 0, im: 1}`) and runtime calls produce the
+ *  bare object form — adding a tag would force every helper to
+ *  re-wrap. Use `isComplexValue` for narrowing. */
+export interface RuntimeComplex {
+  readonly re: number;
+  readonly im: number;
+}
+
+/** Narrow a RuntimeValue to a complex scalar. Matches the cscalar
+ *  helpers' `{re, im}` shape. */
+export function isComplexValue(v: RuntimeValue): v is RuntimeComplex {
+  return (
+    typeof v === "object" &&
+    v !== null &&
+    !isTensor(v) &&
+    !isChar(v) &&
+    typeof (v as RuntimeComplex).re === "number" &&
+    typeof (v as RuntimeComplex).im === "number"
+  );
 }
 
 export function makeTensor(shape: number[], data: Float64Array): RuntimeTensor {

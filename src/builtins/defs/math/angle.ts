@@ -55,4 +55,21 @@ export const angle: Builtin = {
     }
     return `atan2(0.0, ${argsC[0]})`;
   },
+  emitJs({ argsJs, argTypes, useRuntime }) {
+    const a = argTypes[0] as NumericType;
+    if (a.isComplex) {
+      useRuntime("mtoc2_cscalar");
+      return `mtoc2_cangle(${argsJs[0]})`;
+    }
+    return `Math.atan2(0, ${argsJs[0]})`;
+  },
+  call({ args, argTypes }) {
+    const a = argTypes[0] as NumericType;
+    if (a.isComplex) {
+      const z = args[0] as { re: number; im: number };
+      return [Math.atan2(z.im, z.re)];
+    }
+    const v = typeof args[0] === "number" ? args[0] : Number(args[0]);
+    return [Math.atan2(0, v)];
+  },
 };
