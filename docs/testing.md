@@ -24,9 +24,10 @@ location mtoc2 imports its parser from.
 `scripts/run_test_scripts_all_modes.ts` runs each script through
 numbl plus all three mtoc2 backends (`--exec interpreter`,
 `--exec js-aot`, `--exec c-aot`) and checks they all match numbl
-byte-for-byte. Same masking rules as the c-aot-only runner;
-backends that don't support a feature yet surface as per-script
-failures.
+byte-for-byte. Same masking rules as the c-aot-only runner; a
+backend that doesn't support a feature yet can be excluded per
+script via `% mtoc2-test-xfail-<backend>: <reason>` so the rest of
+the corpus still gates that backend.
 
 ```
 npx tsx scripts/run_test_scripts_all_modes.ts                # all
@@ -34,9 +35,30 @@ npx tsx scripts/run_test_scripts_all_modes.ts foo.m          # specific
 ```
 
 The c-aot-vs-numbl runner is the commit-time gate. The all-modes
-runner is the broader signal — used when working on the interpreter
-or js-aot backend, and when verifying that a change keeps coverage
-parity across modes.
+runner is the broader signal — run it when working on the
+interpreter or js-aot backend, and when verifying that a change
+keeps coverage parity across modes.
+
+#### Per-backend expected-failure: `% mtoc2-test-xfail-<backend>:`
+
+Some scripts exercise features the interpreter or js-aot backend
+hasn't reached yet (e.g. `LogicalMask` index reads, certain reducer
+helpers). Marking the backend xfail for that script lets the
+runner skip the compare against numbl for that one backend while
+still gating every other backend on every other script. The
+directive accepts three backend names — `interpreter`, `js-aot`,
+`c-aot`:
+
+```matlab
+% mtoc2-test-xfail-interpreter: LogicalMask multi-slot not yet wired
+% mtoc2-test-xfail-js-aot: emitJs LogicalMask path missing
+```
+
+Each directive requires a non-empty reason — it documents the gap
+in the script itself, so closing the gap (and removing the
+directive) is a single-grep operation. If an xfail'd backend
+unexpectedly matches numbl, the runner emits a
+`STALE-XFAIL <mode>: ...` note so the directive can be removed.
 
 ### Adding a script-level test
 
@@ -88,11 +110,12 @@ toc;   % prints "Elapsed time is X.XXXXXX seconds." (masked)
 disp(1);
 ```
 
-The cross-runner scans the first 20 lines of each script for
+The cross-runner scans the script's leading comment block for
 `^\s*%\s*mtoc2-test-mask:\s*(.*)$`, compiles each pattern with
 the `gm` flags, and applies them to both numbl's and mtoc2's
 stdouts (replacing matches with `[MASKED]`) before the byte-for-
-byte compare. Anything _not_ matched by a declared regex must
+byte compare. Directive parsing stops at the first non-comment
+line, so the leading comment block can be any length. Anything _not_ matched by a declared regex must
 still match exactly. The PASS line reports how many matches fired
 on each side; mismatched counts often surface a missed printing
 path. Use this sparingly — every mask is one less line under

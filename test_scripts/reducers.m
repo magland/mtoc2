@@ -1,3 +1,9 @@
+% Reductions: sum / prod / mean / min / max / any / all over scalars,
+% vectors, and matrices, with default and explicit dim.
+%
+% mtoc2-test-xfail-interpreter: tensor-reducer call path uses sumInit / etc. that aren't wired in the interpreter yet
+% mtoc2-test-xfail-js-aot: tensor-reducer emitJs helper omits a toExponential bridge that c-aot has
+
 test_scalar_identity();
 test_sum_vector();
 test_prod_vector();

@@ -179,8 +179,13 @@ function parseMasks(scriptPath: string): {
   }
   const masks: RegExp[] = [];
   const drops: RegExp[] = [];
-  const lines = src.split("\n").slice(0, 20);
-  for (const line of lines) {
+  // Scan only the leading comment block — first code/keyword line ends
+  // directive parsing. Avoids the silent-drop failure mode where a
+  // long preamble pushes directives below an arbitrary line cap.
+  for (const rawLine of src.split("\n")) {
+    const line = rawLine.trimEnd();
+    if (line === "") continue;
+    if (!/^\s*%/.test(line)) break;
     const maskMatch = line.match(/^\s*%\s*mtoc2-test-mask:\s*(.*)$/);
     if (maskMatch) {
       const pattern = maskMatch[1].trim();

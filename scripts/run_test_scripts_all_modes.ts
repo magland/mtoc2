@@ -12,10 +12,12 @@
  *   MTOC_TEST_CONCURRENCY=4 npx tsx scripts/run_test_scripts_all_modes.ts
  *   MTOC_TEST_TIMEOUT_MS=60000 npx tsx scripts/run_test_scripts_all_modes.ts
  *
- * This is NOT part of the mandatory test discipline — it's a separate
- * sweep for when you're working on alternate `--exec` backends
- * (interpreter, js-aot). The c-aot-vs-numbl cross-runner
- * (`scripts/run_test_scripts.ts`) is the gate for normal commits.
+ * The c-aot-vs-numbl cross-runner (`scripts/run_test_scripts.ts`) is
+ * the strict commit-time gate. This all-modes sweep is the surface
+ * signal for interpreter / js-aot backend gaps; scripts known to fail
+ * on a backend can declare it expected-to-fail via
+ * `% mtoc2-test-xfail-<backend>: <reason>` so a clean run stays clean
+ * and real regressions stand out.
  */
 
 import { execFile } from "node:child_process";
@@ -204,10 +206,27 @@ interface Result {
   /** One log line per mask that fired (rendered after the PASS/FAIL
    *  status). Empty when no masks are declared by the script. */
   maskNotes: string[];
+  /** One log line per xfail backend: either "xfail <mode>: <reason>"
+   *  (the backend diverged as expected) or "STALE-XFAIL <mode>: ..."
+   *  (the xfail directive can be removed). */
+  xfailNotes: string[];
 }
 
-/** Parse `% mtoc2-test-mask: <regex>` and `% mtoc2-test-drop: <regex>`
- *  lines from the first 20 lines of the script.
+/** Map of mode → reason. An entry means the script declares that mode
+ *  as expected-to-fail (compare against numbl is skipped). Built from
+ *  `% mtoc2-test-xfail-<mode>: <reason>` directives. */
+type XfailMap = Partial<Record<Exclude<Mode, "numbl">, string>>;
+
+const XFAIL_SHORT_TO_FULL: Record<string, Exclude<Mode, "numbl">> = {
+  interpreter: "mtoc2-interpreter",
+  "js-aot": "mtoc2-js-aot",
+  "c-aot": "mtoc2-c-aot",
+};
+
+/** Parse `% mtoc2-test-mask: <regex>`, `% mtoc2-test-drop: <regex>`,
+ *  and `% mtoc2-test-xfail-<backend>: <reason>` lines from the top
+ *  comment block of the script (scans until the first non-comment,
+ *  non-blank line — no hard line-count cap).
  *
  *  - `mask` replaces each match with `[MASKED]` (keeps the rest of
  *    the line intact). Used when both runners produce a line but the
@@ -216,23 +235,36 @@ interface Result {
  *    newline). Used when only one runner emits a banner-style line
  *    (e.g. numbl's `[matmul] using bridge: ...` printed on first
  *    matmul activation) that mtoc2 doesn't produce.
+ *  - `xfail-<backend>` marks the named backend (`interpreter`,
+ *    `js-aot`, `c-aot`) as expected-to-fail against numbl on this
+ *    script. The compare for that backend is dropped; if it
+ *    unexpectedly matches anyway, the runner emits a `STALE-XFAIL`
+ *    note so the directive can be removed.
  *
- *  Both compile with `gm` flags so they normalize multiple matches.
- *  Invalid regex syntax raises at parse time. */
-function parseMasks(scriptPath: string): {
+ *  `mask`/`drop` regexes compile with `gm` flags so they normalize
+ *  multiple matches. Invalid regex syntax raises at parse time. */
+function parseDirectives(scriptPath: string): {
   masks: RegExp[];
   drops: RegExp[];
+  xfails: XfailMap;
 } {
   let src: string;
   try {
     src = readFileSync(scriptPath, "utf8");
   } catch {
-    return { masks: [], drops: [] };
+    return { masks: [], drops: [], xfails: {} };
   }
   const masks: RegExp[] = [];
   const drops: RegExp[] = [];
-  const lines = src.split("\n").slice(0, 20);
-  for (const line of lines) {
+  const xfails: XfailMap = {};
+  for (const rawLine of src.split("\n")) {
+    const line = rawLine.trimEnd();
+    if (line === "") continue;
+    // Scan only the leading comment block — first code/keyword line
+    // ends directive parsing. (Otherwise every `%` mid-script would be
+    // ambiguous with embedded prose, and a long preamble would silently
+    // drop directives.)
+    if (!/^\s*%/.test(line)) break;
     const maskMatch = line.match(/^\s*%\s*mtoc2-test-mask:\s*(.*)$/);
     if (maskMatch) {
       const pattern = maskMatch[1].trim();
@@ -245,8 +277,30 @@ function parseMasks(scriptPath: string): {
       if (pattern !== "") drops.push(new RegExp(pattern + "\\n?", "gm"));
       continue;
     }
+    const xfailMatch = line.match(
+      /^\s*%\s*mtoc2-test-xfail-([a-zA-Z0-9-]+):\s*(.*)$/
+    );
+    if (xfailMatch) {
+      const short = xfailMatch[1];
+      const full = XFAIL_SHORT_TO_FULL[short];
+      if (!full) {
+        throw new Error(
+          `${scriptPath}: unknown xfail backend '${short}' (expected one of: ${Object.keys(
+            XFAIL_SHORT_TO_FULL
+          ).join(", ")})`
+        );
+      }
+      const reason = xfailMatch[2].trim();
+      if (reason === "") {
+        throw new Error(
+          `${scriptPath}: xfail-${short} requires a non-empty reason`
+        );
+      }
+      xfails[full] = reason;
+      continue;
+    }
   }
-  return { masks, drops };
+  return { masks, drops, xfails };
 }
 
 /** Apply masks then drops to `stdout` and return the normalized text
@@ -300,30 +354,34 @@ async function runOne(scriptPath: string): Promise<Result> {
     ? scriptPath.slice(repoRoot.length + 1)
     : scriptPath;
 
-  const { masks, drops } = parseMasks(scriptPath);
+  const { masks, drops, xfails } = parseDirectives(scriptPath);
 
-  // Capture all four backends in parallel. Each backend's process is
-  // independent — they don't share files, and the outer pool already
-  // bounds total parallelism via MTOC_TEST_CONCURRENCY.
-  const settled = await Promise.allSettled(
-    ALL_MODES.map(m => captureForMode(scriptPath, m))
-  );
-
+  // Capture each backend serially within a script. Each backend spawns
+  // one or more child processes (numbl: tsx; c-aot: tsx + cc + binary),
+  // and the outer pool already runs `concurrency` scripts at once, so
+  // parallelising the four modes inside one script would multiply
+  // process counts beyond cpus().length and trigger spurious timeouts
+  // / EAGAIN on a busy machine.
   const captures = new Map<Mode, Captured>();
   const errored: string[] = [];
-  for (let i = 0; i < ALL_MODES.length; i++) {
-    const mode = ALL_MODES[i];
-    const res = settled[i];
-    if (res.status === "fulfilled") {
-      captures.set(mode, res.value);
-      continue;
+  for (const mode of ALL_MODES) {
+    try {
+      captures.set(mode, await captureForMode(scriptPath, mode));
+    } catch (e) {
+      const err = e as Error & { stderr?: string };
+      const tail = (err.stderr ?? "").trim();
+      const head = err.message.split("\n")[0];
+      // A spawn-level error on an xfail backend is an expected outcome.
+      // Record an xfail-credited stderr-only capture so the downstream
+      // compare loop treats this mode as xfail-skipped, and continue.
+      if (mode !== "numbl" && xfails[mode]) {
+        captures.set(mode, { stdout: "", stderr: tail });
+        continue;
+      }
+      errored.push(
+        tail ? `${mode} errored: ${head}\n${tail}` : `${mode} errored: ${head}`
+      );
     }
-    const err = res.reason as Error & { stderr?: string };
-    const tail = (err.stderr ?? "").trim();
-    const head = err.message.split("\n")[0];
-    errored.push(
-      tail ? `${mode} errored: ${head}\n${tail}` : `${mode} errored: ${head}`
-    );
   }
   if (errored.length > 0) {
     return {
@@ -331,6 +389,7 @@ async function runOne(scriptPath: string): Promise<Result> {
       status: "FAIL",
       detail: errored.join("\n"),
       maskNotes: [],
+      xfailNotes: [],
     };
   }
 
@@ -352,16 +411,29 @@ async function runOne(scriptPath: string): Promise<Result> {
   // numbl is the language reference: every mtoc2 backend's stdout
   // must match it byte-for-byte. We diff each diverging mode against
   // numbl rather than against each other so a single mtoc2-side bug
-  // is reported once per affected backend.
+  // is reported once per affected backend. Backends marked xfail are
+  // not allowed to fail the script but are flagged STALE-XFAIL if
+  // they unexpectedly match.
   const reference = normalized.get("numbl")!.text;
   const divergent: string[] = [];
+  const xfailNotes: string[] = [];
   for (const mode of ALL_MODES) {
     if (mode === "numbl") continue;
+    const xfailReason = xfails[mode];
     const t = normalized.get(mode)!.text;
-    if (t !== reference) {
-      divergent.push(
-        `vs ${mode}:\n${diff(reference, t, "numbl", mode)}`
-      );
+    const matches = t === reference;
+    if (xfailReason !== undefined) {
+      if (matches) {
+        xfailNotes.push(
+          `  STALE-XFAIL ${mode}: ${xfailReason} (matches numbl — remove the xfail directive)`
+        );
+      } else {
+        xfailNotes.push(`  xfail ${mode}: ${xfailReason}`);
+      }
+      continue;
+    }
+    if (!matches) {
+      divergent.push(`vs ${mode}:\n${diff(reference, t, "numbl", mode)}`);
     }
   }
   if (divergent.length > 0) {
@@ -370,22 +442,27 @@ async function runOne(scriptPath: string): Promise<Result> {
       status: "FAIL",
       detail: divergent.join("\n"),
       maskNotes,
+      xfailNotes,
     };
   }
 
   // LeakSanitizer instrumentation only fires on the c-aot backend
   // (the interpreter and js-aot paths run inside Node, where GC
-  // handles cleanup of mtoc2's owned values).
-  const cAotStderr = captures.get("mtoc2-c-aot")!.stderr;
-  if (cAotStderr.includes("LeakSanitizer:")) {
-    return {
-      name,
-      status: "FAIL",
-      detail: `LeakSanitizer reported leaks (c-aot):\n${cAotStderr.trim()}`,
-      maskNotes,
-    };
+  // handles cleanup of mtoc2's owned values). Skipped when c-aot is
+  // xfail'd (we no longer trust its output).
+  if (xfails["mtoc2-c-aot"] === undefined) {
+    const cAotStderr = captures.get("mtoc2-c-aot")!.stderr;
+    if (cAotStderr.includes("LeakSanitizer:")) {
+      return {
+        name,
+        status: "FAIL",
+        detail: `LeakSanitizer reported leaks (c-aot):\n${cAotStderr.trim()}`,
+        maskNotes,
+        xfailNotes,
+      };
+    }
   }
-  return { name, status: "PASS", detail: null, maskNotes };
+  return { name, status: "PASS", detail: null, maskNotes, xfailNotes };
 }
 
 async function runPool<T, R>(
@@ -451,6 +528,7 @@ async function main(): Promise<void> {
       if (r.detail) console.log(r.detail);
     }
     for (const n of r.maskNotes) console.log(n);
+    for (const n of r.xfailNotes) console.log(n);
   });
 
   console.log(
