@@ -716,10 +716,31 @@ export class Interpreter {
 
       case "MethodCall": {
         // `obj.method(args)` — three resolution kinds:
-        //   1. Package function: dotted name (e.g. `pkg.fn(args)`).
-        //   2. Instance method on a class receiver.
-        //   3. Member-rooted index: `obj.field(args)` where
+        //   1. Static method: `ClassName.method(args)` where the base
+        //      is a bare Ident matching a registered class.
+        //   2. Package function: dotted name (e.g. `pkg.fn(args)`).
+        //   3. Instance method on a class receiver.
+        //   4. Member-rooted index: `obj.field(args)` where
         //      `obj.field` is a tensor and the `(args)` are indices.
+        if (
+          e.base.type === "Ident" &&
+          this.workspace !== undefined &&
+          this.env.get(e.base.name) === undefined
+        ) {
+          const reg = this.workspace.classes.get(e.base.name);
+          if (reg !== undefined) {
+            const fn = reg.staticMethods.get(e.name);
+            if (fn === undefined) {
+              throw new UnsupportedConstruct(
+                `interpreter: class '${e.base.name}' has no static method ` +
+                  `'${e.name}'`,
+                e.span
+              );
+            }
+            const argVals = e.args.map(a => this.evalExpr(a));
+            return this.callUserFunction(fn, argVals, 1, e.span)[0];
+          }
+        }
         // Try to extract a dotted name like `pkg.fn` / `pkg.sub.fn`.
         const dotted = this.tryExtractDottedName(e.base);
         if (dotted !== null && this.env.get(dotted.split(".")[0]) === undefined) {
@@ -855,7 +876,13 @@ export class Interpreter {
             return this.invokeBuiltin(fb, args, argTypes, nargout, name);
           }
           case "userFunction":
-            return this.callUserFunction(target.ast, args, nargout, span);
+            return this.callUserFunction(
+              target.ast,
+              args,
+              nargout,
+              span,
+              target.file
+            );
           case "mtoc2UserFunction": {
             const ub = this.workspace.getUserBuiltin(target.name);
             if (!ub) {
@@ -1229,7 +1256,8 @@ export class Interpreter {
     fn: Extract<Stmt, { type: "Function" }>,
     args: RuntimeValue[],
     nargout: number,
-    span: Span
+    span: Span,
+    sourceFile?: string
   ): RuntimeValue[] {
     if (this.active.has(fn.name)) {
       throw new UnsupportedConstruct(
@@ -1256,7 +1284,7 @@ export class Interpreter {
     const inner = new Interpreter(this.ctx, {
       env: child,
       ...(this.workspace !== undefined ? { workspace: this.workspace } : {}),
-      currentFile: this.currentFile,
+      currentFile: sourceFile ?? this.currentFile,
     });
     this.active.add(fn.name);
     try {

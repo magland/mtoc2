@@ -43,6 +43,20 @@ export function inferTypeFromValue(v: RuntimeValue): Type {
     return scalarComplex({ re: v.re, im: v.im });
   }
   if (typeof v === "object" && v !== null) {
+    // Class instance: tagged with `mtoc2Class` by `constructClassInstance`
+    // so workspace dispatch can detect the receiver type for
+    // `method(obj, args)` resolution.
+    const className = (v as { mtoc2Class?: string }).mtoc2Class;
+    if (className !== undefined) {
+      const properties: { name: string; ty: Type }[] = [];
+      for (const k of Object.keys(v as Record<string, RuntimeValue>)) {
+        properties.push({
+          name: k,
+          ty: inferTypeFromValue((v as Record<string, RuntimeValue>)[k]),
+        });
+      }
+      return { kind: "Class", className, properties };
+    }
     // Struct: infer per-field types recursively. The interpreter
     // dispatches builtins by argType, so a struct value needs a
     // matching `Struct`-kind type for `disp(s)` / member loads to
