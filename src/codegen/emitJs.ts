@@ -364,8 +364,17 @@ function emitExpr(e: IRExpr, state: RuntimeState): string {
       // (Phase 5 will populate `cscalar.js`.)
       return `{re: 0, im: ${formatJsNumber(e.value)}}`;
 
-    case "StringLit":
-      return JSON.stringify(e.value);
+    case "StringLit": {
+      // Match the interpreter's RuntimeValue conventions so JS-side
+      // builtin call hooks (disp, error, fprintf, …) see the same shape
+      // regardless of which backend executes them: `String` → bare JS
+      // string; `Char` → `{mtoc2Tag:"char", value:"..."}` wrapper.
+      const lit = JSON.stringify(e.value);
+      if (e.ty.kind === "Char") {
+        return `({mtoc2Tag: "char", value: ${lit}})`;
+      }
+      return lit;
+    }
 
     case "Var":
       return e.cName;
