@@ -672,12 +672,18 @@ export function numericExactsEqual(
   return false;
 }
 
-/** Strip `exact` from every entry in `env` whose name is in `names`.
- *  Used by loop bodies — see lower.ts for rationale. For struct /
- *  class env entries we recurse via `withoutExact` so any precise
- *  field/property exact values introduced by a `struct(...)` literal
- *  or a constructor preSeed don't leak from iteration 1 into the rest
- *  of the loop's body. */
+/** Widen every entry in `env` whose name is in `names` before lowering
+ *  a loop body. Used by `lowerFor` / `lowerWhile` — see lower.ts for
+ *  rationale. Strips `exact` (the one-pass lowerer can't carry exact
+ *  values across iterations) AND widens narrowing fields like `sign`
+ *  to `"unknown"`, since a `sign: "nonneg"` set before the loop is no
+ *  longer valid if the body reassigns the variable to a negative value.
+ *  Without the sign widen, `sqrt(x)` / `log(x)` domain checks would
+ *  spuriously pass at lowering time and produce NaN at runtime. For
+ *  struct / class env entries we recurse via `withoutExact` so any
+ *  precise field/property exact values introduced by a `struct(...)`
+ *  literal or a constructor preSeed don't leak from iteration 1 into
+ *  the rest of the loop's body. */
 export function stripExactFromEnv(
   env: Map<string, { cName: string; ty: Type }>,
   names: Iterable<string>
@@ -685,11 +691,15 @@ export function stripExactFromEnv(
   for (const n of names) {
     const e = env.get(n);
     if (e === undefined) continue;
-    if (e.ty.kind === "Numeric" && e.ty.exact !== undefined) {
-      env.set(n, {
-        cName: e.cName,
-        ty: { ...e.ty, exact: undefined },
-      });
+    if (e.ty.kind === "Numeric") {
+      const needsExactStrip = e.ty.exact !== undefined;
+      const needsSignWiden = e.ty.sign !== "unknown";
+      if (needsExactStrip || needsSignWiden) {
+        env.set(n, {
+          cName: e.cName,
+          ty: { ...e.ty, exact: undefined, sign: "unknown" },
+        });
+      }
     } else if (e.ty.kind === "String" && e.ty.exact !== undefined) {
       env.set(n, { cName: e.cName, ty: { kind: "String" } });
     } else if (e.ty.kind === "Char" && e.ty.exact !== undefined) {

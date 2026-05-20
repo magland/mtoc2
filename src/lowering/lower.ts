@@ -647,12 +647,15 @@ export class Lowerer {
     }
   }
 
-  /** Walk `e` and ensure the returned expression is either scalar or a
-   *  Var. Recursively ANFs children; if `e` itself is owned-producing
-   *  (multi-element non-Var), hoist it. */
+  /** Walk `e` and ensure the returned expression is either non-owned or
+   *  a Var. Recursively ANFs children; if `e` itself is owned-producing
+   *  (multi-element tensor / struct / class / handle / char / string,
+   *  in non-Var form), hoist it to a fresh temp. The ANF invariant is
+   *  that owned-producing expressions appear only as direct Assign RHSs
+   *  at owned consume sites; every other position holds a Var read. */
   anfRequireScalarOrVar(e: IRExpr, hoists: IRStmt[]): IRExpr {
     const rewritten = this.anfChildren(e, hoists);
-    if (isMultiElement(rewritten.ty) && rewritten.kind !== "Var") {
+    if (isOwned(rewritten.ty) && rewritten.kind !== "Var") {
       return this.hoistToTemp(rewritten, hoists);
     }
     return rewritten;

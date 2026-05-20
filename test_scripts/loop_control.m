@@ -15,6 +15,7 @@ test_call_in_cond_runs_when_then_taken();
 test_call_in_cond_runs_when_else_taken();
 test_call_in_elseif_chain();
 test_arithmetic_in_cond_doesnt_double_count();
+test_loop_widens_sign_for_body_assigned_var();
 
 % -------- for-bounds evaluated once at loop entry --------
 
@@ -160,4 +161,20 @@ function test_arithmetic_in_cond_doesnt_double_count()
   else
     disp(3000);
   end
+end
+
+% -------- loop widening must drop pre-loop sign on body-mutated vars --------
+
+function test_loop_widens_sign_for_body_assigned_var()
+  % Before the loop, x's sign is `nonneg` (zeros + positive
+  % assignment). The body reassigns x to a possibly-negative
+  % expression, so the lowerer must widen `sign` to `unknown` along
+  % with stripping `exact` — otherwise `sqrt(x)` inside the body would
+  % spuriously pass the domain check and emit a NaN at runtime.
+  x = 4;
+  for k = 1:3
+    x = x - 2 * k;
+    disp(x);
+  end
+  disp(x);
 end
