@@ -216,22 +216,36 @@ function emitStmt(s: IRStmt, indent: string, state: RuntimeState): string {
     }
 
     case "For": {
-      // MATLAB `for var = start:step:end` → JS loop. `step` is a
-      // literal number on the IR (matches emitC's emit shape); start
-      // and end are arbitrary expressions. Stash end in a fresh local
-      // so the cond doesn't re-evaluate any side effects.
+      // Mirror the C path's loop shape so JS output stays
+      // bit-identical to numbl: snapshot start/end once at loop
+      // entry, derive the iteration count via `mtoc2_loop_count`,
+      // and rebind the loop var via `mtoc2_range_value` per iter.
+      // This keeps the loop body insensitive to mid-body mutations
+      // of `start`/`end` (matching MATLAB) and leaves the loop var
+      // at its last actual iterated value after the loop ends.
+      // `s.cVar` is pre-declared at function top by
+      // `collectAssignedLocals` so reads after the loop see it.
+      useRuntimeByName(state, "mtoc2_loop_count");
+      useRuntimeByName(state, "mtoc2_range_value");
       const lines: string[] = [];
       const startE = emitExpr(s.start, state);
       const endE = emitExpr(s.end, state);
-      const stepNum = s.step;
-      const cmp = stepNum >= 0 ? "<=" : ">=";
-      const stepStr = formatJsNumber(stepNum);
+      const stepStr = formatJsNumber(s.step);
+      lines.push(`${indent}{`);
+      lines.push(`${indent}  const _mtoc2_for_start = ${startE};`);
+      lines.push(`${indent}  const _mtoc2_for_end = ${endE};`);
       lines.push(
-        `${indent}for (let ${s.cVar} = ${startE}, __end_${s.cVar} = ${endE}; ` +
-          `${s.cVar} ${cmp} __end_${s.cVar}; ${s.cVar} += ${stepStr}) {`
+        `${indent}  const _mtoc2_for_n = mtoc2_loop_count(_mtoc2_for_start, _mtoc2_for_end, ${stepStr});`
       );
-      const body = emitBody(s.body, indent + "  ", state);
+      lines.push(
+        `${indent}  for (let _mtoc2_for_i = 0; _mtoc2_for_i < _mtoc2_for_n; _mtoc2_for_i++) {`
+      );
+      lines.push(
+        `${indent}    ${s.cVar} = mtoc2_range_value(_mtoc2_for_start, ${stepStr}, _mtoc2_for_end, _mtoc2_for_n, _mtoc2_for_i);`
+      );
+      const body = emitBody(s.body, indent + "    ", state);
       if (body.length > 0) lines.push(body);
+      lines.push(`${indent}  }`);
       lines.push(`${indent}}`);
       return lines.join("\n");
     }
@@ -624,7 +638,9 @@ function collectAssignedLocals(stmts: ReadonlyArray<IRStmt>): string[] {
         });
         break;
       case "For":
-        // Loop var is bound by the for-header itself; no pre-decl.
+        // Pre-declare the loop var at the enclosing function scope so
+        // it stays visible after the loop ends (MATLAB-style).
+        add(s.cVar);
         for (const sub of s.body) visit(sub);
         break;
       case "While":
