@@ -13,7 +13,10 @@ import {
   isComplexValue,
   isTensor,
   isTruthy,
+  makeComplexTensor,
+  makeTensor,
   toScalarNumber,
+  type RuntimeTensor,
   type RuntimeValue,
 } from "../runtime/value.js";
 import { UnsupportedConstruct } from "../lowering/errors.js";
@@ -32,6 +35,32 @@ import {
   Interpreter,
   ReturnSignal,
 } from "./interpreter.js";
+
+// ── Tensor cloning for in-place writes ───────────────────────────────────
+
+/** Fresh-buffer copy of `t` for indexed-write paths. MATLAB
+ *  pass-by-value semantics: an indexed write through one alias must
+ *  not be visible through any other alias (caller of a function,
+ *  `b = a`, struct field aliasing, ...). The interpreter has no
+ *  refcounting / sharing-tracking, so we clone unconditionally —
+ *  cheap relative to interpreter overhead in general, matches numbl's
+ *  COW-on-shared in the worst case.
+ *
+ *  The `isLogical` flag (when set on a mask tensor) is preserved so a
+ *  downstream `if mask(i) = 0; if mask; end` chain keeps the mask
+ *  classification through the write. */
+function cloneTensorForWrite(t: RuntimeTensor): RuntimeTensor {
+  const shape = t.shape.slice();
+  const data = new Float64Array(t.data);
+  const fresh =
+    t.imag !== undefined
+      ? makeComplexTensor(shape, data, new Float64Array(t.imag))
+      : makeTensor(shape, data);
+  if (t.isLogical) {
+    return { ...fresh, isLogical: true };
+  }
+  return fresh;
+}
 
 // ── Body / statement execution ────────────────────────────────────────────
 
@@ -265,13 +294,23 @@ export function assignLValue(
       );
     }
     const baseName = lv.base.name;
-    const baseVal = this.env.get(baseName);
-    if (baseVal === undefined || !isTensor(baseVal)) {
+    const existing = this.env.get(baseName);
+    if (existing === undefined || !isTensor(existing)) {
       throw new UnsupportedConstruct(
         `interpreter: indexed assignment requires '${baseName}' to be ` +
           `an already-bound tensor`
       );
     }
+    // MATLAB pass-by-value: `function fn(x); x(i) = v; end` must not
+    // mutate the caller's tensor, and `b = a; b(i) = v;` must not
+    // mutate `a`. Both forms bind the same RuntimeTensor object to
+    // multiple env names. Without refcounting we can't tell whether
+    // the buffer is shared, so we clone unconditionally before
+    // writing — matches numbl's COW-on-shared behavior in the worst
+    // case (always-shared). The fresh tensor takes the env slot;
+    // every alias keeps the pre-write data.
+    const baseVal = cloneTensorForWrite(existing);
+    this.env.set(baseName, baseVal);
     // All indexed-write paths share the same slot-resolution + scatter
     // machinery: a slot resolves to (count, idxFn), the cartesian
     // product of slot indices walks the selected region, and each
