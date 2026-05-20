@@ -32,7 +32,13 @@
  * `UnsupportedConstruct` with a span.
  */
 
-import type { AbstractSyntaxTree, Expr, Stmt, Span } from "../parser/index.js";
+import type {
+  AbstractSyntaxTree,
+  Expr,
+  LValue,
+  Stmt,
+  Span,
+} from "../parser/index.js";
 import { BinaryOperation, UnaryOperation } from "../parser/index.js";
 import { offsetToLineCol } from "../parser/sourceLoc.js";
 import { tryExtractDottedName } from "../parser/astUtils.js";
@@ -1849,31 +1855,45 @@ function rhsSignFromStoreResult(result: IRStmt | IRStmt[]): Sign {
 
 function collectAssignedNames(stmts: Stmt[]): Set<string> {
   const out = new Set<string>();
+  // Add the root variable name of any LValue that points at a
+  // mutable binding (Var, or any chain rooted at a Var via
+  // Member / Index). Used uniformly by Assign / AssignLValue /
+  // MultiAssign so the loop-entry exact-strip stays in lockstep
+  // across all assignment forms.
+  const addLValueRoot = (lv: LValue): void => {
+    if (lv.type === "Var") {
+      out.add(lv.name);
+      return;
+    }
+    if (lv.type === "Member" || lv.type === "Index") {
+      let cur: Expr | null = lv.base;
+      while (cur !== null && cur.type === "Member") cur = cur.base;
+      if (cur !== null && cur.type === "Ident") out.add(cur.name);
+    }
+    // Ignore / IndexCell / MemberDynamic are either non-mutating
+    // (Ignore) or rejected at lowering with an UnsupportedConstruct.
+    // Either way the loop-widen pass doesn't need them.
+  };
   const walk = (ss: Stmt[]): void => {
     for (const s of ss) {
       switch (s.type) {
         case "Assign":
           out.add(s.name);
           break;
-        case "AssignLValue": {
+        case "AssignLValue":
           // `s.f.g = rhs` and `s(i) = rhs` inside a loop body both
           // mutate `s` — so the loop entry needs to strip exact from
           // `s` (and its recursive struct/class field types) just
-          // like a plain `s = ...` reassignment would. Walk the
-          // Member / Index chain to find the root Ident; either form
-          // is rooted at one (the lvalue lowerers reject anything
-          // else).
-          let cur: Expr | null = null;
-          if (s.lvalue.type === "Member") cur = s.lvalue.base;
-          else if (s.lvalue.type === "Index") cur = s.lvalue.base;
-          while (cur !== null && cur.type === "Member") cur = cur.base;
-          if (cur !== null && cur.type === "Ident") out.add(cur.name);
+          // like a plain `s = ...` reassignment would.
+          addLValueRoot(s.lvalue);
           break;
-        }
         case "MultiAssign":
-          for (const lv of s.lvalues) {
-            if (lv.type === "Var") out.add(lv.name);
-          }
+          // Each output slot can be a Var, an Ignore, OR a Member /
+          // Index lvalue rooted at a var (`[a, b.f] = ...`,
+          // `[v(i), w] = ...`). The exact-strip pass needs to walk
+          // ALL forms so a per-slot Member / Index write doesn't
+          // sneak past the loop-entry widen.
+          for (const lv of s.lvalues) addLValueRoot(lv);
           break;
         case "If":
           walk(s.thenBody);
