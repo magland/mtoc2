@@ -69,6 +69,12 @@ test_complex_slice_read();
 test_complex_slice_write();
 test_complex_index_in_loop();
 
+test_noninteger_scalar_index();
+test_noninteger_perdim_index();
+test_noninteger_indexvec();
+test_noninteger_range_index();
+test_noninteger_indexed_write();
+
 % -------- scalar index --------
 
 function test_index_read_2d()
@@ -627,4 +633,47 @@ function test_complex_index_in_loop()
     z(k) = k + k*1i;
   end
   disp(z);
+end
+
+% -------- non-integer indices --------
+% numbl rounds (Math.round) any non-integer index to the nearest
+% integer before bounds-checking; truncating would silently produce
+% wrong answers on `a(2.5)`, `a([1.5 2.5])`, and ranges with non-
+% integer steps. Lock the rounding behaviour in across all three
+% backends.
+
+function test_noninteger_scalar_index()
+  a = [10 20 30 40 50];
+  disp(a(2.5));      % rounds to 3 → 30
+  disp(a(2.9));      % rounds to 3 → 30
+  disp(a(2.1));      % rounds to 2 → 20
+  disp(a(1.5));      % rounds to 2 → 20
+end
+
+function test_noninteger_perdim_index()
+  m = [1 2 3; 4 5 6; 7 8 9];
+  disp(m(1.5, 2.5)); % (2,3) → 6
+  disp(m(2.4, 1.5)); % (2,2) → 5
+end
+
+function test_noninteger_indexvec()
+  % Per-axis (multi-slot) vector-of-indices read — the only IndexVec
+  % shape supported on c-aot and js-aot today. Linear-form
+  % `a([1.5 2.5 3.5])` is interpreter-only and is exercised separately
+  % via the interpreter cross-runner.
+  m = [10 20 30; 40 50 60; 70 80 90];
+  disp(m(1, [1.5 2.5])); % rounds to [2 3] → [20 30]
+end
+
+function test_noninteger_range_index()
+  a = [10 20 30 40 50 60 70 80 90];
+  % Range generates [1.0 1.5 2.0 2.5 3.0]; rounded to [1 2 2 3 3].
+  disp(a(1:0.5:3));
+end
+
+function test_noninteger_indexed_write()
+  a = zeros(1, 5);
+  a(2.5) = 100;       % writes element 3
+  a(1.4) = 50;        % writes element 1
+  disp(a);
 end

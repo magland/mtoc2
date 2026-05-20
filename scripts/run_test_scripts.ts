@@ -125,7 +125,8 @@ const SUBPROCESS_RETRIES: number = (() => {
 
 function looksLikeScriptError(stderr: string): boolean {
   if (!stderr) return false;
-  return /\b(UnsupportedConstruct|TypeError|SyntaxError|RuntimeError|RangeError|mtoc2:|numbl:|Error:)\b/.test(
+  // See `run_test_scripts_all_modes.ts` for the marker rationale.
+  return /\b(UnsupportedConstruct|TypeError|SyntaxError|RuntimeError|RangeError|mtoc2:|numbl:|Error:|lowering:|interpreter:)\b|not\s+(yet\s+)?supported/.test(
     stderr
   );
 }

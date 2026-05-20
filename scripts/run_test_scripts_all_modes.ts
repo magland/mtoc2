@@ -134,7 +134,12 @@ const SUBPROCESS_RETRIES: number = (() => {
  *  marker. Markers cover both mtoc2 and numbl error vocabularies. */
 function looksLikeScriptError(stderr: string): boolean {
   if (!stderr) return false;
-  return /\b(UnsupportedConstruct|TypeError|SyntaxError|RuntimeError|RangeError|mtoc2:|numbl:|Error:)\b/.test(
+  // Markers cover both mtoc2's vocabulary (UnsupportedConstruct,
+  // TypeError, SyntaxError, RuntimeError, RangeError, the "mtoc2:"
+  // CLI prefix, the "lowering:" / "interpreter:" emit-time prefixes,
+  // "not yet supported" / "not supported" UnsupportedConstruct
+  // wording) and numbl's ("numbl:", any prefix ending in "Error:").
+  return /\b(UnsupportedConstruct|TypeError|SyntaxError|RuntimeError|RangeError|mtoc2:|numbl:|Error:|lowering:|interpreter:)\b|not\s+(yet\s+)?supported/.test(
     stderr
   );
 }

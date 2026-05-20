@@ -429,7 +429,7 @@ function emitIndexSliceStoreJs(
         `const _mtoc2_n = mtoc2_loop_count(_mtoc2_s, _mtoc2_e, _mtoc2_st); ` +
         `for (let _mtoc2_k = 0; _mtoc2_k < _mtoc2_n; _mtoc2_k++) { ` +
         `const _mtoc2_v = mtoc2_range_value(_mtoc2_s, _mtoc2_st, _mtoc2_e, _mtoc2_n, _mtoc2_k); ` +
-        `${writeAt("Math.trunc(_mtoc2_v) - 1", "_mtoc2_k")} ` +
+        `${writeAt("Math.round(_mtoc2_v) - 1", "_mtoc2_k")} ` +
         `} ` +
         `}`
       );
@@ -443,7 +443,7 @@ function emitIndexSliceStoreJs(
         `const _mtoc2_ixd = _mtoc2_ix.mtoc2Tag === "tensor" ? _mtoc2_ix.data : [_mtoc2_ix]; ` +
         `const _mtoc2_n = _mtoc2_ixd.length; ` +
         `for (let _mtoc2_k = 0; _mtoc2_k < _mtoc2_n; _mtoc2_k++) { ` +
-        `${writeAt("Math.trunc(_mtoc2_ixd[_mtoc2_k]) - 1", "_mtoc2_k")} ` +
+        `${writeAt("Math.round(_mtoc2_ixd[_mtoc2_k]) - 1", "_mtoc2_k")} ` +
         `} ` +
         `}`
       );
@@ -556,7 +556,7 @@ function emitIndexSliceStoreJs(
     for (let j = 0; j < i; j++)
       strideParts.push(`(${baseName}.shape[${j}] ?? 1)`);
     const stride = strideParts.length === 0 ? "1" : strideParts.join(" * ");
-    srcTerms.push(`(Math.trunc(${idxFns[i]}) - 1) * ${stride}`);
+    srcTerms.push(`(Math.round(${idxFns[i]}) - 1) * ${stride}`);
   }
   const rhsTerms: string[] = [];
   for (let i = 0; i < ndim; i++) {
@@ -887,7 +887,7 @@ function emitIndexSliceJs(
         `const _mtoc2_t = ${allocFn}(2, [${rows}, ${cols}]); ` +
         `for (let _mtoc2_k = 0; _mtoc2_k < _mtoc2_n; _mtoc2_k++) { ` +
         `const _mtoc2_v = mtoc2_range_value(_mtoc2_s, _mtoc2_st, _mtoc2_e, _mtoc2_n, _mtoc2_k); ` +
-        `${copy("_mtoc2_k", "Math.trunc(_mtoc2_v) - 1")} ` +
+        `${copy("_mtoc2_k", "Math.round(_mtoc2_v) - 1")} ` +
         `} ` +
         `return _mtoc2_t; ` +
         `})()`
@@ -912,7 +912,7 @@ function emitIndexSliceJs(
         `const _mtoc2_n = _mtoc2_ixd.length; ` +
         `const _mtoc2_t = ${allocFn}(2, [${rows}, ${cols}]); ` +
         `for (let _mtoc2_k = 0; _mtoc2_k < _mtoc2_n; _mtoc2_k++) { ` +
-        `${copy("_mtoc2_k", "Math.trunc(_mtoc2_ixd[_mtoc2_k]) - 1")} ` +
+        `${copy("_mtoc2_k", "Math.round(_mtoc2_ixd[_mtoc2_k]) - 1")} ` +
         `} ` +
         `return _mtoc2_t; ` +
         `})()`
@@ -1051,7 +1051,7 @@ function emitIndexSliceJs(
       strideParts.push(`(${baseName}.shape[${j}] ?? 1)`);
     }
     const stride = strideParts.length === 0 ? "1" : strideParts.join(" * ");
-    srcTerms.push(`(Math.trunc(${idxFns[i]}) - 1) * ${stride}`);
+    srcTerms.push(`(Math.round(${idxFns[i]}) - 1) * ${stride}`);
   }
   // Column-major destination offset using the result's own dims.
   const dstTerms: string[] = [];

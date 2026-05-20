@@ -39,12 +39,12 @@ export function emitNdScalarOffset(
   useRuntimeByName(state, "mtoc2_oob_abort");
   if (indices.length === 1) {
     const loc = locStringOf(indices[0].span);
-    return `mtoc2_idx_lin(&${baseCName}, (long)(${emitExpr(indices[0], state)}), ${loc})`;
+    return `mtoc2_idx_lin(&${baseCName}, mtoc2_to_idx(${emitExpr(indices[0], state)}), ${loc})`;
   }
   const terms: string[] = [];
   for (let i = 0; i < indices.length; i++) {
     const loc = locStringOf(indices[i].span);
-    const checked = `mtoc2_idx_axis(&${baseCName}, ${i}, (long)(${emitExpr(indices[i], state)}), ${loc})`;
+    const checked = `mtoc2_idx_axis(&${baseCName}, ${i}, mtoc2_to_idx(${emitExpr(indices[i], state)}), ${loc})`;
     if (i === 0) {
       terms.push(checked);
     } else {
@@ -91,7 +91,7 @@ export function emitSliceSlotSetup(
       const loc = locStringOf(slot.span);
       lines.push(`${indent}long _mtoc2_n_${i} = 1;`);
       lines.push(
-        `${indent}long _mtoc2_src_${i} = mtoc2_idx_axis(&${baseCName}, ${i}, (long)(${scalarStr}), ${loc});`
+        `${indent}long _mtoc2_src_${i} = mtoc2_idx_axis(&${baseCName}, ${i}, mtoc2_to_idx(${scalarStr}), ${loc});`
       );
       slotSrc.push(`_mtoc2_src_${i}`);
     } else if (slot.kind === "IndexVec") {
@@ -114,7 +114,7 @@ export function emitSliceSlotSetup(
       const loc = locStringOf(slot.span);
       // Per-iteration: read the 1-based index, bounds-check, convert to 0-based.
       slotSrc.push(
-        `mtoc2_idx_axis(&${baseCName}, ${i}, (long)${idxCName}.real[${kVar}], ${loc})`
+        `mtoc2_idx_axis(&${baseCName}, ${i}, mtoc2_to_idx(${idxCName}.real[${kVar}]), ${loc})`
       );
     } else if (slot.kind === "LogicalMask") {
       // Per-axis logical-mask gather. Scan the mask once at setup time
@@ -175,17 +175,17 @@ export function emitSliceSlotSetup(
       // empty slice in MATLAB).
       lines.push(`${indent}if (_mtoc2_n_${i} > 0) {`);
       lines.push(
-        `${indent}  long _mtoc2_first_${i} = (long)_mtoc2_start_${i};`
+        `${indent}  long _mtoc2_first_${i} = mtoc2_to_idx(_mtoc2_start_${i});`
       );
       lines.push(
-        `${indent}  long _mtoc2_last_${i} = (long)(_mtoc2_start_${i} + ${stepStr} * (double)(_mtoc2_n_${i} - 1));`
+        `${indent}  long _mtoc2_last_${i} = mtoc2_to_idx(_mtoc2_start_${i} + ${stepStr} * (double)(_mtoc2_n_${i} - 1));`
       );
       lines.push(
         `${indent}  mtoc2_check_axis_range(&${baseCName}, ${i}, _mtoc2_first_${i}, _mtoc2_last_${i}, ${loc});`
       );
       lines.push(`${indent}}`);
       slotSrc.push(
-        `((long)(_mtoc2_start_${i} + ${stepStr} * (double)${kVar}) - 1L)`
+        `(mtoc2_to_idx(_mtoc2_start_${i} + ${stepStr} * (double)${kVar}) - 1L)`
       );
     }
   }
@@ -223,15 +223,15 @@ function emitLinearRangeSetup(
   // against a single axis dim. Skip the check on an empty range
   // (MATLAB allows `v(5:4)` to yield 1×0).
   lines.push(`${indent}if (_mtoc2_n > 0) {`);
-  lines.push(`${indent}  long _mtoc2_first = (long)_mtoc2_start;`);
+  lines.push(`${indent}  long _mtoc2_first = mtoc2_to_idx(_mtoc2_start);`);
   lines.push(
-    `${indent}  long _mtoc2_last = (long)(_mtoc2_start + ${stepStr} * (double)(_mtoc2_n - 1));`
+    `${indent}  long _mtoc2_last = mtoc2_to_idx(_mtoc2_start + ${stepStr} * (double)(_mtoc2_n - 1));`
   );
   lines.push(
     `${indent}  mtoc2_check_linear_range(&${baseCName}, _mtoc2_first, _mtoc2_last, ${loc});`
   );
   lines.push(`${indent}}`);
-  return k => `(long)(_mtoc2_start + ${stepStr} * (double)${k}) - 1L`;
+  return k => `mtoc2_to_idx(_mtoc2_start + ${stepStr} * (double)${k}) - 1L`;
 }
 
 /** Emit setup for a single-slot linear logical-mask slice (read or

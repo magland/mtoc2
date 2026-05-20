@@ -28,8 +28,18 @@
  * coverage; this helper just makes the runtime error deterministic.
  */
 
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
+
+/* Convert a double-valued index expression to the long the bounds
+ * checkers below expect. Mirrors numbl's `Math.round(idx)` convention
+ * (see runtime/runtimeIndexing.ts) so `a(2.5)` reads element 3, not 2.
+ * A plain `(long)` cast would truncate and silently diverge from
+ * numbl on every non-integer index. */
+static long mtoc2_to_idx(double v) {
+  return lround(v);
+}
 
 static void mtoc2_oob_abort(
   const char *loc, int axis, long got, long lo, long hi

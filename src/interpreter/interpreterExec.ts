@@ -286,14 +286,17 @@ export function assignLValue(
             const calc = Math.floor((en - s) / st + 1 + 1e-10);
             n = calc > 0 && Number.isFinite(calc) ? calc : 0;
           }
-          slot = { count: n, idxFn: k => Math.trunc(s + st * k) };
+          slot = { count: n, idxFn: k => Math.round(s + st * k) };
         } else {
           // Bare ident / lit / arith — scalar numeric, an IndexVec
           // (numeric tensor), or a LogicalMask (isLogical-tagged
           // tensor). Same surface as the read-side `indexTensor`.
+          // Non-integer values are rounded to nearest (numbl's
+          // `Math.round(idx)` convention in runtimeIndexing.ts), not
+          // truncated — `a(2.5)` writes element 3, not 2.
           const sv = this.evalExpr(a);
           if (typeof sv === "number") {
-            const iv = Math.trunc(sv);
+            const iv = Math.round(sv);
             slot = { count: 1, idxFn: () => iv };
           } else if (isTensor(sv)) {
             if (sv.isLogical) {
@@ -305,7 +308,7 @@ export function assignLValue(
               slot = { count: truthy.length, idxFn: k => truthy[k] };
             } else {
               const td = sv.data;
-              slot = { count: td.length, idxFn: k => Math.trunc(td[k]) };
+              slot = { count: td.length, idxFn: k => Math.round(td[k]) };
             }
           } else {
             throw new UnsupportedConstruct(

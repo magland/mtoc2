@@ -530,12 +530,12 @@ export function indexTensor(
           const calc = Math.floor((en - s) / st + 1 + 1e-10);
           n = calc > 0 && Number.isFinite(calc) ? calc : 0;
         }
-        slot = { count: n, idxFn: k => Math.trunc(s + st * k) };
+        slot = { count: n, idxFn: k => Math.round(s + st * k) };
         allScalar = false;
       } else {
         const v = this.evalExpr(a);
         if (typeof v === "number") {
-          const iv = Math.trunc(v);
+          const iv = Math.round(v);
           slot = { count: 1, idxFn: () => iv };
         } else if (isTensor(v)) {
           if (v.isLogical) {
@@ -554,7 +554,7 @@ export function indexTensor(
             slot = { count: truthy.length, idxFn: k => truthy[k] };
           } else {
             const data = v.data;
-            slot = { count: data.length, idxFn: k => Math.trunc(data[k]) };
+            slot = { count: data.length, idxFn: k => Math.round(data[k]) };
           }
           allScalar = false;
         } else {
