@@ -7,6 +7,7 @@
  */
 
 import {
+  EXACT_ARRAY_MAX_ELEMENTS,
   scalarDouble,
   scalarLogical,
   signFromNumber,
@@ -22,8 +23,14 @@ export function inferTypeFromValue(v: RuntimeValue): Type {
   if (typeof v === "string") return { kind: "String", exact: v };
   if (isChar(v)) return { kind: "Char", exact: v.value };
   if (isTensor(v)) {
-    // Carry shape only — runtime values typically aren't statically
-    // constant, and the interpreter doesn't need exact-array folding.
+    // Carry the data as `exact` when it fits the lattice's cap so
+    // dim-vector-consuming builtins (`zeros(size(xs))`,
+    // `reshape(A, [r c])`, `sum(v, ...)` with a vector dim, …) can
+    // read the runtime values via the same `exactRealArray` path
+    // c-aot uses. Above the cap we fall back to shape-only.
+    if (v.data.length <= EXACT_ARRAY_MAX_ELEMENTS) {
+      return tensorDouble(v.shape.slice(), new Float64Array(v.data));
+    }
     return tensorDouble(v.shape.slice());
   }
   return UNKNOWN;
