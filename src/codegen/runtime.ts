@@ -441,6 +441,11 @@ const REGISTRY: ReadonlyMap<string, RuntimeSnippet> = new Map<
     loadSnippet("disp_tensor.h", ["mtoc2_tensor_t", "mtoc2_format_double"]),
   ],
 
+  // JS-only generic struct disp. The C path generates per-typedef
+  // <name>_disp via emitNamedTypedef and never activates this snippet;
+  // it's the only entry point for `disp(struct)` on the JS side.
+  ["mtoc2_disp_struct", loadSnippet("disp_struct.h")],
+
   // ── Complex tensor lifecycle ──────────────────────────────────────
   // Sibling helpers of the real tensor family for the complex-typed
   // path. `mtoc2_tensor_assign` / `_free` / `_empty` are shape-agnostic

@@ -377,9 +377,70 @@ export class Interpreter {
       if (!suppressed) this.autoDisp(baseName, baseVal);
       return;
     }
+    if (lv.type === "Member") {
+      // `s.f = rhs` / `s.a.b = rhs` — walk to the parent of the leaf,
+      // then write the field. Bare-Ident bases bind the result back
+      // into the env so `s` reflects the mutation; nested bases
+      // mutate in-place via the parent reference.
+      const path = this.collectMemberPath(lv);
+      if (path === null) {
+        throw new UnsupportedConstruct(
+          `interpreter: only bare-Ident-rooted member assignment is supported`
+        );
+      }
+      const { rootName, fields } = path;
+      let host = this.env.get(rootName) as Record<string, RuntimeValue> | undefined;
+      if (host === undefined || typeof host !== "object" || host === null) {
+        host = {};
+      } else {
+        host = { ...host };
+      }
+      // Walk to the parent of the leaf, cloning along the way so
+      // older references aren't mutated.
+      let cur: Record<string, RuntimeValue> = host;
+      for (let i = 0; i < fields.length - 1; i++) {
+        const fname = fields[i];
+        const next = cur[fname];
+        const cloned: Record<string, RuntimeValue> =
+          next && typeof next === "object" && !isTensor(next) && !isCharRV(next)
+            ? { ...(next as Record<string, RuntimeValue>) }
+            : {};
+        cur[fname] = cloned as RuntimeValue;
+        cur = cloned;
+      }
+      cur[fields[fields.length - 1]] = v;
+      this.env.set(rootName, host as RuntimeValue);
+      if (!suppressed) this.autoDisp(rootName, host as RuntimeValue);
+      return;
+    }
     throw new UnsupportedConstruct(
       `interpreter: lvalue '${lv.type}' is not yet implemented`
     );
+  }
+
+  /** Walk a chain of `Member` lvalues down to a bare `Ident` root.
+   *  Returns the root variable name and the field path; returns null
+   *  if the chain ends at something other than a bare ident (e.g. a
+   *  function call or member-dynamic). */
+  private collectMemberPath(
+    lv: LValue
+  ): { rootName: string; fields: string[] } | null {
+    const fields: string[] = [];
+    let cur: unknown = lv;
+    while (cur && typeof cur === "object" && (cur as LValue).type === "Member") {
+      const m = cur as Extract<LValue, { type: "Member" }>;
+      fields.unshift(m.name);
+      cur = m.base;
+    }
+    if (
+      cur &&
+      typeof cur === "object" &&
+      (cur as Expr).type === "Ident"
+    ) {
+      const id = cur as Extract<Expr, { type: "Ident" }>;
+      return { rootName: id.name, fields };
+    }
+    return null;
   }
 
   private expandForRange(e: Expr): RuntimeValue[] {
@@ -722,8 +783,33 @@ export class Interpreter {
       case "EndKeyword":
         return this.resolveEnd();
 
+      case "Member": {
+        // `s.f` — struct / class field read. Walks the runtime
+        // object via the field name. Errors out for non-object
+        // bases.
+        const base = this.evalExpr(e.base);
+        if (
+          typeof base !== "object" ||
+          base === null ||
+          isTensor(base) ||
+          isCharRV(base)
+        ) {
+          throw new UnsupportedConstruct(
+            `interpreter: '.${e.name}' applied to non-struct value`,
+            e.span
+          );
+        }
+        const o = base as Record<string, RuntimeValue>;
+        if (!(e.name in o)) {
+          throw new UnsupportedConstruct(
+            `interpreter: struct has no field '${e.name}'`,
+            e.span
+          );
+        }
+        return o[e.name];
+      }
+
       case "IndexCell":
-      case "Member":
       case "MemberDynamic":
       case "MethodCall":
       case "SuperMethodCall":
@@ -758,6 +844,34 @@ export class Interpreter {
     nargout: number,
     span: Span
   ): RuntimeValue[] {
+    // `struct(name, value, name, value, ...)` is special-cased in the
+    // c-aot path's lowerFuncCall — it doesn't go through the builtin
+    // registry. Match that here so the interpreter sees the same
+    // dialect: a plain object with the named fields. Field-name args
+    // must be Char or String; values pass through unchanged.
+    if (name === "struct") {
+      if (args.length % 2 !== 0) {
+        throw new UnsupportedConstruct(
+          `'struct' expects an even number of args (name, value, name, value, ...)`,
+          span
+        );
+      }
+      const out: Record<string, RuntimeValue> = {};
+      for (let i = 0; i < args.length; i += 2) {
+        const k = args[i];
+        let fname: string;
+        if (typeof k === "string") fname = k;
+        else if (isCharRV(k)) fname = k.value;
+        else {
+          throw new UnsupportedConstruct(
+            `'struct' field name (arg ${i + 1}) must be a string or char literal`,
+            span
+          );
+        }
+        out[fname] = args[i + 1];
+      }
+      return [out as unknown as RuntimeValue];
+    }
     const argTypes = args.map(inferTypeFromValue);
 
     // Global builtin registry first.

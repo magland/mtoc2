@@ -10,6 +10,7 @@ import type { Builtin } from "../../registry.js";
 import { isChar, isTensor } from "../../../runtime/value.js";
 import {
   mtoc2_disp_double,
+  mtoc2_disp_struct,
   mtoc2_disp_tensor,
 } from "../../runtime/snippets.gen.js";
 
@@ -100,8 +101,15 @@ export const disp: Builtin = {
       // Char runtime value is `{mtoc2Tag:"char",value}`; print value + newline.
       return `($write(${argsJs[0]}.value + "\\n"))`;
     }
+    if (t.kind === "Struct") {
+      // Generic runtime-walking struct disp — the C path emits a
+      // per-typedef _disp, but JS doesn't have typedefs to specialize
+      // against, so one helper handles every shape.
+      useRuntime("mtoc2_disp_struct");
+      return `mtoc2_disp_struct(${argsJs[0]})`;
+    }
     throw new UnsupportedConstruct(
-      `'disp' emitJs for complex / struct args is not yet wired (Phase 5)`
+      `'disp' emitJs for complex args is not yet wired (Phase 5)`
     );
   },
   call({ args, ctx }) {
@@ -117,6 +125,11 @@ export const disp: Builtin = {
       // can also be called directly from a unit test.
       globalThis.$write = ctx.helpers.write;
       mtoc2_disp_tensor(v);
+    } else if (v && typeof v === "object") {
+      // Struct (plain object with field-name keys). Dispatch through
+      // the generic struct disp helper.
+      globalThis.$write = ctx.helpers.write;
+      mtoc2_disp_struct(v as Record<string, unknown>);
     } else {
       throw new UnsupportedConstruct(
         `'disp' 'call' got an unsupported value shape (got ${typeof v})`

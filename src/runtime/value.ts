@@ -20,7 +20,14 @@ export type RuntimeValue =
   | string
   | RuntimeTensor
   | RuntimeChar
-  | RuntimeComplex;
+  | RuntimeComplex
+  | RuntimeStruct;
+
+/** Struct/object — plain JS object whose keys are field names. The
+ *  c-aot path emits a typedef'd C struct; the JS path just uses a
+ *  bare object. Recurses through field values that may themselves be
+ *  any RuntimeValue (including nested structs). */
+export type RuntimeStruct = { readonly [field: string]: RuntimeValue };
 
 /** Real-double tensor. `data` is column-major to match numbl's
  *  `RuntimeTensor.data`. The shape array is owned by the value; do

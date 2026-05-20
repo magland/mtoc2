@@ -326,7 +326,19 @@ function emitStmt(s: IRStmt, indent: string, state: RuntimeState): string {
       return `${indent}${baseName}.data[${offset}] = ${rhs};`;
     }
 
-    case "MemberStore":
+    case "MemberStore": {
+      // `s.f = rhs` / `s.a.b = rhs` — walk the field path and assign
+      // into the leaf. JS objects are mutable; no copy needed beyond
+      // what the RHS expression already produced.
+      const rhs = emitExpr(s.rhs, state);
+      const path = s.fieldPath
+        .map(f =>
+          /^[A-Za-z_][A-Za-z0-9_]*$/.test(f) ? `.${f}` : `[${JSON.stringify(f)}]`
+        )
+        .join("");
+      return `${indent}${s.base.cName}${path} = ${rhs};`;
+    }
+
     case "IndexSliceStore":
       throw new UnsupportedConstruct(
         `emitJs: '${s.kind}' is not yet wired (Phase 2 minimal subset)`,
@@ -533,10 +545,29 @@ function emitExpr(e: IRExpr, state: RuntimeState): string {
     case "IndexSlice":
       return emitIndexSliceJs(e, state);
 
+    case "StructLit": {
+      // Plain JS object — field-name keys carry the lowered values.
+      // Owned-typed field values are fresh producers (ANF guaranteed)
+      // and JS GC handles lifetime, so no wrapping needed.
+      const fields = e.fields
+        .map(f => `${JSON.stringify(f.name)}: ${emitExpr(f.value, state)}`)
+        .join(", ");
+      return `({${fields}})`;
+    }
+
+    case "MemberLoad": {
+      // `s.f` — JS member access. Identifier-safe field names skip
+      // the bracket form for readability; everything else uses
+      // bracket notation.
+      const baseE = emitExpr(e.base, state);
+      if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(e.field)) {
+        return `(${baseE}).${e.field}`;
+      }
+      return `(${baseE})[${JSON.stringify(e.field)}]`;
+    }
+
     case "HandleLit":
     case "HandleCaptureLoad":
-    case "StructLit":
-    case "MemberLoad":
       throw new UnsupportedConstruct(
         `emitJs: IR shape '${e.kind}' is not yet wired (Phase 2 minimal subset)`,
         e.span
