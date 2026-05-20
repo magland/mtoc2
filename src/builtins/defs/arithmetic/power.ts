@@ -54,8 +54,12 @@ import {
   elemwiseResultShape,
   needsBroadcast,
 } from "./_elemwise.js";
-import type { RuntimeTensor } from "../../../runtime/value.js";
 import {
+  isComplexValue,
+  type RuntimeTensor,
+} from "../../../runtime/value.js";
+import {
+  mtoc2_cpow,
   mtoc2_tensor_power_tt,
   mtoc2_tensor_power_ts,
   mtoc2_tensor_power_st,
@@ -263,14 +267,22 @@ export const power: Builtin = {
   emitJs({ argsJs, argTypes, useRuntime }) {
     const aN = argTypes[0] as NumericType;
     const bN = argTypes[1] as NumericType;
-    if (aN.isComplex || bN.isComplex) {
-      throw new UnsupportedConstruct(
-        `'power' complex emitJs not yet wired (Phase 5)`
-      );
-    }
     const aMulti = isMultiElement(aN);
     const bMulti = isMultiElement(bN);
-    if (!aMulti && !bMulti) return `Math.pow(${argsJs[0]}, ${argsJs[1]})`;
+    if (!aMulti && !bMulti) {
+      if (aN.isComplex || bN.isComplex) {
+        useRuntime("mtoc2_cscalar");
+        const promote = (j: string, c: boolean) =>
+          c ? j : `mtoc2_cmake(${j}, 0.0)`;
+        return `mtoc2_cpow(${promote(argsJs[0], aN.isComplex)}, ${promote(argsJs[1], bN.isComplex)})`;
+      }
+      return `Math.pow(${argsJs[0]}, ${argsJs[1]})`;
+    }
+    if (aN.isComplex || bN.isComplex) {
+      throw new UnsupportedConstruct(
+        `'power' complex-tensor emitJs not yet wired`
+      );
+    }
     useRuntime("mtoc2_tensor_elemwise_real_fn");
     if (aMulti && bMulti) {
       return needsBroadcast(aN, bN)
@@ -286,17 +298,30 @@ export const power: Builtin = {
   call({ args, argTypes }) {
     const aN = argTypes[0] as NumericType;
     const bN = argTypes[1] as NumericType;
-    if (aN.isComplex || bN.isComplex) {
-      throw new UnsupportedConstruct(
-        `'power' complex 'call' not yet wired (Phase 5)`
-      );
-    }
     const aMulti = isMultiElement(aN);
     const bMulti = isMultiElement(bN);
     if (!aMulti && !bMulti) {
+      if (aN.isComplex || bN.isComplex) {
+        const av = args[0];
+        const bv = args[1];
+        const ax = isComplexValue(av)
+          ? av
+          : { re: Number(av), im: 0 };
+        const bx = isComplexValue(bv)
+          ? bv
+          : { re: Number(bv), im: 0 };
+        const out = mtoc2_cpow(ax, bx);
+        if (out.im === 0 && !aN.isComplex && !bN.isComplex) return [out.re];
+        return [out];
+      }
       const av = typeof args[0] === "number" ? args[0] : Number(args[0]);
       const bv = typeof args[1] === "number" ? args[1] : Number(args[1]);
       return [Math.pow(av, bv)];
+    }
+    if (aN.isComplex || bN.isComplex) {
+      throw new UnsupportedConstruct(
+        `'power' complex-tensor 'call' not yet wired`
+      );
     }
     if (aMulti && bMulti) {
       const at = args[0] as RuntimeTensor;

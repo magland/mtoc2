@@ -55,7 +55,10 @@ import {
   mtoc2_tensor_round,
   mtoc2_tensor_sign,
 } from "../../runtime/snippets.gen.js";
-import type { RuntimeTensor } from "../../../runtime/value.js";
+import {
+  isComplexValue,
+  type RuntimeTensor,
+} from "../../../runtime/value.js";
 
 /** JS-side tensor kernels keyed by builtin name. Matches the C
  *  side's `mtoc2_tensor_<name>` pattern; activations land via the
@@ -235,9 +238,13 @@ export function defineUnaryRealMath(opts: UnaryRealMathOpts): Builtin {
     emitJs({ argsJs, argTypes, useRuntime }) {
       const ty = argTypes[0] as NumericType;
       if (isNumeric(ty) && ty.isComplex) {
-        throw new UnsupportedConstruct(
-          `'${name}' complex emitJs not yet wired (needs JS complex runtime)`
-        );
+        if (isMultiElement(ty)) {
+          throw new UnsupportedConstruct(
+            `'${name}' complex-tensor emitJs not yet wired`
+          );
+        }
+        useRuntime("mtoc2_cscalar");
+        return `${complex!.cFnComplex}(${argsJs[0]})`;
       }
       if (isMultiElement(ty)) {
         if (JS_TENSOR_UNARY[name] === undefined) {
@@ -253,9 +260,16 @@ export function defineUnaryRealMath(opts: UnaryRealMathOpts): Builtin {
     call({ args, argTypes }) {
       const ty = argTypes[0] as NumericType;
       if (isNumeric(ty) && ty.isComplex) {
-        throw new UnsupportedConstruct(
-          `'${name}' complex 'call' not yet wired`
-        );
+        if (isMultiElement(ty)) {
+          throw new UnsupportedConstruct(
+            `'${name}' complex-tensor 'call' not yet wired`
+          );
+        }
+        const v = args[0];
+        const cx = isComplexValue(v)
+          ? v
+          : { re: typeof v === "number" ? v : Number(v), im: 0 };
+        return [complex!.jsFnComplex(cx)];
       }
       if (isMultiElement(ty)) {
         const kernel = JS_TENSOR_UNARY[name];

@@ -89,28 +89,53 @@ export function defineCompare(
       }
       return `((${argsC[0]} ${cOp} ${argsC[1]}) ? 1.0 : 0.0)`;
     },
-    // Minimal scalar-real-only emitJs (Phase 2 smoke test). Logical
-    // result encoded as 1.0/0.0 to match the C side's
-    // `scalarLogical()` lattice (logical stored as a double).
+    // Logical result encoded as 1/0 to mirror MATLAB's
+    // logical-as-double semantics (the C side does the same).
     emitJs({ argsJs, argTypes }) {
       const aCx = isScalarComplex(argTypes[0]);
       const bCx = isScalarComplex(argTypes[1]);
       if (aCx || bCx) {
-        throw new UnsupportedConstruct(
-          `'${kind}' complex codegen is not yet wired in emitJs (Phase 5)`
-        );
+        const aRe = aCx ? `${argsJs[0]}.re` : `${argsJs[0]}`;
+        const bRe = bCx ? `${argsJs[1]}.re` : `${argsJs[1]}`;
+        if (kind === "eq") {
+          const aIm = aCx ? `${argsJs[0]}.im` : `0`;
+          const bIm = bCx ? `${argsJs[1]}.im` : `0`;
+          return `((${aRe} === ${bRe} && ${aIm} === ${bIm}) ? 1 : 0)`;
+        }
+        if (kind === "ne") {
+          const aIm = aCx ? `${argsJs[0]}.im` : `0`;
+          const bIm = bCx ? `${argsJs[1]}.im` : `0`;
+          return `((${aRe} !== ${bRe} || ${aIm} !== ${bIm}) ? 1 : 0)`;
+        }
+        return `((${aRe} ${cOp} ${bRe}) ? 1 : 0)`;
       }
       return `((${argsJs[0]} ${cOp} ${argsJs[1]}) ? 1 : 0)`;
     },
-    // Minimal scalar-real call hook for the interpreter. Returns
-    // 1/0 to mirror MATLAB's logical-as-double semantics.
     call({ args, argTypes }) {
       const aCx = isScalarComplex(argTypes[0]);
       const bCx = isScalarComplex(argTypes[1]);
       if (aCx || bCx) {
-        throw new UnsupportedConstruct(
-          `'${kind}' complex 'call' is not yet wired (Phase 5)`
-        );
+        const av = args[0];
+        const bv = args[1];
+        const aRe =
+          typeof av === "number"
+            ? av
+            : (av as { re: number; im: number }).re;
+        const aIm =
+          typeof av === "number"
+            ? 0
+            : (av as { re: number; im: number }).im;
+        const bRe =
+          typeof bv === "number"
+            ? bv
+            : (bv as { re: number; im: number }).re;
+        const bIm =
+          typeof bv === "number"
+            ? 0
+            : (bv as { re: number; im: number }).im;
+        if (kind === "eq") return [aRe === bRe && aIm === bIm ? 1 : 0];
+        if (kind === "ne") return [aRe !== bRe || aIm !== bIm ? 1 : 0];
+        return [fold(aRe, bRe) ? 1 : 0];
       }
       const av = typeof args[0] === "number" ? args[0] : Number(args[0]);
       const bv = typeof args[1] === "number" ? args[1] : Number(args[1]);

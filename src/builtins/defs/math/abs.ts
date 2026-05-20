@@ -17,6 +17,8 @@ import {
   exactComplexArray,
 } from "../_shared.js";
 import { defineUnaryRealMath } from "./_unary_real.js";
+import { isComplexValue } from "../../../runtime/value.js";
+import { mtoc2_cabs } from "../../runtime/snippets.gen.js";
 
 /** Real-input `abs`. Result is `nonneg` in general; `positive` when
  *  input is known to be nonzero (`positive`, `negative`, or `nonzero`). */
@@ -91,23 +93,31 @@ export const abs: Builtin = {
     }
     return requireEmitC(absReal)(args);
   },
-  // Complex paths land alongside the JS complex runtime later. Real
-  // paths delegate to `absReal`'s factory-supplied emitJs/call.
   emitJs(args) {
-    const a = args.argTypes[0] as NumericType;
+    const { argsJs, argTypes, useRuntime } = args;
+    const a = argTypes[0] as NumericType;
     if (a.isComplex) {
-      throw new UnsupportedConstruct(
-        `'abs' complex emitJs not yet wired (needs JS complex runtime)`
-      );
+      if (isMultiElement(a)) {
+        throw new UnsupportedConstruct(
+          `'abs' complex-tensor emitJs not yet wired`
+        );
+      }
+      useRuntime("mtoc2_cscalar");
+      return `mtoc2_cabs(${argsJs[0]})`;
     }
     return requireEmitJs(absReal)(args);
   },
   call(args) {
     const a = args.argTypes[0] as NumericType;
     if (a.isComplex) {
-      throw new UnsupportedConstruct(
-        `'abs' complex 'call' not yet wired`
-      );
+      if (isMultiElement(a)) {
+        throw new UnsupportedConstruct(
+          `'abs' complex-tensor 'call' not yet wired`
+        );
+      }
+      const v = args.args[0];
+      const cx = isComplexValue(v) ? v : { re: Number(v), im: 0 };
+      return [mtoc2_cabs(cx)];
     }
     return requireCall(absReal)(args);
   },

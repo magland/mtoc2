@@ -19,8 +19,14 @@ import {
 } from "../../../lowering/types.js";
 import { TypeError, UnsupportedConstruct } from "../../../lowering/errors.js";
 import type { Builtin } from "../../registry.js";
-import type { RuntimeTensor } from "../../../runtime/value.js";
-import { mtoc2_norm2_real as jsNorm2Real } from "../../runtime/snippets.gen.js";
+import {
+  isComplexValue,
+  type RuntimeTensor,
+} from "../../../runtime/value.js";
+import {
+  mtoc2_cabs,
+  mtoc2_norm2_real as jsNorm2Real,
+} from "../../runtime/snippets.gen.js";
 import {
   exactDouble,
   exactComplex,
@@ -111,26 +117,35 @@ export const norm: Builtin = {
   },
   emitJs({ argsJs, argTypes, useRuntime }) {
     const a = argTypes[0] as NumericType;
-    if (a.isComplex) {
-      throw new UnsupportedConstruct(
-        `'norm' complex emitJs not yet wired (Phase 5)`
-      );
-    }
     if (isMultiElement(a)) {
+      if (a.isComplex) {
+        throw new UnsupportedConstruct(
+          `'norm' complex-tensor emitJs not yet wired`
+        );
+      }
       useRuntime("mtoc2_tensor_norm");
       return `mtoc2_norm2_real(${argsJs[0]})`;
+    }
+    if (a.isComplex) {
+      useRuntime("mtoc2_cscalar");
+      return `mtoc2_cabs(${argsJs[0]})`;
     }
     return `Math.abs(${argsJs[0]})`;
   },
   call({ args, argTypes }) {
     const a = argTypes[0] as NumericType;
-    if (a.isComplex) {
-      throw new UnsupportedConstruct(
-        `'norm' complex 'call' not yet wired (Phase 5)`
-      );
-    }
     if (isMultiElement(a)) {
+      if (a.isComplex) {
+        throw new UnsupportedConstruct(
+          `'norm' complex-tensor 'call' not yet wired`
+        );
+      }
       return [jsNorm2Real(args[0] as RuntimeTensor)];
+    }
+    if (a.isComplex) {
+      const v = args[0];
+      const cx = isComplexValue(v) ? v : { re: Number(v), im: 0 };
+      return [mtoc2_cabs(cx)];
     }
     const v = typeof args[0] === "number" ? args[0] : Number(args[0]);
     return [Math.abs(v)];

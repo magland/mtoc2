@@ -122,28 +122,29 @@ export function defineShortCircuit(
       // so the scalar slot matches the logical-as-double convention.
       return `((double)(${lhs} ${cOp} ${rhs}))`;
     },
-    emitJs({ argsJs, argTypes }) {
+    emitJs({ argsJs, argTypes, useRuntime }) {
       const aN = argTypes[0] as NumericType;
       const bN = argTypes[1] as NumericType;
-      if (aN.isComplex || bN.isComplex) {
-        throw new UnsupportedConstruct(
-          `'${name}' complex emitJs not yet wired (Phase 5)`
-        );
-      }
-      // Match the C output's logical-as-double convention: 1/0.
-      return `((${argsJs[0]} ${cOp} ${argsJs[1]}) ? 1 : 0)`;
+      const anyComplex = aN.isComplex || bN.isComplex;
+      if (anyComplex) useRuntime("mtoc2_cscalar");
+      const lhs = aN.isComplex ? `mtoc2_cnonzero(${argsJs[0]})` : `(${argsJs[0]})`;
+      const rhs = bN.isComplex ? `mtoc2_cnonzero(${argsJs[1]})` : `(${argsJs[1]})`;
+      return `((${lhs} ${cOp} ${rhs}) ? 1 : 0)`;
     },
     call({ args, argTypes }) {
       const aN = argTypes[0] as NumericType;
       const bN = argTypes[1] as NumericType;
-      if (aN.isComplex || bN.isComplex) {
-        throw new UnsupportedConstruct(
-          `'${name}' complex 'call' not yet wired (Phase 5)`
-        );
-      }
-      const av = typeof args[0] === "number" ? args[0] : Number(args[0]);
-      const bv = typeof args[1] === "number" ? args[1] : Number(args[1]);
-      return [kind === "or" ? (av !== 0 || bv !== 0 ? 1 : 0) : (av !== 0 && bv !== 0 ? 1 : 0)];
+      const toBool = (v: unknown, isComplex: boolean): boolean => {
+        if (isComplex) {
+          const cx = v as { re: number; im: number };
+          return cx.re !== 0 || cx.im !== 0;
+        }
+        const n = typeof v === "number" ? v : Number(v);
+        return n !== 0;
+      };
+      const a = toBool(args[0], aN.isComplex);
+      const b = toBool(args[1], bN.isComplex);
+      return [kind === "or" ? (a || b ? 1 : 0) : a && b ? 1 : 0];
     },
   };
 }

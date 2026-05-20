@@ -21,8 +21,12 @@ import {
   exactComplex,
   exactComplexArray,
 } from "../_shared.js";
-import type { RuntimeTensor } from "../../../runtime/value.js";
-import { mtoc2_tensor_uminus } from "../../runtime/snippets.gen.js";
+import {
+  isComplexValue,
+  type RuntimeTensor,
+  type RuntimeValue,
+} from "../../../runtime/value.js";
+import { mtoc2_cneg, mtoc2_tensor_uminus } from "../../runtime/snippets.gen.js";
 
 export const uminus: Builtin = {
   name: "uminus",
@@ -99,26 +103,37 @@ export const uminus: Builtin = {
   },
   emitJs({ argsJs, argTypes, useRuntime }) {
     const ty = argTypes[0] as NumericType;
-    if (isNumeric(ty) && ty.isComplex) {
-      throw new UnsupportedConstruct(`'uminus' complex emitJs not yet wired`);
-    }
     if (isMultiElement(ty)) {
+      if (ty.isComplex) {
+        throw new UnsupportedConstruct(
+          `'uminus' complex-tensor emitJs not yet wired`
+        );
+      }
       useRuntime("mtoc2_tensor_elemwise_real");
       return `mtoc2_tensor_uminus(${argsJs[0]})`;
+    }
+    if (isNumeric(ty) && ty.isComplex) {
+      useRuntime("mtoc2_cscalar");
+      return `mtoc2_cneg(${argsJs[0]})`;
     }
     return `(-${argsJs[0]})`;
   },
   call({ args, argTypes }) {
     const ty = argTypes[0] as NumericType;
-    if (isNumeric(ty) && ty.isComplex) {
-      throw new UnsupportedConstruct(`'uminus' complex 'call' not yet wired`);
-    }
     if (isMultiElement(ty)) {
-      // Cast through unknown — the .js snippet's return type infers
-      // as a generic object (no literal `"tensor"` discriminator).
+      if (ty.isComplex) {
+        throw new UnsupportedConstruct(
+          `'uminus' complex-tensor 'call' not yet wired`
+        );
+      }
       return [
         mtoc2_tensor_uminus(args[0] as RuntimeTensor) as unknown as RuntimeTensor,
       ];
+    }
+    if (isNumeric(ty) && ty.isComplex) {
+      const v = args[0] as RuntimeValue;
+      const cx = isComplexValue(v) ? v : { re: Number(v), im: 0 };
+      return [mtoc2_cneg(cx)];
     }
     const v = typeof args[0] === "number" ? args[0] : Number(args[0]);
     return [-v];
