@@ -13,6 +13,7 @@ import {
   mtoc2_disp_double,
   mtoc2_disp_struct,
   mtoc2_disp_tensor,
+  mtoc2_disp_tensor_complex,
 } from "../../runtime/snippets.gen.js";
 
 export const disp: Builtin = {
@@ -87,6 +88,10 @@ export const disp: Builtin = {
       useRuntime("mtoc2_disp_complex");
       return `mtoc2_disp_complex(${argsJs[0]})`;
     }
+    if (isNumeric(t) && t.isComplex && !isScalar(t)) {
+      useRuntime("mtoc2_disp_tensor_complex");
+      return `mtoc2_disp_tensor_complex(${argsJs[0]})`;
+    }
     if (isNumeric(t) && !t.isComplex && isScalar(t)) {
       useRuntime("mtoc2_disp_double");
       return `mtoc2_disp_double(${argsJs[0]})`;
@@ -104,14 +109,11 @@ export const disp: Builtin = {
       return `($write(${argsJs[0]}.value + "\\n"))`;
     }
     if (t.kind === "Struct") {
-      // Generic runtime-walking struct disp — the C path emits a
-      // per-typedef _disp, but JS doesn't have typedefs to specialize
-      // against, so one helper handles every shape.
       useRuntime("mtoc2_disp_struct");
       return `mtoc2_disp_struct(${argsJs[0]})`;
     }
     throw new UnsupportedConstruct(
-      `'disp' emitJs for complex tensors is not yet wired`
+      `'disp' emitJs for arg kind '${t.kind}' is not yet wired`
     );
   },
   call({ args, ctx }) {
@@ -123,15 +125,11 @@ export const disp: Builtin = {
     else if (isChar(v)) ctx.helpers.write(v.value + "\n");
     else if (isComplexValue(v)) mtoc2_disp_complex(v);
     else if (isTensor(v)) {
-      // Complex tensor display lands when the JS complex tensor disp
-      // helper exists; for now, fall through to the real-only helper
-      // for real tensors and throw a clear error otherwise.
       if (v.imag !== undefined) {
-        throw new UnsupportedConstruct(
-          `'disp' 'call' for complex tensors is not yet wired`
-        );
+        mtoc2_disp_tensor_complex(v);
+      } else {
+        mtoc2_disp_tensor(v);
       }
-      mtoc2_disp_tensor(v);
     } else if (v && typeof v === "object") {
       mtoc2_disp_struct(v as Record<string, unknown>);
     } else {

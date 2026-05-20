@@ -39,10 +39,15 @@ function stripJsExportsAndImports(src: string): string {
   // The inlined codegen text needs plain declarations so the surrounding
   // emitted module can reference them by bare name.
   let out = src.replace(/^export\s+(function|const|let|class)\b/gm, "$1");
-  // Drop `import` lines from any relative path; the codegen path
-  // inlines every activated snippet into one module, so cross-snippet
-  // calls resolve via module scope and the imports become redundant.
-  out = out.replace(/^\s*import\s+.*?from\s+["'][^"']+["'];?\s*$/gm, "");
+  // Drop `import` statements (single-line and multi-line braced
+  // forms). The codegen path inlines every activated snippet into one
+  // module, so cross-snippet calls resolve via module scope and the
+  // imports become redundant. The non-greedy `[\s\S]*?` matches across
+  // newlines for braced multi-line imports.
+  out = out.replace(
+    /^\s*import\s+[\s\S]*?from\s+["'][^"']+["'];?[ \t]*$/gm,
+    ""
+  );
   return out;
 }
 

@@ -20,7 +20,10 @@ import type { Builtin } from "../../registry.js";
 import { exactComplex, exactComplexArray, exactDouble } from "../_shared.js";
 import type { RuntimeTensor } from "../../../runtime/value.js";
 import { isTensor } from "../../../runtime/value.js";
-import { mtoc2_tensor_transpose as jsTranspose } from "../../runtime/snippets.gen.js";
+import {
+  mtoc2_tensor_transpose as jsTranspose,
+  mtoc2_tensor_transpose_complex as jsTransposeComplex,
+} from "../../runtime/snippets.gen.js";
 
 function transposeExact(src: Float64Array, m: number, n: number): Float64Array {
   const out = new Float64Array(m * n);
@@ -123,9 +126,8 @@ export const transpose: Builtin = {
     const a = argTypes[0] as NumericType;
     if (!isMultiElement(a)) return argsJs[0];
     if (a.isComplex) {
-      throw new UnsupportedConstruct(
-        `'transpose' complex emitJs not yet wired (Phase 5)`
-      );
+      useRuntime("mtoc2_tensor_transpose_complex");
+      return `mtoc2_tensor_transpose_complex(${argsJs[0]})`;
     }
     useRuntime("mtoc2_tensor_transpose");
     return `mtoc2_tensor_transpose(${argsJs[0]})`;
@@ -133,16 +135,12 @@ export const transpose: Builtin = {
   call({ args, argTypes }) {
     const a = argTypes[0] as NumericType;
     if (!isMultiElement(a)) return [args[0]];
-    if (a.isComplex) {
-      throw new UnsupportedConstruct(
-        `'transpose' complex 'call' not yet wired (Phase 5)`
-      );
-    }
     if (!isTensor(args[0])) {
       throw new TypeError(
         `'transpose' runtime arg has type-system shape tensor but runtime value isn't a tensor`
       );
     }
-    return [jsTranspose(args[0]) as unknown as RuntimeTensor];
+    const fn = a.isComplex ? jsTransposeComplex : jsTranspose;
+    return [fn(args[0]) as unknown as RuntimeTensor];
   },
 };

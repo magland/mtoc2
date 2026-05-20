@@ -26,7 +26,11 @@ import {
   type RuntimeTensor,
   type RuntimeValue,
 } from "../../../runtime/value.js";
-import { mtoc2_cneg, mtoc2_tensor_uminus } from "../../runtime/snippets.gen.js";
+import {
+  mtoc2_cneg,
+  mtoc2_tensor_uminus,
+  mtoc2_tensor_uminus_complex,
+} from "../../runtime/snippets.gen.js";
 
 export const uminus: Builtin = {
   name: "uminus",
@@ -105,9 +109,9 @@ export const uminus: Builtin = {
     const ty = argTypes[0] as NumericType;
     if (isMultiElement(ty)) {
       if (ty.isComplex) {
-        throw new UnsupportedConstruct(
-          `'uminus' complex-tensor emitJs not yet wired`
-        );
+        useRuntime("mtoc2_tensor_elemwise_complex");
+        useRuntime("mtoc2_cscalar");
+        return `mtoc2_tensor_uminus_complex(${argsJs[0]})`;
       }
       useRuntime("mtoc2_tensor_elemwise_real");
       return `mtoc2_tensor_uminus(${argsJs[0]})`;
@@ -122,9 +126,11 @@ export const uminus: Builtin = {
     const ty = argTypes[0] as NumericType;
     if (isMultiElement(ty)) {
       if (ty.isComplex) {
-        throw new UnsupportedConstruct(
-          `'uminus' complex-tensor 'call' not yet wired`
-        );
+        return [
+          mtoc2_tensor_uminus_complex(
+            args[0] as RuntimeTensor
+          ) as unknown as RuntimeTensor,
+        ];
       }
       return [
         mtoc2_tensor_uminus(args[0] as RuntimeTensor) as unknown as RuntimeTensor,

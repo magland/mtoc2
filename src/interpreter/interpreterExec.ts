@@ -21,6 +21,8 @@ import { tryExtractDottedName } from "../parser/astUtils.js";
 import {
   mtoc2_disp_complex,
   mtoc2_disp_double,
+  mtoc2_disp_tensor,
+  mtoc2_disp_tensor_complex,
   mtoc2_toc_print,
   mtoc2_toc_handle_print,
 } from "../builtins/runtime/snippets.gen.js";
@@ -393,14 +395,18 @@ export function autoDisp(
   // bit-identical across modes (once the matching `.js` snippets are
   // populated).
   this.ctx.helpers.write(`${name} =\n`);
+  globalThis.$write = this.ctx.helpers.write;
   if (typeof v === "number") mtoc2_disp_double(v);
   else if (typeof v === "boolean") mtoc2_disp_double(v ? 1 : 0);
   else if (typeof v === "string") this.ctx.helpers.write(v + "\n");
   else if (isCharRV(v)) this.ctx.helpers.write(v.value + "\n");
   else if (isComplexValue(v)) mtoc2_disp_complex(v);
   else if (isTensor(v)) {
-    // Placeholder until tensor formatting lands as a paired snippet.
-    this.ctx.helpers.write(`  [${v.shape.join("x")} tensor]\n`);
+    if (v.imag !== undefined) {
+      mtoc2_disp_tensor_complex(v);
+    } else {
+      mtoc2_disp_tensor(v);
+    }
   } else {
     this.ctx.helpers.write(String(v) + "\n");
   }

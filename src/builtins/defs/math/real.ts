@@ -14,6 +14,8 @@ import {
 import { TypeError, UnsupportedConstruct } from "../../../lowering/errors.js";
 import type { Builtin } from "../../registry.js";
 import { requireRealOrComplex, exactDouble, exactComplex } from "../_shared.js";
+import type { RuntimeTensor } from "../../../runtime/value.js";
+import { mtoc2_tensor_real_complex as jsTensorRealComplex } from "../../runtime/snippets.gen.js";
 
 export const real: Builtin = {
   name: "real",
@@ -65,13 +67,10 @@ export const real: Builtin = {
     const a = argTypes[0] as NumericType;
     if (isMultiElement(a)) {
       if (a.isComplex) {
-        throw new UnsupportedConstruct(
-          `'real' complex-tensor emitJs not yet wired (Phase 5)`
-        );
+        useRuntime("mtoc2_tensor_unary_complex_math");
+        useRuntime("mtoc2_cscalar");
+        return `mtoc2_tensor_real_complex(${argsJs[0]})`;
       }
-      // Real tensor — identity, but the consumer expects a freshly-
-      // owned value; JS GC handles it, so a structural copy via
-      // makeTensor keeps the lifecycle invariant clean.
       useRuntime("mtoc2_tensor_copy");
       return `mtoc2_tensor_copy(${argsJs[0]})`;
     }
@@ -85,9 +84,9 @@ export const real: Builtin = {
     const a = argTypes[0] as NumericType;
     if (isMultiElement(a)) {
       if (a.isComplex) {
-        throw new UnsupportedConstruct(
-          `'real' complex-tensor 'call' not yet wired (Phase 5)`
-        );
+        return [
+          jsTensorRealComplex(args[0] as RuntimeTensor) as unknown as RuntimeTensor,
+        ];
       }
       return [args[0]];
     }

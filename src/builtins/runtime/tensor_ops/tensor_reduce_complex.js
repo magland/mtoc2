@@ -5,12 +5,12 @@
 import { mtoc2_tensor_alloc_nd } from "../tensor/tensor_alloc_nd.js";
 import { mtoc2_tensor_alloc_nd_complex } from "../tensor/tensor_alloc_nd_complex.js";
 
-function squeeze_trailing(dims) {
+function cSqueezeTrailing(dims) {
   while (dims.length > 2 && dims[dims.length - 1] === 1) dims.pop();
   return dims;
 }
 
-function laneIm(t, i) {
+function cReduceLaneIm(t, i) {
   return t.imag !== undefined ? t.imag[i] : 0;
 }
 
@@ -18,7 +18,7 @@ function laneIm(t, i) {
 function complexAccumAll(t, init, accum, finalize) {
   let acc = { ...init };
   for (let i = 0; i < t.data.length; i++) {
-    acc = accum(acc, { re: t.data[i], im: laneIm(t, i) });
+    acc = accum(acc, { re: t.data[i], im: cReduceLaneIm(t, i) });
   }
   return finalize(acc, t.data.length);
 }
@@ -43,7 +43,7 @@ function complexAccumDim(t, dim, init, accum, finalize) {
   for (let i = dimIdx + 1; i < t.shape.length; i++) after *= t.shape[i];
   const outDims = t.shape.slice();
   outDims[dimIdx] = 1;
-  squeeze_trailing(outDims);
+  cSqueezeTrailing(outDims);
   const out = mtoc2_tensor_alloc_nd_complex(outDims.length, outDims);
   for (let aft = 0; aft < after; aft++) {
     for (let bef = 0; bef < before; bef++) {
@@ -51,7 +51,7 @@ function complexAccumDim(t, dim, init, accum, finalize) {
       let acc = { ...init };
       for (let k = 0; k < axis; k++) {
         const off = base + k * before;
-        acc = accum(acc, { re: t.data[off], im: laneIm(t, off) });
+        acc = accum(acc, { re: t.data[off], im: cReduceLaneIm(t, off) });
       }
       const fin = finalize(acc, axis);
       const dst = aft * before + bef;
@@ -62,15 +62,15 @@ function complexAccumDim(t, dim, init, accum, finalize) {
   return out;
 }
 
-const sumInit = { re: 0, im: 0 };
-const prodInit = { re: 1, im: 0 };
-const sumAccum = (a, x) => ({ re: a.re + x.re, im: a.im + x.im });
-const prodAccum = (a, x) => ({
+const cSumInit = { re: 0, im: 0 };
+const cProdInit = { re: 1, im: 0 };
+const cSumAccum = (a, x) => ({ re: a.re + x.re, im: a.im + x.im });
+const cProdAccum = (a, x) => ({
   re: a.re * x.re - a.im * x.im,
   im: a.re * x.im + a.im * x.re,
 });
-const idFinalize = (a) => a;
-const meanFinalize = (a, n) =>
+const cIdFinalize = (a) => a;
+const cMeanFinalize = (a, n) =>
   n === 0 ? { re: NaN, im: NaN } : { re: a.re / n, im: a.im / n };
 
 export const mtoc2_sum_complex_all = (t) =>
@@ -94,7 +94,7 @@ function complexMinmaxAll(t, cmp) {
   let mIm = 0;
   for (let i = 0; i < t.data.length; i++) {
     const xr = t.data[i];
-    const xi = laneIm(t, i);
+    const xi = cReduceLaneIm(t, i);
     if (xr !== xr || xi !== xi) continue;
     if (!found || complexBetter(xr, xi, mRe, mIm, cmp)) {
       mRe = xr;
@@ -133,7 +133,7 @@ function complexMinmaxDim(t, dim, cmp) {
   for (let i = dimIdx + 1; i < t.shape.length; i++) after *= t.shape[i];
   const outDims = t.shape.slice();
   outDims[dimIdx] = 1;
-  squeeze_trailing(outDims);
+  cSqueezeTrailing(outDims);
   const out = mtoc2_tensor_alloc_nd_complex(outDims.length, outDims);
   for (let aft = 0; aft < after; aft++) {
     for (let bef = 0; bef < before; bef++) {
@@ -144,7 +144,7 @@ function complexMinmaxDim(t, dim, cmp) {
       for (let k = 0; k < axis; k++) {
         const off = base + k * before;
         const xr = t.data[off];
-        const xi = laneIm(t, off);
+        const xi = cReduceLaneIm(t, off);
         if (xr !== xr || xi !== xi) continue;
         if (!found || complexBetter(xr, xi, mRe, mIm, cmp)) {
           mRe = xr;
@@ -170,7 +170,7 @@ function complexLogicalAll(t, emptyResult, shortPredicate) {
   if (t.data.length === 0) return emptyResult;
   for (let i = 0; i < t.data.length; i++) {
     const xr = t.data[i];
-    const xi = laneIm(t, i);
+    const xi = cReduceLaneIm(t, i);
     const x = xr !== 0 || xi !== 0;
     if (shortPredicate(x)) return emptyResult === 1 ? 0 : 1;
   }
@@ -183,7 +183,7 @@ function complexLogicalDim(t, dim, emptyResult, shortPredicate) {
     const out = mtoc2_tensor_alloc_nd(t.shape.length, t.shape.slice());
     for (let i = 0; i < t.data.length; i++) {
       const xr = t.data[i];
-      const xi = laneIm(t, i);
+      const xi = cReduceLaneIm(t, i);
       out.data[i] = xr !== 0 || xi !== 0 ? 1 : 0;
     }
     return out;
@@ -196,7 +196,7 @@ function complexLogicalDim(t, dim, emptyResult, shortPredicate) {
   for (let i = dimIdx + 1; i < t.shape.length; i++) after *= t.shape[i];
   const outDims = t.shape.slice();
   outDims[dimIdx] = 1;
-  squeeze_trailing(outDims);
+  cSqueezeTrailing(outDims);
   const out = mtoc2_tensor_alloc_nd(outDims.length, outDims);
   for (let aft = 0; aft < after; aft++) {
     for (let bef = 0; bef < before; bef++) {
@@ -204,7 +204,7 @@ function complexLogicalDim(t, dim, emptyResult, shortPredicate) {
       let res = emptyResult;
       for (let k = 0; k < axis; k++) {
         const off = base + k * before;
-        const x = t.data[off] !== 0 || laneIm(t, off) !== 0;
+        const x = t.data[off] !== 0 || cReduceLaneIm(t, off) !== 0;
         if (shortPredicate(x)) {
           res = emptyResult === 1 ? 0 : 1;
           break;
@@ -216,8 +216,8 @@ function complexLogicalDim(t, dim, emptyResult, shortPredicate) {
   return out;
 }
 
-const anyShort = (x) => x;
-const allShort = (x) => !x;
+const cAnyShort = (x) => x;
+const cAllShort = (x) => !x;
 export const mtoc2_any_complex_all = (t) => complexLogicalAll(t, 0, anyShort);
 export const mtoc2_any_complex_dim = (t, d) =>
   complexLogicalDim(t, d, 0, anyShort);

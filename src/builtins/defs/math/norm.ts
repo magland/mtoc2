@@ -26,6 +26,7 @@ import {
 import {
   mtoc2_cabs,
   mtoc2_norm2_real as jsNorm2Real,
+  mtoc2_norm2_complex as jsNorm2Complex,
 } from "../../runtime/snippets.gen.js";
 import {
   exactDouble,
@@ -118,13 +119,10 @@ export const norm: Builtin = {
   emitJs({ argsJs, argTypes, useRuntime }) {
     const a = argTypes[0] as NumericType;
     if (isMultiElement(a)) {
-      if (a.isComplex) {
-        throw new UnsupportedConstruct(
-          `'norm' complex-tensor emitJs not yet wired`
-        );
-      }
       useRuntime("mtoc2_tensor_norm");
-      return `mtoc2_norm2_real(${argsJs[0]})`;
+      return a.isComplex
+        ? `mtoc2_norm2_complex(${argsJs[0]})`
+        : `mtoc2_norm2_real(${argsJs[0]})`;
     }
     if (a.isComplex) {
       useRuntime("mtoc2_cscalar");
@@ -135,12 +133,8 @@ export const norm: Builtin = {
   call({ args, argTypes }) {
     const a = argTypes[0] as NumericType;
     if (isMultiElement(a)) {
-      if (a.isComplex) {
-        throw new UnsupportedConstruct(
-          `'norm' complex-tensor 'call' not yet wired`
-        );
-      }
-      return [jsNorm2Real(args[0] as RuntimeTensor)];
+      const fn = a.isComplex ? jsNorm2Complex : jsNorm2Real;
+      return [fn(args[0] as RuntimeTensor)];
     }
     if (a.isComplex) {
       const v = args[0];

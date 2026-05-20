@@ -55,7 +55,10 @@ import {
 import type { DimInfo, Type } from "../../../lowering/types.js";
 import type { Builtin } from "../../registry.js";
 import type { RuntimeTensor } from "../../../runtime/value.js";
-import { mtoc2_reshape_nd as jsReshape } from "../../runtime/snippets.gen.js";
+import {
+  mtoc2_reshape_nd as jsReshape,
+  mtoc2_reshape_nd_complex as jsReshapeComplex,
+} from "../../runtime/snippets.gen.js";
 
 const MAX_DIM_ARGS = MTOC2_MAX_NDIM;
 import {
@@ -370,18 +373,12 @@ export const reshape: Builtin = {
     return `${fn}(${argsC[0]}, ${resolved.axes.length}, (long[]){${dimList}})`;
   },
   emitJs({ argsJs, argTypes, useRuntime }) {
-    useRuntime("mtoc2_reshape_nd");
     const resolved = resolveNewShape(argTypes.slice(1));
     const newShape = exactShape(resolved);
     if (newShape !== undefined && newShape.every(d => d === 1)) {
       return argsJs[0];
     }
     const a = argTypes[0];
-    if (isNumeric(a) && a.isComplex) {
-      throw new UnsupportedConstruct(
-        `'reshape' complex emitJs not yet wired (Phase 5)`
-      );
-    }
     const dimArgsJs = argsJs.slice(1);
     const dimList = resolved.axes
       .map(axis =>
@@ -392,16 +389,16 @@ export const reshape: Builtin = {
             : `Math.trunc(${dimArgsJs[axis.argIndex]})`
       )
       .join(", ");
+    if (isNumeric(a) && a.isComplex) {
+      useRuntime("mtoc2_reshape_nd_complex");
+      return `mtoc2_reshape_nd_complex(${argsJs[0]}, ${resolved.axes.length}, [${dimList}])`;
+    }
+    useRuntime("mtoc2_reshape_nd");
     return `mtoc2_reshape_nd(${argsJs[0]}, ${resolved.axes.length}, [${dimList}])`;
   },
   call({ args, argTypes }) {
     const resolved = resolveNewShape(argTypes.slice(1));
     const a = argTypes[0];
-    if (isNumeric(a) && a.isComplex) {
-      throw new UnsupportedConstruct(
-        `'reshape' complex 'call' not yet wired (Phase 5)`
-      );
-    }
     const dims: number[] = [];
     for (const axis of resolved.axes) {
       if (axis.kind === "exact") {
@@ -415,8 +412,9 @@ export const reshape: Builtin = {
         );
       }
     }
+    const reshapeFn = isNumeric(a) && a.isComplex ? jsReshapeComplex : jsReshape;
     return [
-      jsReshape(
+      reshapeFn(
         args[0] as RuntimeTensor,
         resolved.axes.length,
         dims

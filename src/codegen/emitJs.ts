@@ -296,12 +296,6 @@ function emitStmt(s: IRStmt, indent: string, state: RuntimeState): string {
       return emitMultiAssignCall(s, indent, state);
 
     case "IndexStore": {
-      if (s.base.ty.kind === "Numeric" && s.base.ty.isComplex) {
-        throw new UnsupportedConstruct(
-          `emitJs: complex IndexStore not yet wired (Phase 5)`,
-          s.span
-        );
-      }
       useRuntimeByName(state, "mtoc2_scalar_index");
       const baseName = s.base.cName;
       const idxs = s.indices.map(ix => emitExpr(ix, state));
@@ -323,6 +317,22 @@ function emitStmt(s: IRStmt, indent: string, state: RuntimeState): string {
         offset = terms.join(" + ");
       }
       const rhs = emitExpr(s.rhs, state);
+      if (s.base.ty.kind === "Numeric" && s.base.ty.isComplex) {
+        // Two-lane write. Hoist the RHS into a temp so we evaluate
+        // the right-hand expression once even when it's an
+        // unparenthesized {re, im} producer like `mtoc2_cmul(...)`.
+        const tmpOff = `_o_${baseName}`;
+        const tmpRhs = `_r_${baseName}`;
+        const rhsRe =
+          s.rhs.ty.kind === "Numeric" && s.rhs.ty.isComplex
+            ? `${tmpRhs}.re`
+            : `${tmpRhs}`;
+        const rhsIm =
+          s.rhs.ty.kind === "Numeric" && s.rhs.ty.isComplex
+            ? `${tmpRhs}.im`
+            : `0`;
+        return `${indent}{ const ${tmpOff} = ${offset}; const ${tmpRhs} = ${rhs}; ${baseName}.data[${tmpOff}] = ${rhsRe}; ${baseName}.imag[${tmpOff}] = ${rhsIm}; }`;
+      }
       return `${indent}${baseName}.data[${offset}] = ${rhs};`;
     }
 
@@ -621,15 +631,31 @@ function emitExpr(e: IRExpr, state: RuntimeState): string {
     }
 
     case "TensorBuild": {
-      // Real-only path for now (complex would mirror the C side's
-      // split re/im arrays once the JS complex tensor runtime lands).
       const [rows, cols] = e.shape;
       const ty = e.ty;
       if (ty.kind === "Numeric" && ty.isComplex) {
-        throw new UnsupportedConstruct(
-          `emitJs: complex TensorBuild not yet wired (Phase 5)`,
-          e.span
-        );
+        // For each element, split into a real / imag pair using the
+        // element's static type. Statically-real elements pad imag
+        // with 0; statically-complex elements emit `.re` / `.im`.
+        useRuntimeByName(state, "mtoc2_cscalar");
+        const res: string[] = [];
+        const ims: string[] = [];
+        for (const el of e.elements) {
+          const exprStr = emitExpr(el, state);
+          if (el.ty.kind === "Numeric" && el.ty.isComplex) {
+            res.push(`(${exprStr}).re`);
+            ims.push(`(${exprStr}).im`);
+          } else {
+            res.push(exprStr);
+            ims.push(`0`);
+          }
+        }
+        if (rows === 1) {
+          useRuntimeByName(state, "mtoc2_tensor_from_row_complex");
+          return `mtoc2_tensor_from_row_complex([${res.join(", ")}], [${ims.join(", ")}], ${cols})`;
+        }
+        useRuntimeByName(state, "mtoc2_tensor_from_matrix_complex");
+        return `mtoc2_tensor_from_matrix_complex([${res.join(", ")}], [${ims.join(", ")}], ${rows}, ${cols})`;
       }
       const flat = e.elements.map(el => emitExpr(el, state)).join(", ");
       if (rows === 1) {
@@ -647,12 +673,6 @@ function emitExpr(e: IRExpr, state: RuntimeState): string {
       if (e.base.kind !== "Var") {
         throw new Error(
           `emitJs internal: IndexLoad base must be a Var after ANF (got ${e.base.kind})`
-        );
-      }
-      if (e.base.ty.kind === "Numeric" && e.base.ty.isComplex) {
-        throw new UnsupportedConstruct(
-          `emitJs: complex IndexLoad not yet wired (Phase 5)`,
-          e.span
         );
       }
       useRuntimeByName(state, "mtoc2_scalar_index");
@@ -675,6 +695,13 @@ function emitExpr(e: IRExpr, state: RuntimeState): string {
         }
         offset = terms.join(" + ");
       }
+      if (e.base.ty.kind === "Numeric" && e.base.ty.isComplex) {
+        // Build a fresh `{re, im}` from the two lanes. Hoist the
+        // offset to a temp inline so we don't double-evaluate the
+        // bounds-checked index expression.
+        useRuntimeByName(state, "mtoc2_cscalar");
+        return `(() => { const _o = ${offset}; return {re: ${baseName}.data[_o], im: ${baseName}.imag[_o]}; })()`;
+      }
       return `${baseName}.data[${offset}]`;
     }
 
@@ -687,13 +714,6 @@ function emitExpr(e: IRExpr, state: RuntimeState): string {
     }
 
     case "TensorConcat": {
-      const ty = e.ty;
-      if (ty.kind === "Numeric" && ty.isComplex) {
-        throw new UnsupportedConstruct(
-          `emitJs: complex TensorConcat not yet wired (Phase 5)`,
-          e.span
-        );
-      }
       return emitTensorConcatJs(e, state, emitExpr);
     }
 

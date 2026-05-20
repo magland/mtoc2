@@ -13,6 +13,8 @@ import type { RuntimeTensor } from "../../../runtime/value.js";
 import {
   mtoc2_tensor_mtimes_real,
   mtoc2_tensor_mtimes_real_scalar,
+  mtoc2_tensor_mtimes_complex,
+  mtoc2_tensor_mtimes_complex_scalar,
 } from "../../runtime/snippets.gen.js";
 import { times } from "./times.js";
 import { exactRealArray, requireRealOrComplex } from "../_shared.js";
@@ -214,16 +216,21 @@ export const mtimes: Builtin = {
     }
     const a = argTypes[0] as NumericType;
     const b = argTypes[1] as NumericType;
-    if (a.isComplex || b.isComplex) {
-      throw new UnsupportedConstruct(
-        `'mtimes' complex tensor*tensor emitJs not yet wired (Phase 5)`
-      );
+    const isComplex = a.isComplex || b.isComplex;
+    if (isComplex) {
+      useRuntime("mtoc2_tensor_mtimes_complex");
+      useRuntime("mtoc2_cscalar");
+    } else {
+      useRuntime("mtoc2_tensor_mtimes_real");
     }
-    useRuntime("mtoc2_tensor_mtimes_real");
     if (a.shape?.[0] === 1 && b.shape?.[1] === 1) {
-      return `mtoc2_tensor_mtimes_real_scalar(${argsJs[0]}, ${argsJs[1]})`;
+      return isComplex
+        ? `mtoc2_tensor_mtimes_complex_scalar(${argsJs[0]}, ${argsJs[1]})`
+        : `mtoc2_tensor_mtimes_real_scalar(${argsJs[0]}, ${argsJs[1]})`;
     }
-    return `mtoc2_tensor_mtimes_real(${argsJs[0]}, ${argsJs[1]})`;
+    return isComplex
+      ? `mtoc2_tensor_mtimes_complex(${argsJs[0]}, ${argsJs[1]})`
+      : `mtoc2_tensor_mtimes_real(${argsJs[0]}, ${argsJs[1]})`;
   },
   call(args) {
     const { argTypes } = args;
@@ -232,17 +239,17 @@ export const mtimes: Builtin = {
     }
     const a = argTypes[0] as NumericType;
     const b = argTypes[1] as NumericType;
-    if (a.isComplex || b.isComplex) {
-      throw new UnsupportedConstruct(
-        `'mtimes' complex tensor*tensor 'call' not yet wired (Phase 5)`
-      );
-    }
+    const isComplex = a.isComplex || b.isComplex;
     const at = args.args[0] as RuntimeTensor;
     const bt = args.args[1] as RuntimeTensor;
     if (a.shape?.[0] === 1 && b.shape?.[1] === 1) {
-      return [mtoc2_tensor_mtimes_real_scalar(at, bt)];
+      return isComplex
+        ? [mtoc2_tensor_mtimes_complex_scalar(at, bt)]
+        : [mtoc2_tensor_mtimes_real_scalar(at, bt)];
     }
-    return [mtoc2_tensor_mtimes_real(at, bt) as unknown as RuntimeTensor];
+    return isComplex
+      ? [mtoc2_tensor_mtimes_complex(at, bt) as unknown as RuntimeTensor]
+      : [mtoc2_tensor_mtimes_real(at, bt) as unknown as RuntimeTensor];
   },
   // Elementwise per-slot template — only valid when at least one
   // operand is scalar (tensor * tensor is matrix product). The

@@ -54,6 +54,20 @@ import {
   mtoc2_tensor_fix,
   mtoc2_tensor_round,
   mtoc2_tensor_sign,
+  mtoc2_tensor_cos_complex,
+  mtoc2_tensor_sin_complex,
+  mtoc2_tensor_tan_complex,
+  mtoc2_tensor_atan_complex,
+  mtoc2_tensor_exp_complex,
+  mtoc2_tensor_log_complex,
+  mtoc2_tensor_log2_complex,
+  mtoc2_tensor_log10_complex,
+  mtoc2_tensor_sqrt_complex,
+  mtoc2_tensor_floor_complex,
+  mtoc2_tensor_ceil_complex,
+  mtoc2_tensor_fix_complex,
+  mtoc2_tensor_round_complex,
+  mtoc2_tensor_sign_complex,
 } from "../../runtime/snippets.gen.js";
 import {
   isComplexValue,
@@ -80,6 +94,23 @@ const JS_TENSOR_UNARY: Record<string, TensorUnary> = {
   fix: mtoc2_tensor_fix as unknown as TensorUnary,
   round: mtoc2_tensor_round as unknown as TensorUnary,
   sign: mtoc2_tensor_sign as unknown as TensorUnary,
+};
+
+const JS_TENSOR_UNARY_COMPLEX: Record<string, TensorUnary> = {
+  cos: mtoc2_tensor_cos_complex as unknown as TensorUnary,
+  sin: mtoc2_tensor_sin_complex as unknown as TensorUnary,
+  tan: mtoc2_tensor_tan_complex as unknown as TensorUnary,
+  atan: mtoc2_tensor_atan_complex as unknown as TensorUnary,
+  exp: mtoc2_tensor_exp_complex as unknown as TensorUnary,
+  log: mtoc2_tensor_log_complex as unknown as TensorUnary,
+  log2: mtoc2_tensor_log2_complex as unknown as TensorUnary,
+  log10: mtoc2_tensor_log10_complex as unknown as TensorUnary,
+  sqrt: mtoc2_tensor_sqrt_complex as unknown as TensorUnary,
+  floor: mtoc2_tensor_floor_complex as unknown as TensorUnary,
+  ceil: mtoc2_tensor_ceil_complex as unknown as TensorUnary,
+  fix: mtoc2_tensor_fix_complex as unknown as TensorUnary,
+  round: mtoc2_tensor_round_complex as unknown as TensorUnary,
+  sign: mtoc2_tensor_sign_complex as unknown as TensorUnary,
 };
 
 export interface UnaryRealMathOpts {
@@ -239,9 +270,14 @@ export function defineUnaryRealMath(opts: UnaryRealMathOpts): Builtin {
       const ty = argTypes[0] as NumericType;
       if (isNumeric(ty) && ty.isComplex) {
         if (isMultiElement(ty)) {
-          throw new UnsupportedConstruct(
-            `'${name}' complex-tensor emitJs not yet wired`
-          );
+          if (JS_TENSOR_UNARY_COMPLEX[name] === undefined) {
+            throw new UnsupportedConstruct(
+              `'${name}' complex-tensor emitJs has no JS kernel registered`
+            );
+          }
+          useRuntime("mtoc2_tensor_unary_complex_math");
+          useRuntime("mtoc2_cscalar");
+          return `mtoc2_tensor_${name}_complex(${argsJs[0]})`;
         }
         useRuntime("mtoc2_cscalar");
         return `${complex!.cFnComplex}(${argsJs[0]})`;
@@ -261,9 +297,13 @@ export function defineUnaryRealMath(opts: UnaryRealMathOpts): Builtin {
       const ty = argTypes[0] as NumericType;
       if (isNumeric(ty) && ty.isComplex) {
         if (isMultiElement(ty)) {
-          throw new UnsupportedConstruct(
-            `'${name}' complex-tensor 'call' not yet wired`
-          );
+          const kernel = JS_TENSOR_UNARY_COMPLEX[name];
+          if (kernel === undefined) {
+            throw new UnsupportedConstruct(
+              `'${name}' complex-tensor 'call' has no JS kernel registered`
+            );
+          }
+          return [kernel(args[0] as RuntimeTensor)];
         }
         const v = args[0];
         const cx = isComplexValue(v)

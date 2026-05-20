@@ -17,8 +17,14 @@ import {
   exactComplexArray,
 } from "../_shared.js";
 import { defineUnaryRealMath } from "./_unary_real.js";
-import { isComplexValue } from "../../../runtime/value.js";
-import { mtoc2_cabs } from "../../runtime/snippets.gen.js";
+import {
+  isComplexValue,
+  type RuntimeTensor,
+} from "../../../runtime/value.js";
+import {
+  mtoc2_cabs,
+  mtoc2_tensor_abs_complex as jsTensorAbsComplex,
+} from "../../runtime/snippets.gen.js";
 
 /** Real-input `abs`. Result is `nonneg` in general; `positive` when
  *  input is known to be nonzero (`positive`, `negative`, or `nonzero`). */
@@ -98,9 +104,9 @@ export const abs: Builtin = {
     const a = argTypes[0] as NumericType;
     if (a.isComplex) {
       if (isMultiElement(a)) {
-        throw new UnsupportedConstruct(
-          `'abs' complex-tensor emitJs not yet wired`
-        );
+        useRuntime("mtoc2_tensor_unary_complex_math");
+        useRuntime("mtoc2_cscalar");
+        return `mtoc2_tensor_abs_complex(${argsJs[0]})`;
       }
       useRuntime("mtoc2_cscalar");
       return `mtoc2_cabs(${argsJs[0]})`;
@@ -111,9 +117,11 @@ export const abs: Builtin = {
     const a = args.argTypes[0] as NumericType;
     if (a.isComplex) {
       if (isMultiElement(a)) {
-        throw new UnsupportedConstruct(
-          `'abs' complex-tensor 'call' not yet wired`
-        );
+        return [
+          jsTensorAbsComplex(
+            args.args[0] as RuntimeTensor
+          ) as unknown as RuntimeTensor,
+        ];
       }
       const v = args.args[0];
       const cx = isComplexValue(v) ? v : { re: Number(v), im: 0 };

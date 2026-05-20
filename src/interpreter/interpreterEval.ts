@@ -14,10 +14,12 @@ import {
 } from "../parser/index.js";
 import {
   isChar as isCharRV,
+  isComplexValue,
   isHandleValue,
   isTensor,
   isTruthy,
   makeChar,
+  makeComplexTensor,
   makeTensor,
   toScalarNumber,
   type RuntimeTensor,
@@ -125,6 +127,14 @@ export function evalExpr(this: Interpreter, e: Expr): RuntimeValue {
     case "Unary": {
       const a = this.evalExpr(e.operand);
       if (e.op === UnaryOperation.Plus) return a;
+      // `'` (conjugate transpose) lowers to `transpose(conj(z))` in
+      // the c-aot/js-aot pipeline. The interpreter walks the AST
+      // pre-lowering, so we mimic the same composition: conj first,
+      // then transpose.
+      if (e.op === UnaryOperation.Transpose) {
+        const conjed = this.callByName("conj", [a], 1, e.span)[0];
+        return this.callByName("transpose", [conjed], 1, e.span)[0];
+      }
       const name = UNOP_BUILTIN[e.op];
       if (!name) {
         throw new UnsupportedConstruct(
@@ -188,24 +198,29 @@ export function evalExpr(this: Interpreter, e: Expr): RuntimeValue {
         v: RuntimeValue;
         rows: number;
         cols: number;
-        isScalar: boolean;
+        kind: "scalar-real" | "scalar-complex" | "tensor";
       }
       const keptRows: EvalCell[][] = [];
+      let anyComplex = false;
       for (const row of srcRows) {
         const erow: EvalCell[] = [];
         for (const cellExpr of row) {
           const v = this.evalExpr(cellExpr);
           if (typeof v === "number") {
-            erow.push({ v, rows: 1, cols: 1, isScalar: true });
+            erow.push({ v, rows: 1, cols: 1, kind: "scalar-real" });
+          } else if (isComplexValue(v)) {
+            anyComplex = true;
+            erow.push({ v, rows: 1, cols: 1, kind: "scalar-complex" });
           } else if (isTensor(v)) {
             if (v.data.length === 0) continue;
+            if (v.imag !== undefined) anyComplex = true;
             const r = v.shape[0] ?? 1;
             const c = v.shape[1] ?? 1;
-            erow.push({ v, rows: r, cols: c, isScalar: false });
+            erow.push({ v, rows: r, cols: c, kind: "tensor" });
           } else {
             throw new UnsupportedConstruct(
               `interpreter: tensor literal cells must be scalar numbers ` +
-                `or real tensors (got ${typeof v})`,
+                `or tensors (got ${typeof v})`,
               e.span
             );
           }
@@ -240,27 +255,41 @@ export function evalExpr(this: Interpreter, e: Expr): RuntimeValue {
       const totalRows = rowHeights.reduce((s, h) => s + h, 0);
 
       const data = new Float64Array(totalRows * totalCols);
+      const imag = anyComplex
+        ? new Float64Array(totalRows * totalCols)
+        : undefined;
       let rowOff = 0;
       for (let i = 0; i < keptRows.length; i++) {
         const row = keptRows[i];
         const cellRows = rowHeights[i];
         let colOff = 0;
         for (const cell of row) {
-          if (cell.isScalar) {
+          if (cell.kind === "scalar-real") {
             data[rowOff + colOff * totalRows] = cell.v as number;
+            colOff += 1;
+          } else if (cell.kind === "scalar-complex") {
+            const cx = cell.v as { re: number; im: number };
+            const idx = rowOff + colOff * totalRows;
+            data[idx] = cx.re;
+            if (imag) imag[idx] = cx.im;
             colOff += 1;
           } else {
             const t = cell.v as Extract<RuntimeValue, { mtoc2Tag: "tensor" }>;
             for (let sc = 0; sc < cell.cols; sc++) {
               for (let sr = 0; sr < cell.rows; sr++) {
-                data[rowOff + sr + (colOff + sc) * totalRows] =
-                  t.data[sr + sc * cell.rows];
+                const dstIdx = rowOff + sr + (colOff + sc) * totalRows;
+                const srcIdx = sr + sc * cell.rows;
+                data[dstIdx] = t.data[srcIdx];
+                if (imag) imag[dstIdx] = t.imag ? t.imag[srcIdx] : 0;
               }
             }
             colOff += cell.cols;
           }
         }
         rowOff += cellRows;
+      }
+      if (imag !== undefined) {
+        return makeComplexTensor([totalRows, totalCols], data, imag);
       }
       return makeTensor([totalRows, totalCols], data);
     }

@@ -19,7 +19,12 @@ export function emitTensorConcatJs(
   state: RuntimeState,
   emit: (e: IRExpr, state: RuntimeState) => string
 ): string {
-  useRuntimeByName(state, "mtoc2_tensor_alloc_nd");
+  const isComplex = e.ty.kind === "Numeric" && e.ty.isComplex;
+  if (isComplex) {
+    useRuntimeByName(state, "mtoc2_tensor_alloc_nd_complex");
+  } else {
+    useRuntimeByName(state, "mtoc2_tensor_alloc_nd");
+  }
 
   const allStatic =
     e.shape.every(s => s !== null) &&
@@ -31,11 +36,12 @@ export function emitTensorConcatJs(
       e.shape as number[],
       e.rowHeights as number[],
       e.cellCols as number[][],
+      isComplex,
       state,
       emit
     );
   }
-  return emitTensorConcatJsDynamic(e, state, emit);
+  return emitTensorConcatJsDynamic(e, isComplex, state, emit);
 }
 
 function emitTensorConcatJsStatic(
@@ -43,14 +49,21 @@ function emitTensorConcatJsStatic(
   shape: number[],
   rowHeights: number[],
   cellCols: number[][],
+  isComplex: boolean,
   state: RuntimeState,
   emit: (e: IRExpr, state: RuntimeState) => string
 ): string {
   const [totalRows] = shape;
   const lines: string[] = [];
-  lines.push(
-    `const _mtoc2_t = mtoc2_tensor_alloc_nd(2, [${totalRows}, ${shape[1]}]);`
-  );
+  if (isComplex) {
+    lines.push(
+      `const _mtoc2_t = mtoc2_tensor_alloc_nd_complex(2, [${totalRows}, ${shape[1]}]);`
+    );
+  } else {
+    lines.push(
+      `const _mtoc2_t = mtoc2_tensor_alloc_nd(2, [${totalRows}, ${shape[1]}]);`
+    );
+  }
 
   let rowOff = 0;
   for (let i = 0; i < cells.length; i++) {
@@ -61,10 +74,22 @@ function emitTensorConcatJsStatic(
       const cell = row[j];
       const cellColsHere = cellCols[i][j];
       const cellStr = emit(cell, state);
+      const cellIsComplex =
+        cell.ty.kind === "Numeric" && cell.ty.isComplex;
 
       if (cellRows === 1 && cellColsHere === 1) {
         const dstIdx = `${rowOff} + ${colOff} * ${totalRows}`;
-        lines.push(`_mtoc2_t.data[${dstIdx}] = ${cellStr};`);
+        if (isComplex) {
+          // Hoist the cell into a temp so we evaluate it once.
+          const tmp = `_mtoc2_c_${i}_${j}`;
+          lines.push(`const ${tmp} = ${cellStr};`);
+          const re = cellIsComplex ? `${tmp}.re` : tmp;
+          const im = cellIsComplex ? `${tmp}.im` : `0`;
+          lines.push(`_mtoc2_t.data[${dstIdx}] = ${re};`);
+          lines.push(`_mtoc2_t.imag[${dstIdx}] = ${im};`);
+        } else {
+          lines.push(`_mtoc2_t.data[${dstIdx}] = ${cellStr};`);
+        }
       } else {
         lines.push(
           `for (let _mtoc2_sc = 0; _mtoc2_sc < ${cellColsHere}; _mtoc2_sc++) {`
@@ -74,9 +99,25 @@ function emitTensorConcatJsStatic(
         );
         const dstIdx = `(${rowOff} + _mtoc2_sr) + (${colOff} + _mtoc2_sc) * ${totalRows}`;
         const srcIdx = `_mtoc2_sr + _mtoc2_sc * ${cellRows}`;
-        lines.push(
-          `    _mtoc2_t.data[${dstIdx}] = ${cellStr}.data[${srcIdx}];`
-        );
+        if (isComplex) {
+          // Pin the cell into a temp at the outer scope of the
+          // double loop so we don't re-evaluate the producer
+          // expression per element.
+          const tmp = `_mtoc2_c_${i}_${j}`;
+          // Emit the temp binding outside the loops by re-ordering
+          // — easier: emit the loops inline using nested IIFE.
+          lines.push(`    const ${tmp} = ${cellStr};`);
+          lines.push(
+            `    _mtoc2_t.data[${dstIdx}] = ${tmp}.data[${srcIdx}];`
+          );
+          lines.push(
+            `    _mtoc2_t.imag[${dstIdx}] = ${tmp}.imag !== undefined ? ${tmp}.imag[${srcIdx}] : 0;`
+          );
+        } else {
+          lines.push(
+            `    _mtoc2_t.data[${dstIdx}] = ${cellStr}.data[${srcIdx}];`
+          );
+        }
         lines.push(`  }`);
         lines.push(`}`);
       }
@@ -90,9 +131,15 @@ function emitTensorConcatJsStatic(
 
 function emitTensorConcatJsDynamic(
   e: Extract<IRExpr, { kind: "TensorConcat" }>,
+  isComplex: boolean,
   state: RuntimeState,
   emit: (e: IRExpr, state: RuntimeState) => string
 ): string {
+  if (isComplex) {
+    throw new Error(
+      "emitJs: dynamic-shape complex TensorConcat is not yet supported"
+    );
+  }
   const lines: string[] = [];
   const cellStrs: string[][] = e.cells.map(row => row.map(c => emit(c, state)));
   const cellRowsExpr = (i: number, j: number): string => {

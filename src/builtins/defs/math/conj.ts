@@ -26,6 +26,8 @@ import {
   exactComplexArray,
   exactRealArray,
 } from "../_shared.js";
+import type { RuntimeTensor } from "../../../runtime/value.js";
+import { mtoc2_tensor_conj_complex as jsTensorConjComplex } from "../../runtime/snippets.gen.js";
 
 export const conj: Builtin = {
   name: "conj",
@@ -95,9 +97,9 @@ export const conj: Builtin = {
     const a = argTypes[0] as NumericType;
     if (isMultiElement(a)) {
       if (a.isComplex) {
-        throw new UnsupportedConstruct(
-          `'conj' complex-tensor emitJs not yet wired (Phase 5)`
-        );
+        useRuntime("mtoc2_tensor_unary_complex_math");
+        useRuntime("mtoc2_cscalar");
+        return `mtoc2_tensor_conj_complex(${argsJs[0]})`;
       }
       useRuntime("mtoc2_tensor_copy");
       return `mtoc2_tensor_copy(${argsJs[0]})`;
@@ -112,9 +114,9 @@ export const conj: Builtin = {
     const a = argTypes[0] as NumericType;
     if (isMultiElement(a)) {
       if (a.isComplex) {
-        throw new UnsupportedConstruct(
-          `'conj' complex-tensor 'call' not yet wired (Phase 5)`
-        );
+        return [
+          jsTensorConjComplex(args[0] as RuntimeTensor) as unknown as RuntimeTensor,
+        ];
       }
       return [args[0]];
     }

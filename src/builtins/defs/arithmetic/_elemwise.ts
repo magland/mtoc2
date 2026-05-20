@@ -64,6 +64,20 @@ import {
   mtoc2_tensor_mod_ts,
   mtoc2_tensor_mod_st,
   mtoc2_tensor_mod_bcast_tt,
+  mtoc2_tensor_plus_complex_tt,
+  mtoc2_tensor_plus_complex_ts,
+  mtoc2_tensor_plus_complex_bcast_tt,
+  mtoc2_tensor_minus_complex_tt,
+  mtoc2_tensor_minus_complex_ts,
+  mtoc2_tensor_minus_complex_st,
+  mtoc2_tensor_minus_complex_bcast_tt,
+  mtoc2_tensor_times_complex_tt,
+  mtoc2_tensor_times_complex_ts,
+  mtoc2_tensor_times_complex_bcast_tt,
+  mtoc2_tensor_rdivide_complex_tt,
+  mtoc2_tensor_rdivide_complex_ts,
+  mtoc2_tensor_rdivide_complex_st,
+  mtoc2_tensor_rdivide_complex_bcast_tt,
 } from "../../runtime/snippets.gen.js";
 
 /** Project a runtime scalar into `{re, im}` form for complex
@@ -115,7 +129,30 @@ interface ComplexTensorHelperSet {
   st?: TensorHelperScalarComplex;
   bcast_tt: TensorHelper2;
 }
-const COMPLEX_TENSOR_HELPERS: Record<string, ComplexTensorHelperSet> = {};
+const COMPLEX_TENSOR_HELPERS: Record<string, ComplexTensorHelperSet> = {
+  plus: {
+    tt: mtoc2_tensor_plus_complex_tt as unknown as TensorHelper2,
+    ts: mtoc2_tensor_plus_complex_ts as unknown as TensorHelperComplexScalar,
+    bcast_tt: mtoc2_tensor_plus_complex_bcast_tt as unknown as TensorHelper2,
+  },
+  minus: {
+    tt: mtoc2_tensor_minus_complex_tt as unknown as TensorHelper2,
+    ts: mtoc2_tensor_minus_complex_ts as unknown as TensorHelperComplexScalar,
+    st: mtoc2_tensor_minus_complex_st as unknown as TensorHelperScalarComplex,
+    bcast_tt: mtoc2_tensor_minus_complex_bcast_tt as unknown as TensorHelper2,
+  },
+  times: {
+    tt: mtoc2_tensor_times_complex_tt as unknown as TensorHelper2,
+    ts: mtoc2_tensor_times_complex_ts as unknown as TensorHelperComplexScalar,
+    bcast_tt: mtoc2_tensor_times_complex_bcast_tt as unknown as TensorHelper2,
+  },
+  rdivide: {
+    tt: mtoc2_tensor_rdivide_complex_tt as unknown as TensorHelper2,
+    ts: mtoc2_tensor_rdivide_complex_ts as unknown as TensorHelperComplexScalar,
+    st: mtoc2_tensor_rdivide_complex_st as unknown as TensorHelperScalarComplex,
+    bcast_tt: mtoc2_tensor_rdivide_complex_bcast_tt as unknown as TensorHelper2,
+  },
+};
 
 const TENSOR_HELPERS: Record<string, TensorHelperSet> = {
   plus: {
