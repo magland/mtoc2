@@ -35,4 +35,20 @@ export class Environment {
   child(): Environment {
     return new Environment(this);
   }
+
+  /** Iterate every visible binding, walking parent frames so
+   *  anonymous-function captures see the same names a normal lookup
+   *  would. Closer frames shadow farther ones. */
+  *entries(): IterableIterator<[string, RuntimeValue]> {
+    const seen = new Set<string>();
+    let cur: Environment | undefined = this;
+    while (cur) {
+      for (const [k, v] of cur.vars) {
+        if (seen.has(k)) continue;
+        seen.add(k);
+        yield [k, v];
+      }
+      cur = cur.parent;
+    }
+  }
 }

@@ -31,11 +31,13 @@ import { Environment } from "./environment.js";
 import type { RuntimeContext } from "../runtime/context.js";
 import {
   isChar as isCharRV,
+  isHandleValue,
   isTensor,
   isTruthy,
   makeChar,
   makeTensor,
   toScalarNumber,
+  type RuntimeHandle,
   type RuntimeValue,
 } from "../runtime/value.js";
 import { getBuiltin } from "../builtins/index.js";
@@ -167,21 +169,39 @@ export class Interpreter {
       }
       case "MultiAssign": {
         // Builtins return RuntimeValue[]; user functions return same
-        // shape. Both come through callByName.
-        if (s.expr.type !== "FuncCall") {
+        // shape. Both come through callByName. MethodCall RHS routes
+        // through the same dispatch: dotted package call (pkg.fn(args))
+        // is the common case in `[a, b] = pkg.foo(x)`.
+        let results: RuntimeValue[];
+        const nargout = s.lvalues.length;
+        if (s.expr.type === "FuncCall") {
+          const argVals = s.expr.args.map(a => this.evalExpr(a));
+          results = this.callByName(s.expr.name, argVals, nargout, s.span);
+        } else if (s.expr.type === "MethodCall") {
+          const me = s.expr;
+          const dotted = this.tryExtractDottedName(me.base);
+          if (dotted !== null && this.env.get(dotted.split(".")[0]) === undefined) {
+            const argVals = me.args.map(a => this.evalExpr(a));
+            results = this.callByName(
+              `${dotted}.${me.name}`,
+              argVals,
+              nargout,
+              s.span
+            );
+          } else {
+            throw new UnsupportedConstruct(
+              `interpreter: MultiAssign MethodCall RHS only supports ` +
+                `dotted-package targets (got base type '${me.base.type}')`,
+              s.span
+            );
+          }
+        } else {
           throw new UnsupportedConstruct(
-            `interpreter: MultiAssign supports only FuncCall RHS in the MVP ` +
+            `interpreter: MultiAssign supports FuncCall / package MethodCall RHS ` +
               `(got '${s.expr.type}')`,
             s.span
           );
         }
-        const argVals = s.expr.args.map(a => this.evalExpr(a));
-        const results = this.callByName(
-          s.expr.name,
-          argVals,
-          s.lvalues.length,
-          s.span
-        );
         for (let i = 0; i < s.lvalues.length; i++) {
           this.assignLValue(s.lvalues[i], results[i], s.suppressed);
         }
@@ -552,6 +572,10 @@ export class Interpreter {
         if (envVal !== undefined && isTensor(envVal)) {
           return this.indexTensor(envVal, e.args, e.span);
         }
+        if (envVal !== undefined && isHandleValue(envVal)) {
+          const argVals = e.args.map(a => this.evalExpr(a));
+          return this.callHandle(envVal, argVals, e.span);
+        }
         const argVals = e.args.map(a => this.evalExpr(a));
         return this.callByName(e.name, argVals, 1, e.span)[0];
       }
@@ -782,11 +806,39 @@ export class Interpreter {
         );
       }
 
+      case "FuncHandle": {
+        // `@name` — store the source name and (optional) snapshot of
+        // the resolution context so the handle can dispatch the same
+        // function the call site would see right now.
+        return {
+          mtoc2Handle: true,
+          kind: "named",
+          name: e.name,
+        } as unknown as RuntimeValue;
+      }
+
+      case "AnonFunc": {
+        // `@(params) body` — capture-by-value snapshot of every
+        // free variable. We snapshot the whole current env's
+        // visible names because identifying free vars properly
+        // would require static analysis; the closure cost is
+        // acceptable for v1.
+        const captures: Record<string, RuntimeValue> = {};
+        for (const [name, value] of this.env.entries()) {
+          captures[name] = value;
+        }
+        return {
+          mtoc2Handle: true,
+          kind: "anon",
+          params: e.params,
+          body: e.body,
+          captures,
+        } as unknown as RuntimeValue;
+      }
+
       case "IndexCell":
       case "MemberDynamic":
       case "SuperMethodCall":
-      case "AnonFunc":
-      case "FuncHandle":
       case "Cell":
       case "ClassInstantiation":
       case "Colon":
@@ -940,6 +992,39 @@ export class Interpreter {
       `interpreter: undefined identifier or function '${name}'`,
       span
     );
+  }
+
+  /** Dispatch a function handle. Named handles (`@foo`) re-route
+   *  through `callByName` so the same resolution rules (workspace,
+   *  classes, packages) apply at the call site. Anonymous handles
+   *  (`@(x) x+1`) run in a fresh env seeded with the captures plus
+   *  the params bound to args; the body is evaluated as an expr. */
+  private callHandle(
+    h: RuntimeHandle,
+    args: RuntimeValue[],
+    span: Span
+  ): RuntimeValue {
+    if (h.kind === "named") {
+      const out = this.callByName(h.name, args, 1, span);
+      return out[0];
+    }
+    // Anonymous: bind params + captures in a child env.
+    if (args.length !== h.params.length) {
+      throw new UnsupportedConstruct(
+        `interpreter: anonymous handle expects ${h.params.length} arg(s) ` +
+          `(got ${args.length})`,
+        span
+      );
+    }
+    const child = new Environment();
+    for (const [k, v] of Object.entries(h.captures)) child.set(k, v);
+    for (let i = 0; i < h.params.length; i++) child.set(h.params[i], args[i]);
+    const inner = new Interpreter(this.ctx, {
+      env: child,
+      ...(this.workspace !== undefined ? { workspace: this.workspace } : {}),
+      currentFile: this.currentFile,
+    });
+    return inner.evalExpr(h.body as Expr);
   }
 
   /** Tensor indexing — supports scalar reads, single-slot Colon

@@ -721,12 +721,26 @@ function emitExpr(e: IRExpr, state: RuntimeState): string {
       return `(${baseE})[${JSON.stringify(e.field)}]`;
     }
 
-    case "HandleLit":
-    case "HandleCaptureLoad":
-      throw new UnsupportedConstruct(
-        `emitJs: IR shape '${e.kind}' is not yet wired (Phase 2 minimal subset)`,
-        e.span
-      );
+    case "HandleLit": {
+      // Captures-by-value snapshot, stored under their source names
+      // so HandleCaptureLoad can read them back. The dispatch target
+      // is encoded in the lowered Call IR at the call site; the JS
+      // handle object itself only needs to carry the captures.
+      const caps = e.captures
+        .map(c => `${JSON.stringify(c.name)}: ${emitExpr(c.value, state)}`)
+        .join(", ");
+      return `({${caps}})`;
+    }
+
+    case "HandleCaptureLoad": {
+      // `base.<name>` — read a previously-snapshot capture out of the
+      // handle struct.
+      const baseE = emitExpr(e.base, state);
+      if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(e.captureName)) {
+        return `(${baseE}).${e.captureName}`;
+      }
+      return `(${baseE})[${JSON.stringify(e.captureName)}]`;
+    }
   }
 }
 

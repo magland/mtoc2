@@ -21,7 +21,36 @@ export type RuntimeValue =
   | RuntimeTensor
   | RuntimeChar
   | RuntimeComplex
-  | RuntimeStruct;
+  | RuntimeStruct
+  | RuntimeHandle;
+
+/** Function handle. Named handles (`@foo`) keep the source name and
+ *  dispatch via the interpreter's normal call-site resolution at the
+ *  call point. Anonymous handles (`@(p1, ...) body`) capture every
+ *  visible binding by value at the @-site and run `body` in a fresh
+ *  env when invoked. */
+export type RuntimeHandle =
+  | {
+      readonly mtoc2Handle: true;
+      readonly kind: "named";
+      readonly name: string;
+    }
+  | {
+      readonly mtoc2Handle: true;
+      readonly kind: "anon";
+      readonly params: ReadonlyArray<string>;
+      readonly body: unknown;
+      readonly captures: Readonly<Record<string, RuntimeValue>>;
+    };
+
+/** Narrow a RuntimeValue to a function handle. */
+export function isHandleValue(v: RuntimeValue): v is RuntimeHandle {
+  return (
+    typeof v === "object" &&
+    v !== null &&
+    (v as RuntimeHandle).mtoc2Handle === true
+  );
+}
 
 /** Struct/object — plain JS object whose keys are field names. The
  *  c-aot path emits a typedef'd C struct; the JS path just uses a
