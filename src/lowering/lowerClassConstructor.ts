@@ -87,7 +87,8 @@ export function lowerClassConstructorCall(
     reg.className,
     reg.file,
     { name: outName, ty: classTy, initExpr: initialReceiver },
-    1
+    1,
+    span
   );
   // Constructor must return one output (validated at registration).
   const ty: Type = spec.outputTypes[0] ?? classTy;

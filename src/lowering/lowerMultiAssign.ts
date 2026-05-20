@@ -177,7 +177,8 @@ export function lowerMultiAssign(
     specSource,
     fnFile,
     undefined,
-    callNargout
+    callNargout,
+    s.span
   );
 
   // 1-output spec: route to the classic single-output ABI (return-

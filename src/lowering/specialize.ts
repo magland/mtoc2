@@ -71,7 +71,8 @@ export function buildUserFunctionCall(
     opts.specSource,
     opts.definingFile,
     undefined,
-    nargout
+    nargout,
+    span
   );
   const ty: Type =
     decl.outputs.length === 0
@@ -123,12 +124,19 @@ export function specializeUserFunction(
    *  paths that don't yet thread this through). Inside the body, the
    *  `nargout` identifier folds to this value via the
    *  `callFrameStack`. */
-  nargout?: number
+  nargout?: number,
+  /** Span of the call site, used to attribute arity / output-
+   *  assignment errors. Defaults to `decl.span` (the function
+   *  definition) when omitted — but every translation-time call site
+   *  should supply its own span so the user sees the bad call, not
+   *  the definition. */
+  callSiteSpan?: Span
 ): IRFunc {
+  const errSpan = callSiteSpan ?? decl.span;
   if (argTypes.length !== decl.params.length) {
     throw new TypeError(
       `function '${decl.name}' expects ${decl.params.length} arg(s), got ${argTypes.length}`,
-      decl.span
+      errSpan
     );
   }
   const source = specSource ?? decl.name;
@@ -228,7 +236,7 @@ export function specializeUserFunction(
       if (!e) {
         throw new TypeError(
           `function '${decl.name}': output '${o}' was never assigned`,
-          decl.span
+          errSpan
         );
       }
       return e.ty;
