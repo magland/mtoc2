@@ -40,7 +40,9 @@ language. It defines the dialect mtoc2 accepts. Two roles:
   sibling-relative path (`../numbl/src/numbl-core/parser/...` — see
   `src/parser/index.ts`). No vendoring. Drift is caught at `tsc`
   time. The numbl SHA we last validated against lives in
-  `NUMBL_VERSION`.
+  `NUMBL_VERSION`; the cross-runners check `git -C ../numbl rev-parse HEAD`
+  against it and abort on mismatch (override via
+  `MTOC_TEST_SKIP_NUMBL_PIN=1` for bisects).
 - **Testing**: numbl's CLI is the cross-runner oracle. Every `.m`
   script in `test_scripts/` runs through both numbl and mtoc2's
   c-aot backend; stdouts must match byte-for-byte. The all-modes

@@ -36,6 +36,7 @@ import { dirname, join, resolve } from "node:path";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { cpus } from "node:os";
 import { PLOT_PREFIX } from "../src/utils/plotProtocol.js";
+import { enforceNumblPin } from "./_numblPin.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -591,6 +592,7 @@ async function main(): Promise<void> {
     );
     process.exit(2);
   }
+  enforceNumblPin(repoRoot, resolve(repoRoot, "..", "numbl"));
 
   const argv = process.argv.slice(2);
   const scripts =
