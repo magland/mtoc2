@@ -94,6 +94,21 @@ export function evalExpr(this: Interpreter, e: Expr): RuntimeValue {
       return { re: 0, im: 1 };
     }
     case "Ident": {
+      // `nargin` / `nargout` are MATLAB pseudo-variables. The
+      // call-site stores its argument count and the caller's
+      // requested-output count under `$nargin` / `$nargout` so user
+      // code cannot shadow them via `nargin = 5`. A bare `nargin` /
+      // `nargout` ident dereferences those slots; falling through to
+      // the regular env lookup would only succeed in the (numbl-
+      // incompatible) shadowed-local case.
+      if (e.name === "nargin" || e.name === "nargout") {
+        const v = this.env.get("$" + e.name);
+        if (v !== undefined) return v;
+        // Outside a user function — let the bare-ident builtin path
+        // try (numbl does the same; mtoc2 doesn't register them as
+        // builtins today, so this falls through to the not-found
+        // error below).
+      }
       const v = this.env.get(e.name);
       if (v !== undefined) return v;
       // Bare-ident call into a 0-arg builtin (`pi`, `eps`, `tic`, …)

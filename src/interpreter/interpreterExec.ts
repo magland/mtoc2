@@ -177,17 +177,21 @@ export function execStmt(this: Interpreter, s: Stmt): void {
       throw new ReturnSignal();
 
     // Non-executable at this level — body of a Function is run
-    // through `callUserFunction`, not `execBody`. ClassDef / Global /
-    // Persistent / Import / Directive are workspace-time declarations
-    // that the interpreter doesn't enact at exec time.
+    // through `callUserFunction`, not `execBody`. ClassDef is a
+    // workspace-time declaration; Import / Directive are translator
+    // hints (or no-ops in the interpreter).
     case "Function":
     case "ClassDef":
-    case "Global":
-    case "Persistent":
     case "Import":
     case "Directive":
       return;
 
+    // `global` / `persistent` change variable storage in MATLAB. The
+    // interpreter currently has no shared-state slot; silently doing
+    // nothing here would let user code read garbage. Raise loudly
+    // until storage classes are wired through Environment.
+    case "Global":
+    case "Persistent":
     case "Switch":
     case "TryCatch":
     case "Synth":

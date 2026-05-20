@@ -60,9 +60,6 @@ export class Interpreter {
   /** @internal */ readonly ctx: RuntimeContext;
   /** @internal */ readonly env: Environment;
   /** @internal */ readonly workspace: Workspace | undefined;
-  /** @internal Names currently active on the call stack — used to
-   *  reject recursion in the MVP. */
-  readonly active = new Set<string>();
   /** @internal Source file for `Workspace.resolve` call-site attribution. */
   readonly currentFile: string;
   /** @internal Active index-slot stack — pushed on entering an index

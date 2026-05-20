@@ -19,7 +19,7 @@ import {
 import { getBuiltin } from "../builtins/index.js";
 import type { Builtin } from "../builtins/registry.js";
 import { inferTypeFromValue } from "../runtime/inferType.js";
-import { UnsupportedConstruct } from "../lowering/errors.js";
+import { RuntimeError, UnsupportedConstruct } from "../lowering/errors.js";
 import { Environment } from "./environment.js";
 import { Interpreter } from "./interpreter.js";
 
@@ -153,10 +153,7 @@ export function callByName(
     }
   }
 
-  throw new UnsupportedConstruct(
-    `interpreter: undefined identifier or function '${name}'`,
-    span
-  );
+  throw new RuntimeError(`Undefined function or variable '${name}'`, span);
 }
 
 /** Dispatch a function handle. Named handles (`@foo`) re-route
@@ -229,7 +226,7 @@ export function constructClassInstance(
   }
   if (reg.constructor === null) {
     if (args.length !== 0) {
-      throw new UnsupportedConstruct(
+      throw new RuntimeError(
         `'${reg.className}' has no constructor; the default form takes no args ` +
           `(got ${args.length})`,
         span
@@ -240,8 +237,8 @@ export function constructClassInstance(
   // Bind the constructor's output param to `initial`, then run.
   const fn = reg.constructor;
   if (args.length > fn.params.length) {
-    throw new UnsupportedConstruct(
-      `'${fn.name}': too many arguments (${args.length} > ${fn.params.length})`,
+    throw new RuntimeError(
+      `Too many input arguments to '${fn.name}' (${args.length} > ${fn.params.length})`,
       span
     );
   }
@@ -252,23 +249,18 @@ export function constructClassInstance(
   if (fn.outputs.length > 0) {
     child.set(fn.outputs[0], initial as RuntimeValue);
   }
-  child.set("nargin", args.length);
-  child.set("nargout", 1);
+  child.set("$nargin", args.length);
+  child.set("$nargout", 1);
   const inner = new Interpreter(this.ctx, {
     env: child,
     ...(this.workspace !== undefined ? { workspace: this.workspace } : {}),
     currentFile: this.currentFile,
   });
-  this.active.add(fn.name);
-  try {
-    inner.runProgram(fn.body);
-  } finally {
-    this.active.delete(fn.name);
-  }
+  inner.runProgram(fn.body);
   const outName = fn.outputs[0];
   const result = outName !== undefined ? child.get(outName) : undefined;
   if (result === undefined) {
-    throw new UnsupportedConstruct(
+    throw new RuntimeError(
       `'${fn.name}': constructor output '${outName}' was never assigned`,
       span
     );
@@ -301,7 +293,25 @@ export function invokeBuiltin(
 }
 
 /** Execute a user-function body in a fresh `Environment`, binding
- *  parameters and returning the declared outputs. */
+ *  parameters and returning the declared outputs. Mirrors numbl's
+ *  callUserFunction:
+ *   - Too-many-args / too-many-outputs / unassigned-output are
+ *     `RuntimeError` (user-facing, not "feature missing").
+ *   - `$nargin` / `$nargout` are bound under prefixed names so user
+ *     code cannot shadow the slots that the `nargin` / `nargout`
+ *     pseudo-vars dereference (the eval-switch intercepts those
+ *     idents and reads the `$`-prefixed env entries).
+ *   - When `nargout === 0` and the function declares outputs, still
+ *     collect the first output for `ans` assignment — guards like
+ *     `if nargout > 0` still see the runtime nargout. Recursion is
+ *     allowed; JS's own stack is the depth bound.
+ *
+ *  ExprStmt-of-a-void-function: mtoc2's eval-switch calls every
+ *  FuncCall with `nargout=1` (the call-site convention shared with
+ *  the builtin registry). For a user function declaring zero
+ *  outputs, that would falsely trip the too-many-outputs guard, so
+ *  treat the request as `nargout=0` and return [] — the ExprStmt
+ *  handler sees `undefined` and skips the `ans` write. */
 export function callUserFunction(
   this: Interpreter,
   fn: Extract<Stmt, { type: "Function" }>,
@@ -310,57 +320,47 @@ export function callUserFunction(
   span: Span,
   sourceFile?: string
 ): RuntimeValue[] {
-  if (this.active.has(fn.name)) {
-    throw new UnsupportedConstruct(
-      `interpreter: recursion is not yet implemented ('${fn.name}')`,
+  if (args.length > fn.params.length) {
+    throw new RuntimeError(
+      `Too many input arguments to '${fn.name}' (${args.length} > ${fn.params.length})`,
       span
     );
   }
-  if (args.length > fn.params.length) {
-    throw new UnsupportedConstruct(
-      `'${fn.name}': too many arguments (${args.length} > ${fn.params.length})`,
-      span
-    );
+  const effectiveNargout =
+    fn.outputs.length === 0 && nargout === 1 ? 0 : nargout;
+  if (effectiveNargout > fn.outputs.length) {
+    throw new RuntimeError("Too many output arguments.", span);
   }
   const child = new Environment();
   for (let i = 0; i < args.length; i++) {
     child.set(fn.params[i], args[i]);
   }
-  // Bind the pseudo-variables `nargin` and `nargout` so the body
-  // can read them. Matches the c-aot path, which folds them at
-  // lowering time into compile-time constants (the lowerer reads
-  // them off the specialization key). Here they're just locals.
-  child.set("nargin", args.length);
-  child.set("nargout", nargout);
+  child.set("$nargin", args.length);
+  child.set("$nargout", effectiveNargout);
   const inner = new Interpreter(this.ctx, {
     env: child,
     ...(this.workspace !== undefined ? { workspace: this.workspace } : {}),
     currentFile: sourceFile ?? this.currentFile,
   });
-  this.active.add(fn.name);
-  try {
-    inner.runProgram(fn.body);
-  } finally {
-    this.active.delete(fn.name);
-  }
-  // Return the requested nargout, clamped to what the function
-  // actually declares. A 0-output function called as an expression
-  // (`f()` at the top level of an ExprStmt) gets nargout=1 from the
-  // expression evaluator; we honor that by returning [] and letting
-  // the caller see undefined for the missing slot — ExprStmt drops
-  // undefined, so the bare-statement form works naturally.
-  const effective = Math.min(nargout, fn.outputs.length);
+  inner.runProgram(fn.body);
+  // Numbl: when effectiveNargout==0 but the function declares outputs,
+  // still collect the first output so the caller (ExprStmt) can use
+  // it as `ans`. The body already saw $nargout==0, so guards behave.
+  const collectCount =
+    effectiveNargout === 0 && fn.outputs.length > 0
+      ? 1
+      : Math.min(effectiveNargout, fn.outputs.length);
   const out: RuntimeValue[] = [];
-  for (let i = 0; i < effective; i++) {
+  for (let i = 0; i < collectCount; i++) {
     const name = fn.outputs[i];
     const v = child.get(name);
-    if (v === undefined) {
-      throw new UnsupportedConstruct(
-        `'${fn.name}': output '${name}' was never assigned`,
+    if (v === undefined && effectiveNargout >= i + 1) {
+      throw new RuntimeError(
+        `Output argument '${name}' (and maybe others) not assigned during call to '${fn.name}'`,
         span
       );
     }
-    out.push(v);
+    out.push(v ?? 0);
   }
   return out;
 }
