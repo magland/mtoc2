@@ -23,6 +23,9 @@ test_complex_unary_tensor();
 test_complex_unary_runtime();
 test_norm_real();
 test_norm_complex();
+test_norm_p_real();
+test_norm_p_complex();
+test_norm_runtime_p();
 test_dot_vector();
 test_dot_scalar();
 test_dot_matrix();
@@ -462,6 +465,38 @@ function test_norm_complex()
   % Complex vector: sqrt(sum(|x|^2)).
   disp(norm([3+4i, 0]));
   disp(norm([1i; 1i; 1i; 1i]));
+end
+
+function test_norm_p_real()
+  v = [3 -4 5];
+  disp(norm(v));            % default 2-norm
+  disp(norm(v, 1));         % sum |x|
+  disp(norm(v, 2));         % same as default
+  disp(norm(v, 3));         % cube root of 27+64+125
+  disp(norm(v, Inf));       % max |x|
+  disp(norm(v, -Inf));      % min |x|
+  disp(norm(v, 'fro'));     % fro on a vector == 2-norm
+  disp(norm(v, 'inf'));     % 'inf' string alias
+  disp(norm(v, 'Inf'));     % case-insensitive
+  % Scalar input: p arg is ignored, result is abs(x).
+  disp(norm(3, 1));
+  disp(norm(-3, Inf));
+end
+
+function test_norm_p_complex()
+  cv = [3+4i, 0+5i];
+  disp(norm(cv));           % sqrt(25+25)
+  disp(norm(cv, 1));        % 5+5 = 10
+  disp(norm(cv, Inf));      % max |x| = 5
+  disp(norm(cv, 'inf'));    % string alias
+end
+
+function test_norm_runtime_p()
+  % Force the runtime path: opaque vector + opaque p.
+  v = [3 -4 5];
+  p = 3;
+  %!numbl:opaque v p
+  disp(norm(v, p));
 end
 
 function test_dot_vector()
