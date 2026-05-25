@@ -62,6 +62,9 @@ test_sort_row_vec();
 test_sort_col_vec();
 test_sort_two_output();
 test_sort_then_gather();
+test_sort_ascend_descend();
+test_sort_descend_two_output();
+test_sort_descend_string_mode();
 
 test_complex_scalar_read();
 test_complex_scalar_write();
@@ -575,6 +578,31 @@ function test_sort_then_gather()
   %!numbl:opaque ab key
   [~, isort] = sort(key);
   disp(ab(:, isort));
+end
+
+function test_sort_ascend_descend()
+  a = [3 1 4 1 5 9 2 6];
+  %!numbl:opaque a
+  disp(sort(a, 'ascend'));
+  disp(sort(a, 'descend'));
+end
+
+function test_sort_descend_two_output()
+  % Stable tie-break on ascending original index in both directions —
+  % equal values must keep their input order even when sorting
+  % descending.
+  a = [5 2 8 1 2];
+  %!numbl:opaque a
+  [v, i] = sort(a, 'descend');
+  disp(v);
+  disp(i);
+end
+
+function test_sort_descend_string_mode()
+  % Mode arg may be a "..." string literal, not just a char array.
+  a = [3 1 4 1 5];
+  %!numbl:opaque a
+  disp(sort(a, "descend"));
 end
 
 % -------- complex indexing --------
