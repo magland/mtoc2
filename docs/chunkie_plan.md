@@ -106,6 +106,23 @@ ship as useful units, gated by the cross-runner.
   and still get an explicit reject. Test:
   `test_scripts/class_external_helpers/`.
 
+- **`isfield` / `isscalar` + empty-as-absent-struct sentinel.**
+  Two scalar-predicate builtins matching numbl's contract:
+  `isfield(s, name)` returns `1` iff `s` is a struct or class
+  instance with a field/property of that name, `0` otherwise —
+  so `isfield([], 'foo')` is `0` and the `cparams = []` sentinel
+  works without any "empty-as-struct" coercion (numbl has none
+  either). `isscalar(x)` is `1` for any one-element numeric /
+  logical / complex value or scalar string handle, `0` for char
+  arrays (even `'a'`), structs, class instances, handles, and
+  multi-element tensors. Both fold at type-check time: the
+  struct's field set and the value's shape are known statically,
+  so every supported call site reduces to a literal in the
+  emitted code. `isfield` requires its name arg to be a Char or
+  String with `.exact` set (the chunkie shape — runtime-only field
+  names raise `UnsupportedConstruct`). Test:
+  `test_scripts/scalar_predicates.m`.
+
 ## Feature inventory
 
 The chunkie driver (`tmp/chunkie_ex01_circle.m`) is short. Most of
@@ -141,8 +158,8 @@ Items higher in the list are prerequisites for items lower down.
 | ----- | ------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | 1     | Parse-error tolerance on workspace siblings                                                | done                                                                                                                                                                                          |
 | 1     | External method file with local helper functions (`@chunker/arcresample.m`)                | done                                                                                                                                                                                          |
-| 2     | Empty-matrix as struct sentinel: `cparams = []` then `isfield(cparams,'ta')` returns false | numbl treats `[]` as the absent-struct sentinel. Likely just an `isfield` transfer + interpreter `call` update.                                                                               |
-| 2     | `isfield(s, 'name')` and `isscalar(x)` builtins                                            | scalar predicates; small.                                                                                                                                                                     |
+| 2     | Empty-matrix as struct sentinel: `cparams = []` then `isfield(cparams,'ta')` returns false | done (falls out of `isfield`'s "non-struct → false" branch; numbl has no `[]`-as-struct coercion either)                                                                                      |
+| 2     | `isfield(s, 'name')` and `isscalar(x)` builtins                                            | done                                                                                                                                                                                          |
 | 2     | `sort(x, 'ascend' / 'descend')` mode arg                                                   | `sort` exists; verify the mode-string transfer accepts the literal.                                                                                                                           |
 | 2     | `strcmpi(a, b)` and `strcmp(a, b)`                                                         | text compare; mtoc2 currently rejects `strcmp`. Numbl is authoritative for case-insensitive folding.                                                                                          |
 | 2     | `uniquetol(x, tol)`                                                                        | sort + adjacent-dedup; small builtin.                                                                                                                                                         |

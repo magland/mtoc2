@@ -85,6 +85,8 @@ import { pi, eps, Inf, inf, NaNBuiltin, nan } from "./defs/math/constants.js";
 import { notBuiltin } from "./defs/logical/not.js";
 import { oror } from "./defs/logical/oror.js";
 import { andand } from "./defs/logical/andand.js";
+import { isfield } from "./defs/logical/isfield.js";
+import { isscalar } from "./defs/logical/isscalar.js";
 import { plotBuiltins } from "./defs/plot/dispatch.js";
 
 for (const b of [
@@ -169,6 +171,8 @@ for (const b of [
   notBuiltin,
   oror,
   andand,
+  isfield,
+  isscalar,
 ]) {
   registerBuiltin(b);
 }
