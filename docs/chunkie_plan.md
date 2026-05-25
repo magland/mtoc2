@@ -123,6 +123,36 @@ ship as useful units, gated by the cross-runner.
   names raise `UnsupportedConstruct`). Test:
   `test_scripts/scalar_predicates.m`.
 
+- **Text + sort + tolerance scalars.** Five related builtin
+  feature classes:
+  - `strcmp(a, b)` / `strcmpi(a, b)` — scalar text equality
+    (byte-equality / ASCII case-fold). Non-text args silently yield
+    `0` per numbl; length mismatch is not an error. Cell-of-text
+    vectorisation deferred until cells land. Test additions in
+    `test_scripts/text.m`.
+  - `sort(x, 'ascend' | 'descend')` — mode arg on the existing
+    1×N / N×1 sort. Descending comparator preserves the stable
+    tie-break on ascending original index in both directions
+    (matches numbl). Test additions in `test_scripts/indexing.m`.
+  - `dot(a, b)` — real-double dot product: vector × vector →
+    scalar; matrix × matrix (same shape) → `[1, N]` row vector
+    of column-wise dot products. Complex `dot` (numbl uses
+    `sum(conj(a).*b)`) currently raises `UnsupportedConstruct`.
+    Test additions in `test_scripts/math_builtins.m`.
+  - `norm` extended to `norm(v, p)` / `norm(v, Inf)` /
+    `norm(v, -Inf)` / `norm(v, 'fro')` / `norm(v, 'inf')` for
+    real and complex vectors, scalar passthrough as `abs`. Matrix
+    norms (numbl: `p ∈ {1, 2, Inf, 'fro'}`) still rejected with a
+    clear `UnsupportedConstruct`. Test additions in
+    `test_scripts/math_builtins.m`.
+  - `uniquetol(x[, tol])` — first-occurrence dedup with absolute
+    tolerance, default `1e-6`. Naive pairwise scan (NOT sort +
+    adjacent dedup), preserving numbl's transitive-chaining
+    behaviour. Row input → row output; otherwise column output.
+    NaN survives as its own entry per scan. Multi-output
+    `[c, ia, ic]` form, `'ByRows'`, and complex inputs are
+    out of scope. Test: `test_scripts/uniquetol_basics.m`.
+
 ## Feature inventory
 
 The chunkie driver (`tmp/chunkie_ex01_circle.m`) is short. Most of
@@ -162,7 +192,7 @@ Items higher in the list are prerequisites for items lower down.
 | 2     | `isfield(s, 'name')` and `isscalar(x)` builtins                                            | done                                                                                                                                                                                          |
 | 2     | `sort(x, 'ascend' / 'descend')` mode arg                                                   | done                                                                                                                                                                                          |
 | 2     | `strcmpi(a, b)` and `strcmp(a, b)`                                                         | done                                                                                                                                                                                          |
-| 2     | `uniquetol(x, tol)`                                                                        | sort + adjacent-dedup; small builtin.                                                                                                                                                         |
+| 2     | `uniquetol(x, tol)`                                                                        | done (first-occurrence naive scan — NOT sort+dedup, to preserve numbl's transitive-chaining behaviour). Multi-output `[c, ia, ic]` form deferred.                                              |
 | 2     | `norm(v)` / `dot(a, b)`                                                                    | `norm(v)` was already in; `dot(a,b)` done for real vector and real matrix (column-wise) forms. Complex `dot` and `norm` p-arg / 'fro' / 'inf' are separate sub-features.                      |
 | 3     | Member-rooted indexed write: `chnkr.field(:,:,i) = rhs`                                    | explicitly rejected by `lowerMultiAssign` / `lowerIndexStore`. Requires teaching the lowerer to thread the member root through `IndexStore`. Big lift across all three backends.              |
 | 3     | Method call returning self: `chnkr = chnkr.addchunk(nch)`                                  | should work once classes are stable; verify.                                                                                                                                                  |

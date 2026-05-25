@@ -69,6 +69,7 @@ import { fix } from "./defs/math/fix.js";
 import { sqrt } from "./defs/math/sqrt.js";
 import { norm } from "./defs/math/norm.js";
 import { dot } from "./defs/math/dot.js";
+import { uniquetol } from "./defs/math/uniquetol.js";
 import { log } from "./defs/math/log.js";
 import { log2 } from "./defs/math/log2.js";
 import { log10 } from "./defs/math/log10.js";
@@ -152,6 +153,7 @@ for (const b of [
   sqrt,
   norm,
   dot,
+  uniquetol,
   log,
   log2,
   log10,

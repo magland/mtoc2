@@ -209,6 +209,15 @@ const REGISTRY: ReadonlyMap<string, RuntimeSnippet> = new Map<
     "mtoc2_dot_real",
     loadSnippet("tensor_dot.h", ["mtoc2_tensor_t", "mtoc2_alloc"]),
   ],
+  [
+    "mtoc2_uniquetol_real",
+    loadSnippet("tensor_uniquetol.h", [
+      "mtoc2_tensor_t",
+      "mtoc2_alloc",
+      // JS sibling allocates via the standard ND helper.
+      "mtoc2_tensor_alloc_nd",
+    ]),
+  ],
 
   // ── Format engine + fprintf ───────────────────────────────────────
   // `format_engine.h` is the numbl-compatible printf walker shared by
