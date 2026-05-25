@@ -161,6 +161,20 @@ The CLI scans the entry's directory recursively for sibling `.m`
 files, descending into `+pkg/` namespace dirs and `@Class/` class
 dirs. The web IDE passes flat file names.
 
+The driver script may extend the workspace search path with one or
+more leading `addpath(<literal>, ...)` calls — these are the _only_
+statements the prologue accepts before the script body proper. The
+prologue extractor in
+[`src/workspace/driverPrologue.ts`](../src/workspace/driverPrologue.ts)
+strips those calls before lowering / interpretation begins; an
+`addpath` anywhere else (inside a function, in a non-driver file,
+after any other top-level statement) is rejected by the builtin's
+`transfer` with a span-attributed `UnsupportedConstruct`. `rmpath`
+and `savepath` have no static interpretation and are always
+rejected. The CLI matches numbl's `run` and `chdir`s into the
+script's directory first, so an `addpath('foo')` literal resolves
+to `<scriptDir>/foo`.
+
 ## Stage 3: emit
 
 Two emitters share the lowered IR.

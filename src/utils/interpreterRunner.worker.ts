@@ -15,6 +15,7 @@
 import { PLOT_PREFIX } from "./plotProtocol";
 import type { PlotRecord, WasmRunMessage } from "./wasmRunner.worker";
 import { Workspace, parseFiles } from "../workspace/workspace";
+import { extractDriverPrologue } from "../workspace/driverPrologue";
 import { Interpreter } from "../interpreter/interpreter";
 import type { SourceFile } from "../translate";
 
@@ -94,10 +95,11 @@ function runOnce(req: InterpreterRunRequest): void {
       const runtimeCtx = {
         helpers: { write: (s: string) => stdout.write(String(s)) },
       };
+      const { remainingBody } = extractDriverPrologue(mainAst);
       new Interpreter(runtimeCtx, {
         workspace: ws,
         currentFile: req.mainName,
-      }).runProgram(mainAst.body);
+      }).runProgram(remainingBody);
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

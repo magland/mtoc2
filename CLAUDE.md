@@ -91,7 +91,10 @@ inventory by example. Highlights:
   `fact` / `fib` shape).
 - **Workspace**: sibling `.m` files; `+pkg/` package functions;
   `@Class/` class folders with instance + static methods and
-  external method files.
+  external method files. The driver script may extend the search
+  path via leading `addpath(<literal>, ...)` calls (statically
+  resolved by the prologue extractor; `addpath` anywhere else, and
+  `rmpath` / `savepath` everywhere, are `UnsupportedConstruct`).
 - **Text**: `Char` (`'foo'`, 1×N bytes) and `String` (`"foo"`,
   scalar handle), used as backing types for `fprintf` / `error` /
   `sprintf` / `assert` with the full numbl-compatible format

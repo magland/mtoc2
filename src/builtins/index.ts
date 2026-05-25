@@ -54,6 +54,7 @@ import { meshgrid } from "./defs/shape/meshgrid.js";
 import { assert as assertBuiltin } from "./defs/diag/assert.js";
 import { tic } from "./defs/system/tic.js";
 import { toc } from "./defs/system/toc.js";
+import { addpath, rmpath, savepath } from "./defs/system/pathBuiltins.js";
 import { cos } from "./defs/math/cos.js";
 import { sin } from "./defs/math/sin.js";
 import { tan } from "./defs/math/tan.js";
@@ -130,6 +131,9 @@ for (const b of [
   assertBuiltin,
   tic,
   toc,
+  addpath,
+  rmpath,
+  savepath,
   cos,
   sin,
   tan,

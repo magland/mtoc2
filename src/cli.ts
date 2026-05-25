@@ -31,6 +31,9 @@ import { createInterface } from "node:readline";
 
 import { translateProject, type SourceFile } from "./translate.js";
 import { Workspace, parseFiles } from "./workspace/workspace.js";
+import { extractDriverPrologue } from "./workspace/driverPrologue.js";
+import { parseMFile } from "./parser/index.js";
+import { UnsupportedConstruct } from "./lowering/errors.js";
 import { applyPlotRecord, newPlotDispatchState } from "./utils/plotAdapter.js";
 import { PLOT_PREFIX } from "./utils/plotProtocol.js";
 import type { PlotRecord } from "./utils/wasmRunner.worker.js";
@@ -133,6 +136,73 @@ function scanSiblings(dir: string, excludeAbs: string): SourceFile[] {
   return out;
 }
 
+/** Parse-once + scan: read the driver source, parse it, harvest any
+ *  `addpath(<literal>, ...)` calls from the leading prologue, then
+ *  build the workspace file list and search-path order.
+ *
+ *  Path order is `[driverDir?, ...addBegin, ...--path, ...addEnd]`
+ *  with duplicates dropped. `addBegin` entries appear in source
+ *  order, so an earlier `addpath('a'); addpath('b');` resolves to
+ *  `a` before `b` — same precedence convention as the driver's own
+ *  directory (the first thing on the path always wins).
+ *
+ *  Relative dirs are resolved against `process.cwd()`. Errors from
+ *  the prologue extractor are surfaced with the same fatal-error
+ *  shape `translateFiles` uses (file path + offset + kind), so the
+ *  user sees the offending call site. */
+function buildProjectFiles(opts: {
+  driverPath: string | null;
+  driverName: string;
+  driverSource: string;
+  extraPaths: string[];
+}): { files: SourceFile[]; searchPaths: string[] } {
+  const { driverPath, driverName, driverSource, extraPaths } = opts;
+  const addBegin: string[] = [];
+  const addEnd: string[] = [];
+  try {
+    const driverAst = parseMFile(driverSource, driverName);
+    const { addpaths } = extractDriverPrologue(driverAst, {
+      allowAddpath: true,
+    });
+    for (const ap of addpaths) {
+      const abs = resolve(ap.dir);
+      if (ap.position === "begin") addBegin.push(abs);
+      else addEnd.push(abs);
+    }
+  } catch (e) {
+    if (e instanceof UnsupportedConstruct) {
+      const span = e.span;
+      const where = span?.start !== undefined ? ` (offset ${span.start})` : "";
+      console.error(
+        `${span?.file ?? driverName}: UnsupportedConstruct: ${e.message}${where}`
+      );
+      process.exit(1);
+    }
+    throw e;
+  }
+  // Dedupe while preserving insertion order.
+  const seen = new Set<string>();
+  const searchPaths: string[] = [];
+  const addUnique = (p: string): void => {
+    if (!seen.has(p)) {
+      seen.add(p);
+      searchPaths.push(p);
+    }
+  };
+  const driverDir = driverPath !== null ? dirname(driverPath) : null;
+  if (driverDir !== null) addUnique(driverDir);
+  for (const p of addBegin) addUnique(p);
+  for (const p of extraPaths) addUnique(resolve(p));
+  for (const p of addEnd) addUnique(p);
+
+  const files: SourceFile[] = [{ name: driverName, source: driverSource }];
+  const excludeAbs = driverPath !== null ? resolve(driverPath) : driverName;
+  for (const p of searchPaths) {
+    files.push(...scanSiblings(p, excludeAbs));
+  }
+  return { files, searchPaths };
+}
+
 /** Lower-level translator. The caller assembles the workspace file
  *  list and search paths; both `translateFile` and `cmdEval` route
  *  through here so the in-memory-source path doesn't accidentally
@@ -161,6 +231,7 @@ function translateFiles(
     searchPaths,
     threads,
     enableTempInlining,
+    allowAddpath: true,
   });
   if (result.error) {
     const e = result.error;
@@ -184,19 +255,12 @@ function translateFile(
 ): TranslatedProject {
   const absScript = resolve(scriptPath);
   const source = readFileSync(absScript, "utf8");
-  const dir = dirname(absScript);
-  const files: SourceFile[] = [
-    { name: absScript, source },
-    ...scanSiblings(dir, absScript),
-  ];
-  const searchPaths = [dir];
-  for (const p of extraPaths) {
-    const abs = resolve(p);
-    if (searchPaths.indexOf(abs) === -1) {
-      searchPaths.push(abs);
-      files.push(...scanSiblings(abs, absScript));
-    }
-  }
+  const { files, searchPaths } = buildProjectFiles({
+    driverPath: absScript,
+    driverName: absScript,
+    driverSource: source,
+    extraPaths,
+  });
   return translateFiles(
     files,
     absScript,
@@ -216,15 +280,12 @@ function translateInline(
   // numbl/src/cli.ts) so diagnostics from the cross-runner reference
   // the same file in both runners.
   const evalName = "eval.m";
-  const files: SourceFile[] = [{ name: evalName, source: code }];
-  const searchPaths: string[] = [];
-  for (const p of extraPaths) {
-    const abs = resolve(p);
-    if (searchPaths.indexOf(abs) === -1) {
-      searchPaths.push(abs);
-      files.push(...scanSiblings(abs, evalName));
-    }
-  }
+  const { files, searchPaths } = buildProjectFiles({
+    driverPath: null,
+    driverName: evalName,
+    driverSource: code,
+    extraPaths,
+  });
   return translateFiles(
     files,
     evalName,
@@ -503,19 +564,12 @@ function buildProjectWorkspaceFromScript(
 ): { workspace: Workspace; mainName: string } {
   const absScript = resolve(scriptPath);
   const source = readFileSync(absScript, "utf8");
-  const dir = dirname(absScript);
-  const files: SourceFile[] = [
-    { name: absScript, source },
-    ...scanSiblings(dir, absScript),
-  ];
-  const searchPaths = [dir];
-  for (const p of extraPaths) {
-    const abs = resolve(p);
-    if (searchPaths.indexOf(abs) === -1) {
-      searchPaths.push(abs);
-      files.push(...scanSiblings(abs, absScript));
-    }
-  }
+  const { files, searchPaths } = buildProjectFiles({
+    driverPath: absScript,
+    driverName: absScript,
+    driverSource: source,
+    extraPaths,
+  });
   return buildWorkspaceFromFiles(files, absScript, searchPaths);
 }
 
@@ -524,15 +578,12 @@ function buildProjectWorkspaceFromInline(
   extraPaths: string[]
 ): { workspace: Workspace; mainName: string } {
   const evalName = "eval.m";
-  const files: SourceFile[] = [{ name: evalName, source: code }];
-  const searchPaths: string[] = [];
-  for (const p of extraPaths) {
-    const abs = resolve(p);
-    if (searchPaths.indexOf(abs) === -1) {
-      searchPaths.push(abs);
-      files.push(...scanSiblings(abs, evalName));
-    }
-  }
+  const { files, searchPaths } = buildProjectFiles({
+    driverPath: null,
+    driverName: evalName,
+    driverSource: code,
+    extraPaths,
+  });
   return buildWorkspaceFromFiles(files, evalName, searchPaths);
 }
 
@@ -565,10 +616,13 @@ async function runInterpreter(
     process.exit(1);
   }
   try {
+    const { remainingBody } = extractDriverPrologue(mainAst, {
+      allowAddpath: true,
+    });
     new Interpreter(ctx, {
       workspace,
       currentFile: mainName,
-    }).runProgram(mainAst.body);
+    }).runProgram(remainingBody);
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     console.error(`interpreter: ${msg}`);
@@ -592,7 +646,11 @@ async function runJsAot(
   }
   let prog;
   try {
-    prog = new Lowerer(workspace).lowerProgram(mainAst);
+    const { remainingBody } = extractDriverPrologue(mainAst, {
+      allowAddpath: true,
+    });
+    const driverAst = { ...mainAst, body: remainingBody };
+    prog = new Lowerer(workspace).lowerProgram(driverAst);
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     console.error(`lowering: ${msg}`);
@@ -619,10 +677,18 @@ async function main(): Promise<void> {
   const cmd = argv[0];
   if (cmd === "run") {
     const { positional, extraPaths, opts } = parseRunEvalArgs(argv.slice(1));
+    // Match numbl's `run`: auto-cd into the script's directory before
+    // executing. addpath('foo') in the driver then resolves to
+    // <scriptDir>/foo, and a `--path foo` flag does the same. The
+    // script path must be resolved against the ORIGINAL cwd first;
+    // afterwards every helper that needs a CWD-relative resolution
+    // (addpath, --path) picks up the new directory automatically.
+    const absScript = resolve(positional);
+    process.chdir(dirname(absScript));
     const exec = opts.exec ?? "c-aot";
     if (exec === "interpreter") {
       const { workspace, mainName } = buildProjectWorkspaceFromScript(
-        positional,
+        absScript,
         extraPaths
       );
       await runInterpreter(workspace, mainName);
@@ -630,14 +696,14 @@ async function main(): Promise<void> {
     }
     if (exec === "js-aot") {
       const { workspace, mainName } = buildProjectWorkspaceFromScript(
-        positional,
+        absScript,
         extraPaths
       );
       await runJsAot(workspace, mainName, opts.dumpJs);
       return;
     }
     const cSrc = translateFile(
-      positional,
+      absScript,
       extraPaths,
       opts.opt.threads,
       opts.opt.enableTempInlining
@@ -676,7 +742,11 @@ async function main(): Promise<void> {
   if (cmd === "translate") {
     if (argv.length < 2) usage();
     const script = argv[1];
-    const t = translateFile(script);
+    // Match `run`: chdir into the script's dir so addpath(...) in the
+    // driver resolves the same way under both subcommands.
+    const absScript = resolve(script);
+    process.chdir(dirname(absScript));
+    const t = translateFile(absScript);
     if (t.extraCSources.length > 0) {
       console.error(
         `'translate' produces a single C string and cannot represent ` +

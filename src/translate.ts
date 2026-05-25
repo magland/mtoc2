@@ -20,6 +20,7 @@ import { Lowerer } from "./lowering/lower.js";
 import { emitProgram } from "./codegen/emit.js";
 import { inlinePass } from "./codegen/inlinePass.js";
 import { Workspace, parseFiles } from "./workspace/workspace.js";
+import { extractDriverPrologue } from "./workspace/driverPrologue.js";
 
 export interface SourceFile {
   /** File name used in error attribution. */
@@ -58,8 +59,21 @@ export interface TranslateOptions {
    *  helpers" toggle to show user-level code in isolation. The result
    *  is not compilable in that mode. Defaults to true. */
   includeRuntime?: boolean;
-  /** Reserved for future use. */
+  /** Workspace search path. The driver script's directory is always
+   *  index 0 (set up by the CLI); any addpath-begin directories and
+   *  CLI `--path` directories follow, then any addpath-end
+   *  directories. Used by numbl's resolver to compute relative paths
+   *  for workspace-function lookup. */
   searchPaths?: ReadonlyArray<string>;
+  /** Set to `true` when the caller (typically the CLI) has the
+   *  filesystem in hand to honor `addpath(<literal>, ...)` calls in
+   *  the driver-script prologue. Caller is responsible for resolving
+   *  the dirs and adding the corresponding files / `searchPaths`
+   *  entries before calling `translateProject` — this flag only
+   *  controls whether the prologue extractor accepts the calls. When
+   *  `false` or omitted (web IDE / vitest), any `addpath` call is
+   *  rejected with `UnsupportedConstruct`. */
+  allowAddpath?: boolean;
   /** Max-threads OpenMP setting. Affects codegen only when set to a
    *  numeric value `>= 2`: in that case `<omp.h>` is included and the
    *  emitted `main()` calls `omp_set_num_threads(N)` once at startup.
@@ -121,7 +135,11 @@ export function translateProject(
 
   try {
     const lowerer = new Lowerer(workspace);
-    const prog = lowerer.lowerProgram(activeWsFile.ast);
+    const { remainingBody } = extractDriverPrologue(activeWsFile.ast, {
+      allowAddpath: opts.allowAddpath,
+    });
+    const driverAst = { ...activeWsFile.ast, body: remainingBody };
+    const prog = lowerer.lowerProgram(driverAst);
     if (opts.enableTempInlining) inlinePass(prog);
     return {
       c: emitProgram(prog, {
