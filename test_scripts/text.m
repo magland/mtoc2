@@ -9,6 +9,12 @@ test_char_param();
 test_string_param();
 test_reassign_in_branch();
 test_text_var_to_var_copy();
+test_strcmp_basic();
+test_strcmpi_case_fold();
+test_strcmp_mixed_kinds();
+test_strcmp_non_text();
+test_strcmp_var_args();
+test_strcmp_in_if();
 
 function test_char_basic()
   disp('hello');
@@ -98,4 +104,56 @@ end
 
 function greet_string(s)
   disp(s);
+end
+
+function test_strcmp_basic()
+  disp(strcmp('abc', 'abc'));
+  disp(strcmp('abc', 'abd'));
+  disp(strcmp('abc', 'abcd'));
+  disp(strcmp('', ''));
+  disp(strcmp('', 'x'));
+  disp(strcmp("hello", "hello"));
+  disp(strcmp("hello", "world"));
+end
+
+function test_strcmpi_case_fold()
+  disp(strcmpi('abc', 'ABC'));
+  disp(strcmpi('Hello', 'hello'));
+  disp(strcmpi('abc', 'aBd'));
+  disp(strcmpi("MIXED", "mixed"));
+  disp(strcmpi("MIXED", "mixed!"));
+end
+
+function test_strcmp_mixed_kinds()
+  % Char vs String: numbl compares the raw bytes either way.
+  disp(strcmp('hi', "hi"));
+  disp(strcmp("hi", 'hi'));
+  disp(strcmpi('Hi', "hi"));
+end
+
+function test_strcmp_non_text()
+  % Numbl: non-text first or second arg silently yields 0.
+  disp(strcmp(5, 'abc'));
+  disp(strcmp('abc', 5));
+  disp(strcmp(5, 5));
+end
+
+function test_strcmp_var_args()
+  % Non-literal args force the runtime helper path.
+  a = 'descend';
+  b = 'descend';
+  c = 'ascend';
+  disp(strcmp(a, b));
+  disp(strcmp(a, c));
+  disp(strcmpi('DESCEND', a));
+end
+
+function test_strcmp_in_if()
+  mode = 'descend';
+  if strcmp(mode, 'descend')
+    disp(100);
+  end
+  if ~strcmp(mode, 'ascend')
+    disp(200);
+  end
 end

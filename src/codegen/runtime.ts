@@ -200,6 +200,8 @@ const REGISTRY: ReadonlyMap<string, RuntimeSnippet> = new Map<
     loadSnippet("text_view.h", ["mtoc2_string_t", "mtoc2_char_tensor_t"]),
   ],
   ["mtoc2_disp_text", loadSnippet("disp_text.h", ["mtoc2_text_view_t"])],
+  ["mtoc2_strcmp", loadSnippet("strcmp.h", ["mtoc2_text_view_t"])],
+  ["mtoc2_strcmpi", loadSnippet("strcmp.h", ["mtoc2_text_view_t"])],
 
   // ── Format engine + fprintf ───────────────────────────────────────
   // `format_engine.h` is the numbl-compatible printf walker shared by

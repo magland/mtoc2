@@ -87,6 +87,7 @@ import { oror } from "./defs/logical/oror.js";
 import { andand } from "./defs/logical/andand.js";
 import { isfield } from "./defs/logical/isfield.js";
 import { isscalar } from "./defs/logical/isscalar.js";
+import { strcmp, strcmpi } from "./defs/logical/strcmp.js";
 import { plotBuiltins } from "./defs/plot/dispatch.js";
 
 for (const b of [
@@ -173,6 +174,8 @@ for (const b of [
   andand,
   isfield,
   isscalar,
+  strcmp,
+  strcmpi,
 ]) {
   registerBuiltin(b);
 }

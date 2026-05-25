@@ -107,7 +107,7 @@ Several features still get explicit rejection: per-axis logical-mask
 writes (`M(:, mask) = rhs` — the linear form `a(mask) = rhs` works),
 vector-of-indices writes (`a(idx_vec) = rhs`), member-rooted index
 writes (`obj.f(i) = rhs`), indexed delete (`a(2:5) = []`), char
-arithmetic (`'A' + 1`), `strcmp`, builtin handles (`@disp`),
+arithmetic (`'A' + 1`), builtin handles (`@disp`),
 `private/` directories, and `import` statements. `.mtoc2.js` user
 functions that declare `cSources` work via `mtoc2 run` but not via
 the `translate` subcommand (which produces a single C string and
