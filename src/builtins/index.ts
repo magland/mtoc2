@@ -68,6 +68,7 @@ import { round } from "./defs/math/round.js";
 import { fix } from "./defs/math/fix.js";
 import { sqrt } from "./defs/math/sqrt.js";
 import { norm } from "./defs/math/norm.js";
+import { dot } from "./defs/math/dot.js";
 import { log } from "./defs/math/log.js";
 import { log2 } from "./defs/math/log2.js";
 import { log10 } from "./defs/math/log10.js";
@@ -150,6 +151,7 @@ for (const b of [
   fix,
   sqrt,
   norm,
+  dot,
   log,
   log2,
   log10,

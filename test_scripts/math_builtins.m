@@ -23,6 +23,10 @@ test_complex_unary_tensor();
 test_complex_unary_runtime();
 test_norm_real();
 test_norm_complex();
+test_dot_vector();
+test_dot_scalar();
+test_dot_matrix();
+test_dot_runtime();
 
 function test_scalar_exact_unary()
   % Trig
@@ -458,4 +462,37 @@ function test_norm_complex()
   % Complex vector: sqrt(sum(|x|^2)).
   disp(norm([3+4i, 0]));
   disp(norm([1i; 1i; 1i; 1i]));
+end
+
+function test_dot_vector()
+  % Vectors: any combination of row / column orientation, as long as
+  % the lengths match.
+  disp(dot([1 2 3], [4 5 6]));
+  disp(dot([1; 2; 3], [4; 5; 6]));
+  disp(dot([1 2 3], [4; 5; 6]));
+  disp(dot([1 2 3 4], [0 -1 0 -1]));
+  disp(dot([0 0 0], [1 2 3]));
+end
+
+function test_dot_scalar()
+  % Scalars treated as length-1 vectors.
+  disp(dot(3, 4));
+  disp(dot(-2.5, 6));
+end
+
+function test_dot_matrix()
+  % Matrix form: same shape M×N, result is a 1×N row vector whose
+  % j-th entry is the j-th column dot product.
+  a = [1 2 3; 4 5 6];
+  b = [7 8 9; 10 11 12];
+  disp(dot(a, b));
+end
+
+function test_dot_runtime()
+  % Force the runtime helper (rather than the exact-fold path) by
+  % stripping `exact` from the inputs.
+  a = [1 2 3 4 5];
+  b = [5 4 3 2 1];
+  %!numbl:opaque a b
+  disp(dot(a, b));
 end
