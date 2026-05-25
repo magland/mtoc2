@@ -179,7 +179,12 @@ export function lowerMethodCall(
     e.span,
     {
       specSource: classMethodSpecSource(target.className, target.methodName),
-      definingFile: reg.file,
+      // External method files own per-method-file local helpers, and
+      // the resolver scopes them by the executing method's path. Use
+      // the method FuncStmt's source file (the external file for an
+      // `@<Cls>/<m>.m` method, the classdef file for an in-body
+      // method) rather than always salting on the classdef file.
+      definingFile: method.span.file ?? reg.file,
     }
   );
 }
@@ -300,7 +305,7 @@ export function lowerStaticMethodCall(
     span,
     {
       specSource: classMethodSpecSource(target.className, target.methodName),
-      definingFile: reg.file,
+      definingFile: method.span.file ?? reg.file,
     }
   );
 }

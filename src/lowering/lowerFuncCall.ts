@@ -232,7 +232,7 @@ export function lowerFuncCall(
             target.className,
             target.methodName
           ),
-          definingFile: reg.file,
+          definingFile: method.span.file ?? reg.file,
         }
       );
     }

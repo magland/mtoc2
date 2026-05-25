@@ -173,7 +173,11 @@ export function callByName(
               span
             );
           }
-          return this.callUserFunction(fn, args, nargout, span);
+          // Pass the method's source file so calls from within the
+          // method body resolve in the right scope — external method
+          // files own per-method-file local helpers, and the resolver
+          // looks them up by the executing method's file path.
+          return this.callUserFunction(fn, args, nargout, span, fn.span.file);
         }
       }
     }

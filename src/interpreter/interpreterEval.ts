@@ -384,7 +384,7 @@ export function evalExpr(this: Interpreter, e: Expr): RuntimeValue {
             );
           }
           const argVals = e.args.map(a => this.evalExpr(a));
-          return this.callUserFunction(fn, argVals, 1, e.span)[0];
+          return this.callUserFunction(fn, argVals, 1, e.span, fn.span.file)[0];
         }
       }
       // Try to extract a dotted name like `pkg.fn` / `pkg.sub.fn`.
@@ -407,7 +407,13 @@ export function evalExpr(this: Interpreter, e: Expr): RuntimeValue {
           const fn = reg?.methods.get(e.name);
           if (reg !== undefined && fn !== undefined) {
             const argVals = e.args.map(a => this.evalExpr(a));
-            return this.callUserFunction(fn, [base, ...argVals], 1, e.span)[0];
+            return this.callUserFunction(
+              fn,
+              [base, ...argVals],
+              1,
+              e.span,
+              fn.span.file
+            )[0];
           }
         }
         // Struct / class field that's a tensor: treat as a member-

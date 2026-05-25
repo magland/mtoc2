@@ -1,46 +1,75 @@
-# chunkie support plan
+# chunkie support plan — driving numbl parity
 
-**Goal:** run `tmp/chunkie_ex01_circle.m` end-to-end in all three
+**Goal:** push mtoc2 toward numbl parity, using
+`tmp/chunkie_ex01_circle.m` as the proving ground. The long-term
+target is "anything numbl runs, mtoc2 runs" — chunkie is a
+real-world MATLAB toolbox that, pulled in transitively from a
+20-line driver, surfaces gaps in a realistic dependency order.
+Closing the last gap means the driver runs end-to-end in all three
 mtoc2 backends (interpreter, js-aot, c-aot), byte-for-byte aligned
-with numbl. The interpreter is the first target; AOT support
-follows feature-by-feature where static analysis permits it.
+with numbl. The interpreter is the first target for each new
+feature; AOT support follows where static analysis permits.
 
-`chunkie_ex01_circle.m` is a 20-line driver that calls into
-`/home/magland/src/chunkie/chunkie/`, a real-world MATLAB toolbox.
-Pulling it in transitively exercises many features mtoc2 does not
-yet support. This document is the orientation for future agents
-working on that path. It is **not** a contract — phases ship as
-useful units, gated by the cross-runner.
+The framing matters. Each gap that chunkie surfaces ships as a
+**general feature** — implemented the way numbl implements it, with
+full numbl-shaped semantics — not a narrow slice tailored to the
+exact lines chunkie executes. Chunkie is the forcing function and
+the cross-check; numbl is the spec. The features we add along the
+way should benefit any future program, not just this one.
+
+This document is the orientation for future agents working on that
+path. The feature inventory below is the chunkie audit at the time
+of writing — a map of work units, not a contract on scope. Phases
+ship as useful units, gated by the cross-runner.
 
 ## Methodology
 
 1. **Numbl is the oracle.** Before changing mtoc2 to support a new
    feature, run the snippet through numbl and read the relevant
    `../numbl/src/numbl-core/` source. Match numbl's behavior, not
-   intuition.
+   intuition. The shape of the feature mtoc2 grows is numbl's
+   shape — including the corners chunkie doesn't exercise.
 
-2. **One feature per topic file.** Each added capability gets its
-   own `.m` script (or subtests in an existing topic) under
-   `test_scripts/`. The cross-runner and all-modes runner are the
-   commit-time gates. **Do not** add `tmp/chunkie_ex01_circle.m` to
-   `test_scripts/` until it actually passes end-to-end — the topic
-   files are the staircase that gets us there.
+2. **Implement features in full, not in slices.** A chunkie gap
+   surfaces a _feature class_ (a builtin family, an IR construct,
+   a workspace rule). Implement that feature class the way numbl
+   implements it — including the inputs, error modes, and edge
+   cases chunkie itself doesn't touch — so a future program that
+   uses the same feature differently still works. Example: if
+   chunkie surfaces `sort(x, 'descend')`, land mode-arg support
+   end-to-end (`'ascend'`, `'descend'`, the index-output overload
+   if numbl supports it) — not just the literal call the chunkie
+   line makes.
 
-3. **AOT-feasibility is judged per feature.** Some features the
+3. **One feature per topic file.** Each added feature class gets
+   its own `.m` script (or subtests in an existing topic) under
+   `test_scripts/`. The topic file should cover the feature's
+   surface (success cases, edge cases, error cases) — not only
+   the slice chunkie hit. The cross-runner and all-modes runner
+   are the commit-time gates. **Do not** add
+   `tmp/chunkie_ex01_circle.m` to `test_scripts/` until it
+   actually passes end-to-end — the topic files are the staircase
+   that gets us there.
+
+4. **AOT-feasibility is judged per feature.** Some features the
    chunkie script needs (`try/catch`, cell comma-list expansion
    into multi-output, dynamic struct shape) may be interpreter-only
    for the foreseeable future. When a feature lands interpreter-
    first, the lowerer raises `UnsupportedConstruct` with a
-   span-attributed message, and the all-modes runner's `% mtoc2-
-test-xfail-c-aot:` / `-js-aot:` directive marks the script
-   xfail for those backends. The interpreter is the always-
-   available execution path.
+   span-attributed message, and the all-modes runner's
+   `% mtoc2-test-xfail-c-aot:` / `-js-aot:` directive marks the
+   script xfail for those backends. The interpreter is the
+   always-available execution path.
 
-4. **No speculative scope.** Add what the chunkie path actually
-   needs. Don't reflexively port adjacent MATLAB features just
-   because they're listed in `chunkerfunc.m`'s comments.
+5. **Generality, bounded by the feature.** Implement features in
+   the generality numbl supports, not the narrower slice chunkie
+   happens to use. But don't bundle _unrelated_ features into the
+   same phase — if the file that needs `strcmp` also has `regexp`,
+   don't land `regexp` unless something else needs it. The unit
+   of work is "the feature, as numbl does it," not "every call
+   site in the file I happened to open."
 
-5. **Refactor when a feature needs it; don't refactor speculatively.**
+6. **Refactor when a feature needs it; don't refactor speculatively.**
    If the next feature would land cleanly on top of a small
    restructure (extracting a helper, splitting an overloaded
    function, generalizing a sentinel), do the refactor as its own
@@ -61,6 +90,22 @@ test-xfail-c-aot:` / `-js-aot:` directive marks the script
   chunkie contains files with parse errors that numbl silently
   skips.
 
+- **External method file local helpers.** Per-method-file local
+  helper functions (numbl's `withMethodScope` shape):
+  `@<Class>/<method>.m` may declare top-level functions after the
+  primary; the helpers are visible only inside that method file,
+  so sibling external methods can reuse the same helper names
+  without conflict. Implemented in all three backends —
+  `Workspace.resolve` derives `{className, methodName}` from a
+  call site whose file matches `@<Cls>/<m>.m`, then routes the
+  `localFunction(classFile)` verdict to the right external file's
+  body. The interpreter / lowerer thread the method's source file
+  through dispatch so the resolver sees the right current file.
+  Classdef-body subfunctions (top-level helpers in `<Class>.m`
+  itself, visible to every method) are a separate feature class
+  and still get an explicit reject. Test:
+  `test_scripts/class_external_helpers/`.
+
 ## Feature inventory
 
 The chunkie driver (`tmp/chunkie_ex01_circle.m`) is short. Most of
@@ -68,6 +113,12 @@ the missing work lives transitively in `chunkerfunc.m`, the
 `@chunker/` class folder, and the `+lege/` package. The list below
 is the audit at the time of writing — recheck via numbl if
 anything looks stale.
+
+Each row is a **feature class**, not a per-call-site task. When
+you pick one up, scope the implementation to numbl's behavior for
+that whole feature (per methodology rule 2), not just the chunkie
+slice. The chunkie reference is what surfaced the gap; the spec
+is numbl.
 
 ### Surface (`chunkie_ex01_circle.m`)
 
@@ -89,7 +140,7 @@ Items higher in the list are prerequisites for items lower down.
 | Group | Feature                                                                                    | Notes                                                                                                                                                                                         |
 | ----- | ------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | 1     | Parse-error tolerance on workspace siblings                                                | done                                                                                                                                                                                          |
-| 1     | External method file with local helper functions (`@chunker/arcresample.m`)                | currently rejected in `Workspace.collectExternalMethods`. Numbl scopes the helpers per-method file.                                                                                           |
+| 1     | External method file with local helper functions (`@chunker/arcresample.m`)                | done                                                                                                                                                                                          |
 | 2     | Empty-matrix as struct sentinel: `cparams = []` then `isfield(cparams,'ta')` returns false | numbl treats `[]` as the absent-struct sentinel. Likely just an `isfield` transfer + interpreter `call` update.                                                                               |
 | 2     | `isfield(s, 'name')` and `isscalar(x)` builtins                                            | scalar predicates; small.                                                                                                                                                                     |
 | 2     | `sort(x, 'ascend' / 'descend')` mode arg                                                   | `sort` exists; verify the mode-string transfer accepts the literal.                                                                                                                           |
@@ -122,41 +173,63 @@ than wiring AOT to silently fall back to the interpreter.
 
 ## Suggested phase order
 
-Each phase is a self-contained PR. Cross-runner stays green at
-every phase boundary. Phases land in the order their _outputs_ are
+Each phase is a self-contained PR that lands a **feature class**
+in the generality numbl supports. Chunkie is the cross-check that
+the feature pulled in is actually useful; numbl is the spec for
+what the feature should do. Cross-runner stays green at every
+phase boundary. Phases land in the order their _outputs_ are
 needed by later phases.
 
-1. **Workspace robustness.** External-method-file helpers
-   (`@class/external.m` declaring local subfunctions). Mirror
-   numbl's behavior for the next-layer error that surfaces after
-   the parse-skip change in this PR. (Group 1)
+1. **External method file local helpers (workspace feature class).**
+   Class-folder method files (`@class/external.m`) that declare
+   per-method subfunctions, scoped the way numbl scopes them via
+   `withMethodScope`. Topic test exercises a multi-method class
+   where helpers in different method files reuse the same name —
+   not just the chunkie case. (Group 1)
 
-2. **Empty-matrix as struct sentinel + scalar predicates.**
-   `cparams = []` patterns with `isfield`/`isscalar`. Lets us
-   skip past the default-arg blocks at the top of `chunkerfunc`
-   and many other MATLAB functions. (Group 2)
+2. **Empty-matrix as struct sentinel + scalar predicates
+   (semantics feature class).** `[]` as an absent-struct sentinel
+   plus `isfield`/`isscalar`. Cover numbl's full sentinel
+   semantics (`isfield` on a non-struct, `isscalar` across
+   numeric/struct/char/string/handle), not only the
+   `if ~isfield(opts,'name')` chunkie pattern. (Group 2)
 
-3. **Text + sort + tolerance scalars.** `strcmp` / `strcmpi`,
-   `sort(...,'ascend')`, `uniquetol`, `norm`, `dot`. Each is a
-   small per-builtin change. (Group 2)
+3. **Text + sort + tolerance scalars (builtin family).**
+   `strcmp` / `strcmpi`, `sort(...,'ascend' / 'descend')`,
+   `uniquetol`, `norm`, `dot`. Each builtin lands with the full
+   numbl-supported signature space (e.g. `sort` with the index
+   output overload, `norm` with the order argument) — not the
+   one-shape slice chunkie hits. (Group 2)
 
-4. **Member-rooted indexed writes + multi-output handle calls.**
-   Lowerer-level changes; biggest non-cell lift. (Group 3)
+4. **Member-rooted indexed writes + multi-output handle calls
+   (IR feature class).** Lowerer changes that generalize index-
+   write to member-rooted LHS and multi-output to handle-call
+   RHS. Both are general IR shapes; once landed they're
+   available everywhere, not just to chunkie call sites.
+   (Group 3)
 
-5. **Cells.** New owned-value kind. Plan this one out in its own
-   doc (à la `complex_plan.md`) before starting. (Group 4)
+5. **Cells (type-system feature class).** New owned-value kind.
+   Plan this one out in its own doc (à la `complex_plan.md`)
+   before starting. Scope to numbl's full cell semantics — read,
+   write, comma-list expansion, `iscell`, etc. — not only the
+   `out{1:nout}` slice in `chunkerfunc.m`. (Group 4)
 
-6. **`try` / `catch` (interpreter-only first).** Add an IR node
-   for completeness, raise `UnsupportedConstruct` for AOT, wire
-   the interpreter's `execStmt`. Land with the all-modes xfail
-   directive. (Group 5)
+6. **`try` / `catch` (interpreter-only first, control-flow
+   feature class).** Add an IR node for completeness, raise
+   `UnsupportedConstruct` for AOT, wire the interpreter's
+   `execStmt`. Cover numbl's full try/catch semantics (the
+   `catch ME` binding, `MException` shape if numbl supports it,
+   nested try). Land with the all-modes xfail directive.
+   (Group 5)
 
 7. **End-to-end pass on `chunkie_ex01_circle.m`.** At this point
    the driver should work in the interpreter. AOT may xfail on a
    handful of leaf functions. Add a top-level entry in
    `test_scripts/` (probably `test_scripts/chunkie_ex01/` with a
    `main.m` that copies the driver verbatim) so the result stays
-   gated.
+   gated. After this phase, the same feature units we built
+   should let other MATLAB toolboxes start working with little
+   or no incremental effort — that's the parity payoff.
 
 Don't sweat the numbering — if step 3 turns out to depend on step
 4, reshuffle. The list is a dependency graph more than a timeline.
@@ -187,10 +260,13 @@ tmp/chunkie_ex01_circle.m` to confirm numbl still runs it. The
   `npx tsc && npx tsx scripts/run_test_scripts.ts && npx tsx
 scripts/run_test_scripts_all_modes.ts && npx vitest run && npm run
 lint && npm run format:check`. All clean.
-- **Resist scope creep.** A phase that lands `strcmp` does not
-  also need to land `regexp`, `contains`, `lower`, etc. Add what
-  the chunkie path uses; the rest waits until something else
-  needs it.
+- **Resist scope creep across features.** A phase that lands
+  `strcmp` does not also need to land `regexp`, `contains`,
+  `lower`, etc. Those are _different_ feature classes. But
+  inside the `strcmp` feature, do cover what numbl supports
+  (case folding, char vs. string args, vector inputs if numbl
+  vectorizes) — that's the in-scope generality from rules 2
+  and 5, not creep.
 
 ## Reading the chunkie source
 

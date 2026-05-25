@@ -370,12 +370,13 @@ export class Workspace {
   }
 
   /** Pull the primary Function AST from each `@ClassName/<methodName>.m`
-   *  external method file that numbl registered for `info`. Methods that
-   *  declare local helper functions in the same file are not yet
-   *  supported by mtoc2 (numbl's `withMethodScope` swaps them in at
-   *  lowering time; mtoc2 has no equivalent). Returns `undefined` when
-   *  the class has no external methods, so the call site keeps the
-   *  pre-existing register signature unchanged. */
+   *  external method file that numbl registered for `info`. Any other
+   *  top-level functions in the file are per-method-file local helpers
+   *  (numbl scopes them via `withMethodScope`); mtoc2 surfaces them
+   *  through the resolve path via `target.source.from === "classFile"`,
+   *  so we don't need to collect them here — only the primary needs to
+   *  join the class's method registry. Returns `undefined` when the
+   *  class has no external methods. */
   private collectExternalMethods(
     info: ClassInfo
   ): Map<string, FuncStmt> | undefined {
@@ -391,13 +392,10 @@ export class Workspace {
         );
       }
       let primary: FuncStmt | null = null;
-      let helperCount = 0;
       for (const stmt of ast.body) {
         if (stmt.type !== "Function") continue;
         if (stmt.name === methodName) {
           primary = stmt;
-        } else {
-          helperCount++;
         }
       }
       if (!primary) {
@@ -405,13 +403,6 @@ export class Workspace {
           `external method file '${mf.fileName}' has no function named ` +
             `'${methodName}'`,
           info.ast.span
-        );
-      }
-      if (helperCount > 0) {
-        throw new UnsupportedConstruct(
-          `external method file '${mf.fileName}' declares local helper ` +
-            `functions; per-method helper scope is not yet supported by mtoc2`,
-          primary.span
         );
       }
       out.set(methodName, primary);
@@ -452,10 +443,17 @@ export class Workspace {
   ): ResolvedTarget | null {
     this.finalize();
     const itemTypes = argTypes.map(mtypeToItemType);
+    // Numbl's resolver only routes a call to a class-file subfunction
+    // when callSite.{className,methodName} are set. mtoc2 hasn't
+    // threaded those through every call site explicitly, but for an
+    // `@ClassName/<methodName>.m` file the values are recoverable
+    // from the path. Augment the callSite so external-method-file
+    // helpers resolve correctly without touching every caller.
+    const augmented = augmentCallSiteFromFile(callSite);
     const target = resolveFunction(
       name,
       itemTypes,
-      callSite,
+      augmented,
       this.ctx.functionIndex
     );
     if (!target) return null;
@@ -521,11 +519,61 @@ export class Workspace {
           }
           return { kind: "userFunction", name, ast, file: entry.fileName };
         }
+        if (target.source.from === "classFile") {
+          const { className, methodScope } = target.source;
+          if (methodScope === undefined) {
+            // No method-scope context = a call to a class-file
+            // subfunction from outside any method. Numbl wouldn't
+            // route the call here in that case (its resolver gates
+            // on `callSite.methodName`), so reaching here means the
+            // call came from inside a class method but mtoc2 didn't
+            // recover the method scope. Surface the gap directly.
+            throw new UnsupportedConstruct(
+              `function '${name}' resolves to a subfunction of class ` +
+                `'${className}', but the call site has no method scope ` +
+                `(mtoc2 only resolves class-file subfunctions from inside ` +
+                `that class's methods)`,
+              span
+            );
+          }
+          const classInfo = this.ctx.registry.classesByName.get(className);
+          const methodFile = classInfo?.externalMethodFiles.get(methodScope);
+          if (methodFile === undefined) {
+            // The methodScope must be an external method file: the
+            // helper was discovered in that file's body. classdef-body
+            // subfunctions (helpers at the top level of `<Class>.m`
+            // itself, visible to every method) are a related feature
+            // class mtoc2 hasn't wired yet — keep the explicit reject.
+            throw new UnsupportedConstruct(
+              `function '${name}' resolves to a subfunction of class ` +
+                `'${className}', but the owning method scope ` +
+                `'${methodScope}' is not an external method file ` +
+                `(classdef-body subfunctions are not yet supported by mtoc2)`,
+              span
+            );
+          }
+          const ast = findFunctionInBody(
+            this.ctx.fileASTCache.get(methodFile.fileName)?.body,
+            name
+          );
+          if (!ast) {
+            throw new UnsupportedConstruct(
+              `internal: resolver claimed '${name}' is a local helper of ` +
+                `'${methodFile.fileName}' but no matching Function stmt ` +
+                `was found`,
+              span
+            );
+          }
+          return {
+            kind: "userFunction",
+            name,
+            ast,
+            file: methodFile.fileName,
+          };
+        }
         throw new UnsupportedConstruct(
           `function '${name}' resolves to a subfunction of a ` +
-            (target.source.from === "classFile"
-              ? `class file (not yet supported by mtoc2)`
-              : `private file (private/ directories are not yet supported by mtoc2)`),
+            `private file (private/ directories are not yet supported by mtoc2)`,
           span
         );
       }
@@ -668,6 +716,34 @@ function findFunctionInBody(
     if (s.type === "Function" && s.name === name) return s;
   }
   return null;
+}
+
+/** Recover `{className, methodName}` from a call-site file path of the
+ *  form `.../@<ClassName>/<methodName>.m` so numbl's resolver can
+ *  route class-file subfunction calls correctly. Returns the
+ *  callSite unchanged when:
+ *
+ *   - the path doesn't match the `@`-folder shape (caller isn't
+ *     inside a class method); or
+ *   - one of the two fields is already set (caller was explicit and
+ *     knows better than the path heuristic).
+ */
+function augmentCallSiteFromFile(cs: CallSite): CallSite {
+  if (cs.className !== undefined && cs.methodName !== undefined) return cs;
+  const segs = cs.file.split("/");
+  const fileSeg = segs[segs.length - 1];
+  const parentSeg = segs[segs.length - 2];
+  if (!fileSeg || !parentSeg) return cs;
+  if (!fileSeg.endsWith(".m")) return cs;
+  if (!parentSeg.startsWith("@")) return cs;
+  const derivedClass = parentSeg.slice(1);
+  const derivedMethod = fileSeg.slice(0, -2);
+  if (!derivedClass || !derivedMethod) return cs;
+  return {
+    ...cs,
+    className: cs.className ?? derivedClass,
+    methodName: cs.methodName ?? derivedMethod,
+  };
 }
 
 // Re-export for callers that need the ClassDef AST type without
