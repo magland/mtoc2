@@ -111,7 +111,7 @@ export function translateProject(
   // for whichever file failed.
   let workspaceFiles;
   try {
-    workspaceFiles = parseFiles(files);
+    workspaceFiles = parseFiles(files, activeName);
   } catch (e) {
     if (e instanceof ParseSyntaxError) {
       return { error: normalizeSyntaxError(e, files) };

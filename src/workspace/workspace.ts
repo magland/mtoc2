@@ -20,7 +20,10 @@
  */
 
 import type { AbstractSyntaxTree, Stmt, Span } from "../parser/index.js";
-import { parseMFile } from "../parser/index.js";
+import {
+  parseMFile,
+  SyntaxError as ParseSyntaxError,
+} from "../parser/index.js";
 import {
   LoweringContext,
   resolveFunction,
@@ -586,16 +589,24 @@ export class Workspace {
   }
 }
 
-/** Pre-parse a list of source files into `WorkspaceFile`s. Parser
- *  errors are propagated; the caller normalizes them.
+/** Pre-parse a list of source files into `WorkspaceFile`s.
+ *
+ *  The `mainName` file's parse errors are propagated; for every other
+ *  file, parse errors are reported via `onWarn` and the file is
+ *  dropped from the result. This matches numbl, which warns and
+ *  skips workspace siblings that fail to parse so that a single bad
+ *  file in an `addpath`'d tree doesn't poison the whole run.
  *
  *  Files ending in `.mtoc2.js` skip MATLAB parsing — they're plain
  *  JavaScript text that the workspace will hand to the mtoc2 user-
  *  function loader later. Their `ast` field stays undefined. */
 export function parseFiles(
-  files: ReadonlyArray<{ name: string; source: string }>
+  files: ReadonlyArray<{ name: string; source: string }>,
+  mainName?: string,
+  onWarn: (msg: string) => void = m => console.warn(m)
 ): WorkspaceFile[] {
-  return files.map(f => {
+  const out: WorkspaceFile[] = [];
+  for (const f of files) {
     // `.mtoc2.js` files are JavaScript text — no MATLAB parse.
     // `.c` / `.h` files are sibling files referenced via
     // `exports.cSources`; they pass straight into the workspace
@@ -606,14 +617,27 @@ export function parseFiles(
       f.name.endsWith(".c") ||
       f.name.endsWith(".h")
     ) {
-      return { name: f.name, source: f.source };
+      out.push({ name: f.name, source: f.source });
+      continue;
     }
-    return {
-      name: f.name,
-      source: f.source,
-      ast: parseMFile(f.source, f.name),
-    };
-  });
+    try {
+      out.push({
+        name: f.name,
+        source: f.source,
+        ast: parseMFile(f.source, f.name),
+      });
+    } catch (e) {
+      if (mainName !== undefined && f.name === mainName) throw e;
+      if (e instanceof ParseSyntaxError) {
+        onWarn(
+          `Warning: skipping ${f.name} (syntax error at line ${e.line ?? "?"})`
+        );
+      } else {
+        onWarn(`Warning: skipping ${f.name} (parse error)`);
+      }
+    }
+  }
+  return out;
 }
 
 /** Adapter from mtoc2's `Type` to numbl's `ItemType`. The resolver

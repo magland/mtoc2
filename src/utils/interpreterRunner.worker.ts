@@ -80,7 +80,9 @@ function runOnce(req: InterpreterRunRequest): void {
   let exitCode = 0;
 
   try {
-    const parsed = parseFiles(req.files);
+    const parsed = parseFiles(req.files, req.mainName, m =>
+      stderr.write(m + "\n")
+    );
     const ws = new Workspace(req.mainName, []);
     for (const f of parsed) ws.addFile(f);
     ws.finalize();

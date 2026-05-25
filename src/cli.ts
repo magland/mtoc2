@@ -592,7 +592,7 @@ function buildWorkspaceFromFiles(
   mainName: string,
   searchPaths: string[]
 ): { workspace: Workspace; mainName: string } {
-  const parsed = parseFiles(files);
+  const parsed = parseFiles(files, mainName);
   const ws = new Workspace(mainName, searchPaths);
   for (const f of parsed) ws.addFile(f);
   ws.finalize();

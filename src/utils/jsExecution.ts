@@ -43,7 +43,7 @@ export function buildJs(
   activeName: string
 ): BuildJsResult {
   try {
-    const parsed = parseFiles(files);
+    const parsed = parseFiles(files, activeName);
     const ws = new Workspace(activeName, []);
     for (const f of parsed) ws.addFile(f);
     ws.finalize();
