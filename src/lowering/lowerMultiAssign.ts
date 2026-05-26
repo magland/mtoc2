@@ -74,12 +74,21 @@ export function lowerMultiAssign(
     );
   }
   const fc = { name: callName, args: argExprs, span: callSpan };
-  // Validate lvalues up-front.
+  // Validate lvalues up-front. Var / Ignore are the direct sret
+  // targets; Member and Index lvalues are accepted via a temp-
+  // substitute pass that lands the call into freshly-named locals
+  // and then runs a synthesized per-slot AssignLValue through the
+  // regular write paths. MemberDynamic / IndexCell are out of scope.
   for (const lv of s.lvalues) {
-    if (lv.type !== "Var" && lv.type !== "Ignore") {
+    if (
+      lv.type !== "Var" &&
+      lv.type !== "Ignore" &&
+      lv.type !== "Member" &&
+      lv.type !== "Index"
+    ) {
       throw new UnsupportedConstruct(
-        `multi-assign lvalue must be a simple identifier or '~' ignore ` +
-          `(got '${lv.type}')`,
+        `multi-assign lvalue must be a simple identifier, '~' ignore, ` +
+          `a member access, or an indexed write (got '${lv.type}')`,
         s.span
       );
     }
@@ -219,14 +228,32 @@ export function lowerMultiAssign(
     };
     // 0 or 1 lvalues: lvalues.length === 0 → drop-all reached via the
     // ExprStmt routing (caller passed empty lvalues for a bare
-    // 1-output call); lvalues.length === 1 → either named or `~`.
+    // 1-output call); lvalues.length === 1 → either named, `~`,
+    // or a Member / Index lvalue that lands the call into a temp
+    // and then runs a synthesized AssignLValue to move into the slot.
     const lv = s.lvalues[0];
-    if (lv === undefined || lv.type !== "Var") {
+    if (lv === undefined || lv.type === "Ignore") {
       const stmt: IRStmt = { kind: "ExprStmt", expr: callExpr, span: s.span };
       return argHoists.length === 0 ? stmt : [...argHoists, stmt];
     }
-    const stmt = this.recordAssignment(lv.name, callExpr, s.span);
-    return argHoists.length === 0 ? stmt : [...argHoists, stmt];
+    if (lv.type === "Var") {
+      const stmt = this.recordAssignment(lv.name, callExpr, s.span);
+      return argHoists.length === 0 ? stmt : [...argHoists, stmt];
+    }
+    // Member / Index lvalue: land the call into a temp, then run a
+    // synthesized AssignLValue through the regular write path.
+    const sub = substituteNonVarLvalues.call(
+      this,
+      [lv],
+      [spec.outputTypes[0] ?? { kind: "Unknown" }],
+      s.span
+    );
+    const tempLv = sub.effectiveLvalues[0] as Extract<LValue, { type: "Var" }>;
+    const assignStmt = this.recordAssignment(tempLv.name, callExpr, s.span);
+    const postStmts = lowerPostStores.call(this, sub.postStores);
+    const head: IRStmt[] =
+      argHoists.length === 0 ? [assignStmt] : [...argHoists, assignStmt];
+    return [...head, ...postStmts];
   }
 
   // 0-output spec with no lvalues: bare-statement routing path
@@ -251,13 +278,15 @@ export function lowerMultiAssign(
   // N≥2 outputs. Build a MultiAssignCall via the shared slot-binding
   // helper so the user-function and builtin paths share one place
   // for the slot-type validation and the `recordAssignment`
-  // discipline.
+  // discipline. Non-Var lvalues are substituted with temps; the
+  // synthesized AssignLValue per slot runs after the MAC.
   const slotTypes: Type[] = spec.outputTypes.map(t => t ?? { kind: "Unknown" });
+  const sub = substituteNonVarLvalues.call(this, s.lvalues, slotTypes, s.span);
   const outputs = buildMultiOutputSlots.call(
     this,
     callName,
     slotTypes,
-    s.lvalues,
+    sub.effectiveLvalues,
     i => `output '${fnAst.outputs[i]}'`,
     s.span
   );
@@ -269,7 +298,67 @@ export function lowerMultiAssign(
     outputs,
     span: s.span,
   };
-  return argHoists.length === 0 ? mac : [...argHoists, mac];
+  const postStmts = lowerPostStores.call(this, sub.postStores);
+  const head: IRStmt[] = argHoists.length === 0 ? [mac] : [...argHoists, mac];
+  return [...head, ...postStmts];
+}
+
+/** Substitute non-Var lvalues with synthetic `Var` lvalues that
+ *  reference fresh temps, and return the synthesized `AssignLValue`
+ *  AST statements that move each temp into the original Member /
+ *  Index lvalue.
+ *
+ *  Lets multi-output paths land call results into freshly-named
+ *  temps, then run a normal per-slot write through
+ *  `lowerAssignLValue` — reusing every existing type-check, ANF
+ *  rule, and env refresh without duplicating the Member / Index
+ *  write logic here.
+ *
+ *  The temp is registered in env with the slot's type so the
+ *  subsequent `lowerAssignLValue` lowering sees the right type
+ *  when it lowers the synthetic `Ident` RHS. Var / Ignore slots
+ *  pass through unchanged. */
+function substituteNonVarLvalues(
+  this: Lowerer,
+  lvalues: ReadonlyArray<LValue>,
+  slotTypes: ReadonlyArray<Type>,
+  span: Span
+): { effectiveLvalues: LValue[]; postStores: Stmt[] } {
+  const effective: LValue[] = [];
+  const postStores: Stmt[] = [];
+  for (let i = 0; i < lvalues.length; i++) {
+    const lv = lvalues[i];
+    if (lv.type === "Var" || lv.type === "Ignore") {
+      effective.push(lv);
+      continue;
+    }
+    const tempName = this.freshTempName();
+    const slotTy = slotTypes[i] ?? { kind: "Unknown" as const };
+    this.env.set(tempName, { cName: tempName, ty: slotTy });
+    effective.push({ type: "Var", name: tempName });
+    const tempIdent: Expr = { type: "Ident", name: tempName, span };
+    postStores.push({
+      type: "AssignLValue",
+      lvalue: lv,
+      expr: tempIdent,
+      suppressed: true,
+      span,
+    });
+  }
+  return { effectiveLvalues: effective, postStores };
+}
+
+/** Lower each synthesized post-store AssignLValue through the
+ *  regular write path and flatten the result. */
+function lowerPostStores(this: Lowerer, postStores: Stmt[]): IRStmt[] {
+  const out: IRStmt[] = [];
+  for (const s of postStores) {
+    if (s.type !== "AssignLValue") continue;
+    const lowered = this.lowerAssignLValue(s);
+    if (Array.isArray(lowered)) out.push(...lowered);
+    else out.push(lowered);
+  }
+  return out;
 }
 
 /** Validate each multi-output slot type, register the lvalue
@@ -362,11 +451,14 @@ function buildBuiltinMultiAssign(
       s.span
     );
   }
+  // Non-Var lvalues land into temps, then a synthesized
+  // AssignLValue per slot runs through the regular write path.
+  const sub = substituteNonVarLvalues.call(this, s.lvalues, outTys, s.span);
   const outputs = buildMultiOutputSlots.call(
     this,
     callName,
     outTys,
-    s.lvalues,
+    sub.effectiveLvalues,
     i => `output slot ${i + 1}`,
     s.span
   );
@@ -382,5 +474,7 @@ function buildBuiltinMultiAssign(
     outputs,
     span: s.span,
   };
-  return argHoists.length === 0 ? mac : [...argHoists, mac];
+  const postStmts = lowerPostStores.call(this, sub.postStores);
+  const head: IRStmt[] = argHoists.length === 0 ? [mac] : [...argHoists, mac];
+  return [...head, ...postStmts];
 }

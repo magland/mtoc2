@@ -177,10 +177,31 @@ ship as useful units, gated by the cross-runner.
   interpreter clones the root struct + leaf tensor on the write
   path so pass-by-value semantics hold. The post-write env
   refresh widens the leaf field's NumericType (strip `exact`,
-  sign → unknown). MultiAssign with member-rooted lvalues
-  (`[chnkr.a, chnkr.b] = ...`) is still rejected — a separate
-  sub-feature. Tests in `test_scripts/structs.m` and
+  sign → unknown). Tests in `test_scripts/structs.m` and
   `test_scripts/classes.m`.
+
+- **MultiAssign with member / index lvalues.** `[s.a, s.b] =
+  swap(x, y)`, `[v(1), v(3)] = swap(...)`, `[s.M(1), s.M(3)] =
+  swap(...)`, and mixed-with-Var / discard / single-output
+  Member-lvalue cases all work end-to-end. Implemented by a temp-
+  substitute pass in `lowerMultiAssign`: each non-Var lvalue
+  lands the call's slot into a fresh `_mtoc2_t<N>` local, then a
+  synthesized `AssignLValue` per slot routes through the regular
+  `lowerAssignLValue` write path (reusing every existing type-
+  check, ANF rule, and env refresh). No IR or codegen changes —
+  composition of `MultiAssignCall` + `MemberStore` /
+  `IndexStore` already covered. Tests in
+  `test_scripts/multi_output.m`.
+
+- **JS-AOT pass-by-value for owned types.** A pre-existing bug:
+  `b = a; b.f = rhs` (struct / class / handle assignment) shared
+  the JS object by reference, so the write leaked back into `a`.
+  Same issue for `b.f(i) = rhs` and for function-argument
+  aliasing. Adopted the c-aot always-copy protocol via a new JS
+  helper `mtoc2_deep_clone`, with an `emitOwnedRhsJs` wrapper
+  applied to owned-typed RHSes at three sites: `Assign`,
+  user-function `Call`, and `MultiAssignCall`. Tests in
+  `test_scripts/structs.m` and `test_scripts/classes.m`.
 
 ## Feature inventory
 

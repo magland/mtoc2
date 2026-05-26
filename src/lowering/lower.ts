@@ -750,7 +750,11 @@ export class Lowerer {
    *  the field report the rhs's full internal type (the C typedef
    *  is unaffected — the typedef hash sees only the C-level type
    *  via `cFieldTypeStr`, not the internal lattice precision). */
-  private lowerAssignLValue(
+  // Package-internal (used by `lowerMultiAssign` so it can route
+  // synthesized AssignLValue stmts back through this path for the
+  // Member / Index lvalue cases). Treat as private outside the
+  // lowering module.
+  lowerAssignLValue(
     s: Extract<Stmt, { type: "AssignLValue" }>
   ): IRStmt | IRStmt[] {
     const lv = s.lvalue;

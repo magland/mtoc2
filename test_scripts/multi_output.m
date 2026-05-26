@@ -28,6 +28,14 @@ test_nargout_inside_function();
 test_nargout_specialization_per_caller();
 test_nargin_inside_function();
 test_nargout_in_branch();
+
+test_multi_assign_struct_member_lvalues();
+test_multi_assign_struct_mixed_with_var();
+test_multi_assign_struct_discard_member();
+test_multi_assign_index_lvalues();
+test_multi_assign_member_index_mix();
+test_multi_assign_class_property_lvalues();
+test_multi_assign_one_member_lvalue();
 test_nargout_multi_assign();
 
 % -------- multi_output_tensor --------
@@ -324,5 +332,71 @@ function [a, b, c] = triple_or_less(x)
     c = x + 3;
   else
     c = 0;
+  end
+end
+
+function [a, b] = mout_swap(x, y)
+  a = y;
+  b = x;
+end
+
+function test_multi_assign_struct_member_lvalues()
+  s = struct('a', 0, 'b', 0);
+  [s.a, s.b] = mout_swap(7, 9);
+  disp(s.a);
+  disp(s.b);
+end
+
+function test_multi_assign_struct_mixed_with_var()
+  s = struct('a', 0);
+  [v, s.a] = mout_swap(7, 9);
+  disp(v);
+  disp(s.a);
+end
+
+function test_multi_assign_struct_discard_member()
+  s = struct('a', 0, 'b', 0);
+  [~, s.b] = mout_swap(11, 22);
+  disp(s.b);
+end
+
+function test_multi_assign_index_lvalues()
+  v = zeros(1, 3);
+  [v(1), v(3)] = mout_swap(100, 200);
+  disp(v);
+end
+
+function test_multi_assign_member_index_mix()
+  s = struct('M', zeros(1, 3));
+  [s.M(1), s.M(3)] = mout_swap(11, 22);
+  disp(s.M);
+end
+
+function test_multi_assign_class_property_lvalues()
+  p = HandlePoint(0, 0);
+  [p.x, p.y] = mout_swap(1, 2);
+  disp(p.x);
+  disp(p.y);
+end
+
+function test_multi_assign_one_member_lvalue()
+  % Single-lvalue truncation case where the lvalue is a Member: the
+  % spec truncates to nargout=1 and the call result lands in s.a via
+  % a synthesized AssignLValue.
+  s = struct('a', 0);
+  [s.a] = mout_swap(1, 2);
+  disp(s.a);
+end
+
+classdef HandlePoint
+  properties
+    x = 0
+    y = 0
+  end
+  methods
+    function obj = HandlePoint(x, y)
+      obj.x = x;
+      obj.y = y;
+    end
   end
 end
