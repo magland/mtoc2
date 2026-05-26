@@ -10,9 +10,12 @@
 // `runtime/value.ts`). `shape` is column-major to match numbl /
 // LAPACK. `imag` is undefined for statically-real tensors.
 //
-// JS has GC: no `_free`, no `_assign` indirection. The four-helper
-// ownership protocol on the C side collapses to plain assignment and
-// constructor calls on the JS side.
+// JS has GC, so the C-side ownership protocol's `_free` / `_assign`
+// helpers have no JS counterpart — lifetime is automatic. Value
+// semantics aren't: an alias-producing assignment (`b = a`, function
+// arg pass) still needs a deep copy or the next member / indexed
+// write through one alias would leak. See `system/deep_clone.js`
+// and the `emitOwnedRhsJs` wrapper in `src/codegen/emitJs.ts`.
 
 export function mtoc2_tensor_make(shape, data) {
   let total = 1;
