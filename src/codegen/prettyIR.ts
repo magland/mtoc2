@@ -205,9 +205,18 @@ export function irStmtHeader(s: IRStmt): string | null {
       const argsTxt = s.args.map(irExprToString).join(", ");
       return `[${slotsTxt}] = ${s.name}(${argsTxt})`;
     }
-    case "IndexStore":
-      return `${s.base.name}(${s.indices.map(irExprToString).join(", ")}) = ${irExprToString(s.rhs)}`;
+    case "IndexStore": {
+      const lhs =
+        s.fieldPath !== undefined
+          ? [s.base.name, ...s.fieldPath].join(".")
+          : s.base.name;
+      return `${lhs}(${s.indices.map(irExprToString).join(", ")}) = ${irExprToString(s.rhs)}`;
+    }
     case "IndexSliceStore": {
+      const lhs =
+        s.fieldPath !== undefined
+          ? [s.base.name, ...s.fieldPath].join(".")
+          : s.base.name;
       const slotStrs = s.index.map(slot => {
         if (slot.kind === "Colon") return ":";
         if (slot.kind === "Scalar") return irExprToString(slot.expr);
@@ -219,7 +228,7 @@ export function irStmtHeader(s: IRStmt): string | null {
             : `${irExprToString(slot.step)}:`;
         return `${irExprToString(slot.start)}:${stepPart}${irExprToString(slot.end)}`;
       });
-      return `${s.base.name}(${slotStrs.join(", ")}) = ${irExprToString(s.rhs)}`;
+      return `${lhs}(${slotStrs.join(", ")}) = ${irExprToString(s.rhs)}`;
     }
   }
 }
