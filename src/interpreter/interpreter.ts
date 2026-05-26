@@ -153,8 +153,9 @@ export class Interpreter {
   declare callHandle: (
     h: RuntimeHandle,
     args: RuntimeValue[],
+    nargout: number,
     span: Span
-  ) => RuntimeValue;
+  ) => RuntimeValue[];
   declare callUserFunction: (
     fn: Extract<Stmt, { type: "Function" }>,
     args: RuntimeValue[],

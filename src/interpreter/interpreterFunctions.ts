@@ -203,13 +203,17 @@ export function callHandle(
   this: Interpreter,
   h: RuntimeHandle,
   args: RuntimeValue[],
+  nargout: number,
   span: Span
-): RuntimeValue {
+): RuntimeValue[] {
   if (h.kind === "named") {
-    const out = this.callByName(h.name, args, 1, span);
-    return out[0];
+    return this.callByName(h.name, args, nargout, span);
   }
-  // Anonymous: bind params + captures in a child env.
+  // Anonymous: bind params + captures in a child env. The body is a
+  // single expression, so any multi-output request beyond 1 truncates
+  // to a single value (matches numbl: `[a,b] = (@(x) x+1)(3)` would
+  // assign `4` to `a` and leave `b` unset/unused; mtoc2 simply
+  // returns the single value).
   if (args.length !== h.params.length) {
     throw new UnsupportedConstruct(
       `interpreter: anonymous handle expects ${h.params.length} arg(s) ` +
@@ -225,7 +229,8 @@ export function callHandle(
     ...(this.workspace !== undefined ? { workspace: this.workspace } : {}),
     currentFile: this.currentFile,
   });
-  return inner.evalExpr(h.body as Expr);
+  const result = inner.evalExpr(h.body as Expr);
+  return nargout === 0 ? [] : [result];
 }
 
 /** Build a class instance: initialize properties to defaults, run the

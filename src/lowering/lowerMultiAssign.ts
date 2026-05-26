@@ -18,6 +18,7 @@ import type { IRExpr, IRStmt } from "./ir.js";
 import {
   type Type,
   VOID,
+  isHandle,
   isMultiOutputSlotType,
   typeToString,
 } from "./types.js";
@@ -27,6 +28,7 @@ import { withSpan } from "./errors.js";
 import type { Lowerer } from "./lower.js";
 import { tryExtractDottedName } from "./lower.js";
 import { specializeUserFunction } from "./specialize.js";
+import { dispatchHandleMultiAssign } from "./lowerHandle.js";
 
 export function lowerMultiAssign(
   this: Lowerer,
@@ -82,8 +84,26 @@ export function lowerMultiAssign(
       );
     }
   }
+  // Handle multi-output via in-scope handle variable: route to the
+  // handle dispatch path (it specializes the underlying target at the
+  // caller's nargout and emits the same Call / MultiAssignCall IR
+  // shape user-function calls produce).
+  if (s.expr.type === "FuncCall") {
+    const envEntry = this.env.get(callName);
+    if (envEntry !== undefined && isHandle(envEntry.ty)) {
+      return dispatchHandleMultiAssign.call(
+        this,
+        callName,
+        envEntry,
+        argExprs,
+        s.lvalues,
+        s.span
+      );
+    }
+  }
   // Reject in-scope variable names and class names — only user
-  // functions can sit on the right of `[...] = ...` in v1.
+  // functions (or handles, handled above) can sit on the right of
+  // `[...] = ...` in v1.
   if (this.env.get(callName) !== undefined) {
     throw new UnsupportedConstruct(
       `multi-assign of '${callName}': name resolves to an in-scope ` +

@@ -16,6 +16,11 @@ test_tensor_capture_in_loop();
 test_struct_capture();
 test_class_capture();
 test_handle_of_handle_with_tensor();
+test_named_handle_multi_out();
+test_named_handle_multi_truncated_to_one();
+test_named_handle_multi_with_discard();
+test_named_handle_multi_drop_all();
+test_named_handle_multi_via_capture();
 
 function test_named_handle_basic()
   f = @sq;
@@ -164,6 +169,61 @@ end
 function y = sq(x); y = x * x; end
 function y = inc(x); y = x + 1; end
 function y = dec(x); y = x - 1; end
+
+function [a, b] = swap(x, y)
+  a = y;
+  b = x;
+end
+
+function [s, d, p] = three_returns(x, y)
+  s = x + y;
+  d = x - y;
+  p = x * y;
+end
+
+function test_named_handle_multi_out()
+  % Direct [a, b] = h(x, y) on a named handle to a multi-output
+  % function. mtoc2's lowerer used to reject this; should now
+  % specialize and dispatch via MultiAssignCall.
+  h = @swap;
+  [a, b] = h(1, 2);
+  disp(a);
+  disp(b);
+end
+
+function test_named_handle_multi_truncated_to_one()
+  % Single-output call site on a handle whose target declares
+  % multiple outputs — the spec truncates to nargout=1 and we get
+  % the first output.
+  h = @three_returns;
+  s = h(10, 3);
+  disp(s);
+end
+
+function test_named_handle_multi_with_discard()
+  % Discard the middle slot via `~`, and use a trailing-omitted
+  % slot (nargout=2 on a 3-output target).
+  h = @three_returns;
+  [s, ~] = h(10, 3);
+  disp(s);
+end
+
+function test_named_handle_multi_drop_all()
+  % Bare-statement use of a multi-output handle call: nargout=0,
+  % no lvalues. Same shape as `helper(x);` for a named user fn.
+  h = @three_returns;
+  h(2, 5);
+  disp(0);
+end
+
+function test_named_handle_multi_via_capture()
+  % Handle captured by an anonymous wrapper, then called multi-
+  % output. Exercises the capture + multi-out paths together.
+  k = @swap;
+  [u, v] = k(7, 9);
+  disp(u);
+  disp(v);
+end
 
 function r = apply(h, x)
   r = h(x);

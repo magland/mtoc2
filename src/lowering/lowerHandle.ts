@@ -12,14 +12,15 @@
  * standard scope-exit-free / early-free lifecycle.
  */
 
-import type { Expr, Span, Stmt } from "../parser/index.js";
+import type { Expr, LValue, Span, Stmt } from "../parser/index.js";
 import { TypeError, UnsupportedConstruct } from "./errors.js";
-import type { IRExpr } from "./ir.js";
-import { handleType, typeToString } from "./types.js";
-import type { HandleCapture, HandleType } from "./types.js";
+import type { IRExpr, IRStmt } from "./ir.js";
+import { handleType, typeToString, VOID } from "./types.js";
+import type { HandleCapture, HandleType, Type } from "./types.js";
 import { getBuiltin } from "../builtins/index.js";
 import type { EnvEntry, Lowerer } from "./lower.js";
-import { buildUserFunctionCall } from "./specialize.js";
+import { buildUserFunctionCall, specializeUserFunction } from "./specialize.js";
+import { buildMultiOutputSlots } from "./lowerMultiAssign.js";
 
 type FuncStmt = Extract<Stmt, { type: "Function" }>;
 
@@ -204,15 +205,11 @@ export function dispatchHandleCall(
   const allArgs = [...userArgs, ...captureArgs];
   // The handle's stored AST carries its own source span, which
   // identifies the file the function was defined in — that's the
-  // right file to salt the spec key with.
-  if (handleTy.ast.outputs.length >= 2) {
-    throw new UnsupportedConstruct(
-      `handle '${handleName}' targets '${handleTy.targetName}', which ` +
-        `has ${handleTy.ast.outputs.length} outputs; multi-output handle ` +
-        `dispatch is not supported yet`,
-      span
-    );
-  }
+  // right file to salt the spec key with. `buildUserFunctionCall`
+  // specializes the target with nargout=1 (single-output ABI), which
+  // is the correct truncation when the handle targets a multi-output
+  // function but the call site only wants one output. The multi-
+  // output call-site path lives in `dispatchHandleMultiAssign`.
   return buildUserFunctionCall.call(
     this,
     handleTy.ast,
@@ -221,6 +218,128 @@ export function dispatchHandleCall(
     span,
     { definingFile: handleTy.ast.span.file }
   );
+}
+
+/** `[a, b, ...] = h(args)` where `h` is an in-scope handle variable.
+ *  Mirrors `dispatchHandleCall`'s user-arg + capture-load wiring, then
+ *  specializes the target at the caller's nargout. Emits a Call (when
+ *  the spec truncates to 1 output) or a MultiAssignCall (N>=2 outputs);
+ *  drop-all bare-statement use (`h(args);`) passes 0 lvalues and emits
+ *  an ExprStmt. Returns the IR statement(s) to splice into the parent
+ *  block. */
+export function dispatchHandleMultiAssign(
+  this: Lowerer,
+  handleName: string,
+  handleEntry: EnvEntry,
+  argExprs: Expr[],
+  lvalues: ReadonlyArray<LValue>,
+  span: Span
+): IRStmt | IRStmt[] {
+  const handleTy = handleEntry.ty as HandleType;
+  const userArgs = argExprs.map(a => this.lowerExpr(a));
+  for (const a of userArgs) {
+    this.requireValueType(a, `argument to handle '${handleName}'`);
+  }
+  const baseVar: Extract<IRExpr, { kind: "Var" }> = {
+    kind: "Var",
+    name: handleName,
+    cName: handleEntry.cName,
+    ty: handleTy,
+    span,
+  };
+  const captureArgs: IRExpr[] = handleTy.captures.map(c => ({
+    kind: "HandleCaptureLoad",
+    base: baseVar,
+    captureName: c.name,
+    ty: c.ty,
+    span,
+  }));
+  const allArgs = [...userArgs, ...captureArgs];
+  // ANF args to scalar-or-Var — same discipline lowerMultiAssign uses
+  // for owned-producing arg expressions. The captures themselves are
+  // bare HandleCaptureLoad nodes that read from the handle struct;
+  // these are owned values for tensor/struct/etc captures, so route
+  // them through ANF too.
+  const argHoists: IRStmt[] = [];
+  const anfArgs = allArgs.map(a => this.anfRequireScalarOrVar(a, argHoists));
+  const argTypes = allArgs.map(a => a.ty);
+  if (lvalues.length > handleTy.ast.outputs.length) {
+    throw new UnsupportedConstruct(
+      `handle '${handleName}' targets '${handleTy.targetName}', which ` +
+        `returns ${handleTy.ast.outputs.length} output(s); ${lvalues.length} ` +
+        `were requested`,
+      span
+    );
+  }
+  if (handleTy.ast.outputs.length === 0 && lvalues.length > 0) {
+    throw new UnsupportedConstruct(
+      `handle '${handleName}' targets '${handleTy.targetName}', which has ` +
+        `no outputs and cannot be assigned`,
+      span
+    );
+  }
+  const callNargout = lvalues.length;
+  const spec = specializeUserFunction.call(
+    this,
+    handleTy.ast,
+    argTypes,
+    handleTy.targetName,
+    handleTy.ast.span.file,
+    undefined,
+    callNargout,
+    span
+  );
+  // 1-output spec (declared multi-output truncated, or declared
+  // single-output): classic return-by-value ABI.
+  if (spec.outputTypes.length === 1) {
+    const callExpr: IRExpr = {
+      kind: "Call",
+      cName: spec.cName,
+      name: handleTy.targetName,
+      args: anfArgs,
+      ty: spec.outputTypes[0] ?? { kind: "Unknown" },
+      span,
+    };
+    const lv = lvalues[0];
+    if (lv === undefined || lv.type !== "Var") {
+      const stmt: IRStmt = { kind: "ExprStmt", expr: callExpr, span };
+      return argHoists.length === 0 ? stmt : [...argHoists, stmt];
+    }
+    const stmt = this.recordAssignment(lv.name, callExpr, span);
+    return argHoists.length === 0 ? stmt : [...argHoists, stmt];
+  }
+  // 0-output spec: drop-all bare-statement path on a 0-output target.
+  if (spec.outputTypes.length === 0) {
+    const callExpr: IRExpr = {
+      kind: "Call",
+      cName: spec.cName,
+      name: handleTy.targetName,
+      args: anfArgs,
+      ty: VOID,
+      span,
+    };
+    const stmt: IRStmt = { kind: "ExprStmt", expr: callExpr, span };
+    return argHoists.length === 0 ? stmt : [...argHoists, stmt];
+  }
+  // N>=2 outputs.
+  const slotTypes: Type[] = spec.outputTypes.map(t => t ?? { kind: "Unknown" });
+  const outputs = buildMultiOutputSlots.call(
+    this,
+    handleTy.targetName,
+    slotTypes,
+    lvalues,
+    i => `output '${handleTy.ast.outputs[i]}'`,
+    span
+  );
+  const mac: IRStmt = {
+    kind: "MultiAssignCall",
+    cName: spec.cName,
+    name: handleTy.targetName,
+    args: anfArgs,
+    outputs,
+    span,
+  };
+  return argHoists.length === 0 ? mac : [...argHoists, mac];
 }
 
 /** Walk the body of an `@(...)` anonymous function and collect free

@@ -178,7 +178,8 @@ export function evalExpr(this: Interpreter, e: Expr): RuntimeValue {
       }
       if (envVal !== undefined && isHandleValue(envVal)) {
         const argVals = e.args.map(a => this.evalExpr(a));
-        return this.callHandle(envVal, argVals, e.span);
+        const out = this.callHandle(envVal, argVals, 1, e.span);
+        return out[0];
       }
       const argVals = e.args.map(a => this.evalExpr(a));
       return this.callByName(e.name, argVals, 1, e.span)[0];

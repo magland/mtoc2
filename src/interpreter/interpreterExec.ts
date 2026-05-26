@@ -11,6 +11,7 @@ import type { Expr, Stmt, LValue } from "../parser/index.js";
 import {
   isChar as isCharRV,
   isComplexValue,
+  isHandleValue,
   isTensor,
   isTruthy,
   makeComplexTensor,
@@ -92,7 +93,15 @@ export function execStmt(this: Interpreter, s: Stmt): void {
       const nargout = s.lvalues.length;
       if (s.expr.type === "FuncCall") {
         const argVals = s.expr.args.map(a => this.evalExpr(a));
-        results = this.callByName(s.expr.name, argVals, nargout, s.span);
+        // In-scope handle variable: route through callHandle so the
+        // single-output (`isHandleValue`) and multi-output paths share
+        // the same dispatch.
+        const envVal = this.env.get(s.expr.name);
+        if (envVal !== undefined && isHandleValue(envVal)) {
+          results = this.callHandle(envVal, argVals, nargout, s.span);
+        } else {
+          results = this.callByName(s.expr.name, argVals, nargout, s.span);
+        }
       } else if (s.expr.type === "MethodCall") {
         const me = s.expr;
         const dotted = tryExtractDottedName(me.base);

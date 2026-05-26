@@ -145,6 +145,7 @@ ship as useful units, gated by the cross-runner.
     norms (numbl: `p ∈ {1, 2, Inf, 'fro'}`) still rejected with a
     clear `UnsupportedConstruct`. Test additions in
     `test_scripts/math_builtins.m`.
+
   - `uniquetol(x[, tol])` — first-occurrence dedup with absolute
     tolerance, default `1e-6`. Naive pairwise scan (NOT sort +
     adjacent dedup), preserving numbl's transitive-chaining
@@ -152,6 +153,18 @@ ship as useful units, gated by the cross-runner.
     NaN survives as its own entry per scan. Multi-output
     `[c, ia, ic]` form, `'ByRows'`, and complex inputs are
     out of scope. Test: `test_scripts/uniquetol_basics.m`.
+
+- **Multi-output handle calls + method-returning-self.**
+  `[a, b, ...] = h(args)` where `h` is an in-scope handle variable
+  now specializes the handle's target at the caller's nargout and
+  emits the same `Call` / `MultiAssignCall` IR shape user-function
+  calls produce. Both the truncation case (single-out call on a
+  multi-output target) and the bare-statement case (`h(args);`
+  with no lvalues) are wired. The previous "handle dispatch not
+  supported" rejection in `dispatchHandleCall` is removed.
+  Method-call-returning-self (`chnkr = chnkr.addchunk(nch)`) was
+  verified to already work through existing class support. Test
+  additions in `test_scripts/handles.m`.
 
 ## Feature inventory
 
@@ -192,11 +205,11 @@ Items higher in the list are prerequisites for items lower down.
 | 2     | `isfield(s, 'name')` and `isscalar(x)` builtins                                            | done                                                                                                                                                                                          |
 | 2     | `sort(x, 'ascend' / 'descend')` mode arg                                                   | done                                                                                                                                                                                          |
 | 2     | `strcmpi(a, b)` and `strcmp(a, b)`                                                         | done                                                                                                                                                                                          |
-| 2     | `uniquetol(x, tol)`                                                                        | done (first-occurrence naive scan — NOT sort+dedup, to preserve numbl's transitive-chaining behaviour). Multi-output `[c, ia, ic]` form deferred.                                              |
+| 2     | `uniquetol(x, tol)`                                                                        | done (first-occurrence naive scan — NOT sort+dedup, to preserve numbl's transitive-chaining behaviour). Multi-output `[c, ia, ic]` form deferred.                                             |
 | 2     | `norm(v)` / `dot(a, b)`                                                                    | `norm(v)` was already in; `dot(a,b)` done for real vector and real matrix (column-wise) forms. Complex `dot` and `norm` p-arg / 'fro' / 'inf' are separate sub-features.                      |
 | 3     | Member-rooted indexed write: `chnkr.field(:,:,i) = rhs`                                    | explicitly rejected by `lowerMultiAssign` / `lowerIndexStore`. Requires teaching the lowerer to thread the member root through `IndexStore`. Big lift across all three backends.              |
-| 3     | Method call returning self: `chnkr = chnkr.addchunk(nch)`                                  | should work once classes are stable; verify.                                                                                                                                                  |
-| 3     | Multi-output handle call: `[r,d,d2] = fcurve(t)`                                           | the AST is `MultiAssign` to a handle call. Today, multi-out is wired for named user functions; handles need the same path.                                                                    |
+| 3     | Method call returning self: `chnkr = chnkr.addchunk(nch)`                                  | done (works end-to-end in all three backends via existing class support; verified 2026-05-26).                                                                                                |
+| 3     | Multi-output handle call: `[r,d,d2] = fcurve(t)`                                           | done                                                                                                                                                                                          |
 | 4     | `cell(n, m)` cell array                                                                    | new owned-value kind. **Major.** Touches type lattice, IR, all three backends' runtime helpers.                                                                                               |
 | 4     | Cell read/write `out{j}`                                                                   | follows cells.                                                                                                                                                                                |
 | 4     | Comma-list expansion `[out{1:nout}] = fcurve(ts)`                                          | follows cells. Lowering rewrites the LHS into N separate stores from a dynamic-arity call.                                                                                                    |
