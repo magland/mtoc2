@@ -166,6 +166,22 @@ ship as useful units, gated by the cross-runner.
   verified to already work through existing class support. Test
   additions in `test_scripts/handles.m`.
 
+- **Member-rooted indexed writes.** `obj.field(i, j) = rhs` and
+  `obj.field(:, :, k) = rhs` work in all three backends for both
+  struct values and class instances. `IndexStore` /
+  `IndexSliceStore` gained an optional `fieldPath` / `leafTy`
+  pair: the IR's `base` Var still names the OWNING root (struct /
+  class) so liveness keeps tracking the root, and codegen targets
+  the slot via `<rootCName>.<fieldPath...>` with the field's
+  NumericType driving offset / complex-lane decisions. The
+  interpreter clones the root struct + leaf tensor on the write
+  path so pass-by-value semantics hold. The post-write env
+  refresh widens the leaf field's NumericType (strip `exact`,
+  sign → unknown). MultiAssign with member-rooted lvalues
+  (`[chnkr.a, chnkr.b] = ...`) is still rejected — a separate
+  sub-feature. Tests in `test_scripts/structs.m` and
+  `test_scripts/classes.m`.
+
 ## Feature inventory
 
 The chunkie driver (`tmp/chunkie_ex01_circle.m`) is short. Most of
