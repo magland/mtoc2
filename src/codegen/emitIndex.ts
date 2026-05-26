@@ -446,15 +446,22 @@ export function emitIndexSliceProducer(
   return `({ ${lines.join(" ")} })`;
 }
 
-/** Emit an `IndexSliceStore` statement: mutate `base` in place. */
+/** Emit an `IndexSliceStore` statement: mutate `base` in place.
+ *  Member-rooted stores target a field slot `<rootCName>.<fieldPath>`
+ *  with the field's NumericType replacing the (struct/class) base
+ *  type for offset / complex-lane decisions. */
 export function emitIndexSliceStore(
   s: Extract<IRStmt, { kind: "IndexSliceStore" }>,
   indent: string,
   state: RuntimeState
 ): string {
-  const baseCName = s.base.cName;
+  const baseCName =
+    s.fieldPath !== undefined
+      ? `${s.base.cName}.${s.fieldPath.join(".")}`
+      : s.base.cName;
+  const slotTy = s.leafTy ?? s.base.ty;
   const rhsIsScalar = isScalar(s.rhs.ty);
-  const baseIsComplex = isNumeric(s.base.ty) && s.base.ty.isComplex;
+  const baseIsComplex = isNumeric(slotTy) && slotTy.isComplex;
   const rhsIsComplex = isNumeric(s.rhs.ty) && s.rhs.ty.isComplex;
   if (baseIsComplex) {
     useRuntimeByName(state, "mtoc2_cscalar");
@@ -490,7 +497,7 @@ export function emitIndexSliceStore(
     let linearStoreCleanup: string | null = null;
     if (slot.kind === "Colon") {
       lines.push(
-        `${indent}  long _mtoc2_n = ${dimsProductExpr(baseCName, s.base.ty)};`
+        `${indent}  long _mtoc2_n = ${dimsProductExpr(baseCName, slotTy)};`
       );
       dstOffsetFor = k => k;
     } else if (slot.kind === "Range") {
@@ -507,7 +514,7 @@ export function emitIndexSliceStore(
       const linMask = emitLinearLogicalMaskSetup(
         slot,
         baseCName,
-        s.base.ty,
+        slotTy,
         lines,
         `${indent}  `,
         state

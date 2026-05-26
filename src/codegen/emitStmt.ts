@@ -376,9 +376,19 @@ function emitStmt(
       return `${indent}${slot} = ${rhs};`;
     }
     case "IndexStore": {
-      const offset = emitNdScalarOffset(state, s.indices, s.base.cName);
+      // For a member-rooted store the base Var still names the
+      // OWNING root struct/class; the slot the codegen targets is
+      // `<rootCName>.<fieldPath...>`. `leafTy` is the field's
+      // NumericType (replaces `base.ty` for the offset / complex-lane
+      // checks below).
+      const slotCName =
+        s.fieldPath !== undefined
+          ? `${s.base.cName}.${s.fieldPath.join(".")}`
+          : s.base.cName;
+      const slotTy = s.leafTy ?? s.base.ty;
+      const offset = emitNdScalarOffset(state, s.indices, slotCName);
       const rhs = emitExpr(s.rhs, state);
-      const baseIsComplex = isNumeric(s.base.ty) && s.base.ty.isComplex;
+      const baseIsComplex = isNumeric(slotTy) && slotTy.isComplex;
       const rhsIsComplex = isNumeric(s.rhs.ty) && s.rhs.ty.isComplex;
       if (baseIsComplex) {
         // Both lanes must be written. The offset expression may have
@@ -392,10 +402,10 @@ function emitStmt(
           lines.push(`${indent}  long _mtoc2_off = ${offset};`);
           lines.push(`${indent}  double _Complex _mtoc2_rhs = ${rhs};`);
           lines.push(
-            `${indent}  ${s.base.cName}.real[_mtoc2_off] = mtoc2_creal(_mtoc2_rhs);`
+            `${indent}  ${slotCName}.real[_mtoc2_off] = mtoc2_creal(_mtoc2_rhs);`
           );
           lines.push(
-            `${indent}  ${s.base.cName}.imag[_mtoc2_off] = mtoc2_cimag(_mtoc2_rhs);`
+            `${indent}  ${slotCName}.imag[_mtoc2_off] = mtoc2_cimag(_mtoc2_rhs);`
           );
           lines.push(`${indent}}`);
           return lines.join("\n");
@@ -403,12 +413,12 @@ function emitStmt(
         const lines: string[] = [];
         lines.push(`${indent}{`);
         lines.push(`${indent}  long _mtoc2_off = ${offset};`);
-        lines.push(`${indent}  ${s.base.cName}.real[_mtoc2_off] = ${rhs};`);
-        lines.push(`${indent}  ${s.base.cName}.imag[_mtoc2_off] = 0.0;`);
+        lines.push(`${indent}  ${slotCName}.real[_mtoc2_off] = ${rhs};`);
+        lines.push(`${indent}  ${slotCName}.imag[_mtoc2_off] = 0.0;`);
         lines.push(`${indent}}`);
         return lines.join("\n");
       }
-      return `${indent}${s.base.cName}.real[${offset}] = ${rhs};`;
+      return `${indent}${slotCName}.real[${offset}] = ${rhs};`;
     }
     case "IndexSliceStore":
       return emitIndexSliceStore(s, indent, state);

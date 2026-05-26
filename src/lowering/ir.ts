@@ -8,7 +8,7 @@
  */
 
 import type { Span } from "../parser/index.js";
-import type { Type } from "./types.js";
+import type { NumericType, Type } from "./types.js";
 import { BinaryOperation, UnaryOperation } from "../parser/index.js";
 
 // ── Expressions ─────────────────────────────────────────────────────────
@@ -480,10 +480,19 @@ export interface MultiAssignCall {
  *  the existing buffer in place — NOT an owned re-assignment (the
  *  codegen emits `<base.cName>.real[<offset>] = <rhs>;`). The base
  *  is recorded as both a use and a def by liveness so its buffer
- *  stays live across the store. */
+ *  stays live across the store.
+ *
+ *  `fieldPath` carries a member-rooted LHS like `chnkr.r(i, j)`: the
+ *  `base` Var still names the OWNING root (struct / class instance)
+ *  for liveness purposes, and the codegen targets the slot
+ *  `chnkr.r` by joining `base.cName` with the field path. `leafTy`
+ *  is the field's NumericType; for the bare-Ident case (`v(i) =
+ *  rhs`) both are absent and `base.ty` is the NumericType. */
 export interface IndexStore {
   kind: "IndexStore";
   base: Var;
+  fieldPath?: ReadonlyArray<string>;
+  leafTy?: NumericType;
   indices: IRExpr[];
   rhs: IRExpr;
   span: Span;
@@ -492,10 +501,15 @@ export interface IndexStore {
 /** Range / colon / scalar-mix slice write. Same arity rules as
  *  `IndexSlice`. RHS is either a scalar (broadcast into every slot)
  *  or a `Var` reading a named tensor (per-slot copy). Mutates the
- *  base buffer in place — not an owned re-assignment. */
+ *  base buffer in place — not an owned re-assignment.
+ *
+ *  See `IndexStore` for the meaning of `fieldPath` / `leafTy` —
+ *  same convention. */
 export interface IndexSliceStore {
   kind: "IndexSliceStore";
   base: Var;
+  fieldPath?: ReadonlyArray<string>;
+  leafTy?: NumericType;
   index: ReadonlyArray<IndexSliceArg>;
   rhs: IRExpr;
   span: Span;

@@ -15,10 +15,14 @@ import {
   isNumeric,
   isScalar,
   isScalarRealNumeric,
+  type NumericType,
   typeToString,
 } from "./types.js";
 import type { Lowerer } from "./lower.js";
-import { resolveIndexBase } from "./indexResolve.js";
+import {
+  resolveIndexBase,
+  resolveMemberRootedIndexBase,
+} from "./indexResolve.js";
 import { lowerIndexSliceStore } from "./lowerIndexSliceStore.js";
 
 export function lowerIndexStore(
@@ -27,25 +31,42 @@ export function lowerIndexStore(
   exprAst: Expr,
   span: Span
 ): IRStmt | IRStmt[] {
-  if (lvalue.base.type !== "Ident") {
+  // Member-rooted LHS (`obj.field(i) = rhs`): the OWNED ROOT is the
+  // struct / class instance; codegen targets the field slot via
+  // `<root.cName>.<fieldPath>`. Otherwise the bare-Ident path applies.
+  if (lvalue.base.type !== "Ident" && lvalue.base.type !== "Member") {
     throw new UnsupportedConstruct(
-      `indexed assignment requires a simple variable on the left ` +
+      `indexed assignment requires a simple variable or member chain on the left ` +
         `(got ${lvalue.base.type})`,
       span
     );
   }
-  const name = lvalue.base.name;
-  const { baseTy, baseCName, base } = resolveIndexBase.call(
-    this,
-    name,
-    lvalue.indices.length,
-    span,
-    {
+  let baseTy: NumericType;
+  let baseCName: string;
+  let base: Extract<IRExpr, { kind: "Var" }>;
+  let fieldPath: string[] | undefined;
+  let leafTy: NumericType | undefined;
+  let displayName: string;
+  if (lvalue.base.type === "Member") {
+    const r = resolveMemberRootedIndexBase.call(this, lvalue, span, "write");
+    base = r.rootVar;
+    baseTy = r.leafTy;
+    baseCName = r.slotCName;
+    fieldPath = r.fieldPath;
+    leafTy = r.leafTy;
+    displayName = `${r.rootVar.name}.${r.fieldPath.join(".")}`;
+  } else {
+    const name = lvalue.base.name;
+    const r = resolveIndexBase.call(this, name, lvalue.indices.length, span, {
       baseSpan: lvalue.base.span,
       notInScope: "user-facing",
       operation: "write",
-    }
-  );
+    });
+    baseTy = r.baseTy;
+    baseCName = r.baseCName;
+    base = r.base;
+    displayName = name;
+  }
 
   // Range/colon slots dispatch to lowerIndexSliceStore — getting here
   // with one means the dispatcher logic is wrong.
@@ -85,7 +106,7 @@ export function lowerIndexStore(
         return lowerIndexSliceStore.call(this, lvalue, exprAst, span);
       }
       throw new TypeError(
-        `index ${slot + 1} of '${name}' must be a real scalar ` +
+        `index ${slot + 1} of '${displayName}' must be a real scalar ` +
           `(got ${typeToString(lowered.ty)})`,
         lvalue.indices[slot].span
       );
@@ -109,7 +130,7 @@ export function lowerIndexStore(
     if (!isScalarRealNumeric(rhs.ty)) {
       if (isNumeric(rhs.ty) && rhs.ty.isComplex && isScalar(rhs.ty)) {
         throw new TypeError(
-          `cannot store a complex value into a real-typed tensor '${name}' ` +
+          `cannot store a complex value into a real-typed tensor '${displayName}' ` +
             `(would silently drop the imaginary part). Promote the base to ` +
             `complex first (e.g. via 'x = x + 0i' before the indexed write).`,
           exprAst.span
@@ -123,5 +144,13 @@ export function lowerIndexStore(
     }
   }
 
-  return { kind: "IndexStore", base, indices, rhs, span };
+  const stmt: IRStmt = {
+    kind: "IndexStore",
+    base,
+    indices,
+    rhs,
+    span,
+    ...(fieldPath !== undefined ? { fieldPath, leafTy } : {}),
+  };
+  return stmt;
 }

@@ -765,15 +765,13 @@ export class Lowerer {
       // log), and the if-cond folder would read those stale fields
       // and silently mis-emit. Drop `exact` and widen `sign` toward
       // the rhs sign so the env reflects the post-write reality.
-      // Both lower helpers above require lv.base to be an Ident, so
-      // pulling its name here is safe.
+      // Bare-Ident base: try to refresh the exact Float64Array in
+      // place when the store's indices and rhs are both compile-time-
+      // known and the base already carries exact data. This keeps
+      // downstream builtin transfers (`zeros(sz)` after `sz(1) = ...`)
+      // able to see the post-write shape. If any precondition fails,
+      // fall back to widening (strip exact).
       if (lv.base.type === "Ident") {
-        // Try to refresh the exact Float64Array in place when the
-        // store's indices and rhs are both compile-time-known and the
-        // base already carries exact data. This keeps downstream
-        // builtin transfers (`zeros(sz)` after `sz(1) = ...`) able to
-        // see the post-write shape. If any precondition fails, fall
-        // back to the default widening (strip exact).
         const refreshed = tryRefreshExactAfterIndexedWrite(
           this.env,
           lv.base.name,
@@ -782,6 +780,26 @@ export class Lowerer {
         if (!refreshed) {
           const rhsSign = rhsSignFromStoreResult(result);
           widenAfterIndexedWrite(this.env, lv.base.name, rhsSign);
+        }
+      } else if (lv.base.type === "Member") {
+        // Member-rooted: strip the leaf field's `exact` carrier (the
+        // construction-site Float64Array is stale after the write).
+        // In-place refresh of the field's exact data is doable when
+        // indices + rhs are all known, but the MVP just widens; the
+        // optimisation can land later if a use case needs it.
+        const last = Array.isArray(result) ? result[result.length - 1] : result;
+        if (
+          last !== undefined &&
+          (last.kind === "IndexStore" || last.kind === "IndexSliceStore") &&
+          last.fieldPath !== undefined &&
+          last.leafTy !== undefined
+        ) {
+          widenMemberLeafAfterIndexedWrite(
+            this.env,
+            last.base.name,
+            last.fieldPath,
+            last.leafTy
+          );
         }
       }
       return result;
@@ -1837,6 +1855,26 @@ function tryRefreshExactAfterIndexedWrite(
     ty: { ...ty, exact: newData, sign: newSign },
   });
   return true;
+}
+
+/** Widen a member-rooted leaf field's NumericType after an indexed
+ *  write into that field — strip `exact`, broaden `sign` to
+ *  `"unknown"` — and rebuild the parent struct/class type via
+ *  `withPathTypeUpdated`. The optimisation of refreshing the exact
+ *  carrier in place (the way bare-Ident writes do) is deferred. */
+function widenMemberLeafAfterIndexedWrite(
+  env: Map<string, { cName: string; ty: Type }>,
+  rootName: string,
+  fieldPath: ReadonlyArray<string>,
+  oldLeafTy: { kind: "Numeric"; exact?: unknown; sign: Sign } & Type
+): void {
+  const e = env.get(rootName);
+  if (e === undefined) return;
+  if (oldLeafTy.kind !== "Numeric") return;
+  if (oldLeafTy.exact === undefined && oldLeafTy.sign === "unknown") return;
+  const widened: Type = { ...oldLeafTy, exact: undefined, sign: "unknown" };
+  const newTy = withPathTypeUpdated(e.ty, fieldPath, widened);
+  env.set(rootName, { cName: e.cName, ty: newTy });
 }
 
 /** Walk a stmt-tree and collect names of LHS targets (Assign, MultiAssign,

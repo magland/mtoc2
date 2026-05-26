@@ -292,34 +292,94 @@ export function assignLValue(
     //     `indexTensor`'s read path; the scatter walks the cartesian
     //     product of slot indices, broadcasting a scalar RHS or
     //     copying from a numel-matching tensor RHS.
-    // The base must be a bare Var holding a tensor today. IndexVec /
-    // LogicalMask slots, member-rooted writes (`obj.field(args) = ...`),
-    // and indexed delete (`v(2:5) = []`) raise as out-of-scope per
-    // CLAUDE.md.
-    if (lv.base.type !== "Ident") {
+    // The base must be either a bare Var holding a tensor or a Member
+    // chain rooted at a tensor-valued field of a struct / class
+    // instance. IndexVec / LogicalMask slots and indexed delete
+    // (`v(2:5) = []`) raise as out-of-scope per CLAUDE.md.
+    let baseName: string;
+    let baseVal: RuntimeTensor;
+    let writeBack: () => void;
+    if (lv.base.type === "Ident") {
+      baseName = lv.base.name;
+      const existing = this.env.get(baseName);
+      if (existing === undefined || !isTensor(existing)) {
+        throw new UnsupportedConstruct(
+          `interpreter: indexed assignment requires '${baseName}' to be ` +
+            `an already-bound tensor`
+        );
+      }
+      // MATLAB pass-by-value: clone unconditionally before writing
+      // (numbl's COW-on-shared behavior, worst case).
+      baseVal = cloneTensorForWrite(existing);
+      this.env.set(baseName, baseVal);
+      writeBack = (): void => {
+        /* nothing extra — env already updated */
+      };
+    } else if (lv.base.type === "Member") {
+      const path = this.collectMemberPath(lv.base);
+      if (path === null) {
+        throw new UnsupportedConstruct(
+          `interpreter: member-rooted indexed write requires a bare-Ident root`
+        );
+      }
+      const { rootName, fields } = path;
+      let host = this.env.get(rootName) as
+        | Record<string, RuntimeValue>
+        | undefined;
+      if (host === undefined || typeof host !== "object" || host === null) {
+        throw new UnsupportedConstruct(
+          `interpreter: member-rooted indexed write requires '${rootName}' ` +
+            `to be a struct or class instance`
+        );
+      }
+      // Clone the root and every intermediate struct on the path so
+      // pre-write aliases see the unchanged value (pass-by-value).
+      host = Interpreter.cloneStructLocal(host);
+      let cur: Record<string, RuntimeValue> = host;
+      for (let i = 0; i < fields.length - 1; i++) {
+        const fname = fields[i];
+        const next = cur[fname];
+        if (
+          !next ||
+          typeof next !== "object" ||
+          isTensor(next) ||
+          isCharRV(next)
+        ) {
+          throw new UnsupportedConstruct(
+            `interpreter: '${rootName}.${fields
+              .slice(0, i + 1)
+              .join(".")}' is not a struct/class container`
+          );
+        }
+        const cloned = Interpreter.cloneStructLocal(
+          next as Record<string, RuntimeValue>
+        );
+        cur[fname] = cloned as RuntimeValue;
+        cur = cloned;
+      }
+      const leafName = fields[fields.length - 1];
+      const leafVal = cur[leafName];
+      if (!leafVal || !isTensor(leafVal)) {
+        throw new UnsupportedConstruct(
+          `interpreter: '${rootName}.${fields.join(".")}' is not a tensor field`
+        );
+      }
+      baseName = `${rootName}.${fields.join(".")}`;
+      baseVal = cloneTensorForWrite(leafVal);
+      cur[leafName] = baseVal;
+      this.env.set(rootName, host as RuntimeValue);
+      const finalHost = host;
+      const finalRootName = rootName;
+      writeBack = (): void => {
+        if (!suppressed)
+          this.autoDisp(finalRootName, finalHost as RuntimeValue);
+      };
+    } else {
       throw new UnsupportedConstruct(
-        `interpreter: indexed assignment requires a bare-variable base ` +
-          `(got '${lv.base.type}')`
+        `interpreter: indexed assignment requires a bare-variable or ` +
+          `member-rooted base (got '${lv.base.type}')`
       );
     }
-    const baseName = lv.base.name;
-    const existing = this.env.get(baseName);
-    if (existing === undefined || !isTensor(existing)) {
-      throw new UnsupportedConstruct(
-        `interpreter: indexed assignment requires '${baseName}' to be ` +
-          `an already-bound tensor`
-      );
-    }
-    // MATLAB pass-by-value: `function fn(x); x(i) = v; end` must not
-    // mutate the caller's tensor, and `b = a; b(i) = v;` must not
-    // mutate `a`. Both forms bind the same RuntimeTensor object to
-    // multiple env names. Without refcounting we can't tell whether
-    // the buffer is shared, so we clone unconditionally before
-    // writing — matches numbl's COW-on-shared behavior in the worst
-    // case (always-shared). The fresh tensor takes the env slot;
-    // every alias keeps the pre-write data.
-    const baseVal = cloneTensorForWrite(existing);
-    this.env.set(baseName, baseVal);
     // All indexed-write paths share the same slot-resolution + scatter
     // machinery: a slot resolves to (count, idxFn), the cartesian
     // product of slot indices walks the selected region, and each
@@ -479,7 +539,14 @@ export function assignLValue(
         idx[i] = 0;
       }
     }
-    if (!suppressed) this.autoDisp(baseName, baseVal);
+    // For bare-Ident bases, autoDisp shows the variable directly.
+    // For member-rooted writes, writeBack shows the root struct/class
+    // (and was set up at the top of this branch).
+    if (lv.base.type === "Ident") {
+      if (!suppressed) this.autoDisp(baseName, baseVal);
+    } else {
+      writeBack();
+    }
     return;
   }
   if (lv.type === "Member") {

@@ -10,6 +10,8 @@ test_class_property_no_default_scalar();
 test_class_property_no_default_tensor();
 test_class_property_no_default_mixed();
 test_member_rooted_index();
+test_member_rooted_index_write();
+test_member_rooted_slice_write();
 
 function test_class_construct_basic()
   p = Point(3, 4);
@@ -97,6 +99,23 @@ function test_member_rooted_index()
   disp(b.data(end));       % end against the loaded tensor
   disp(b.data(2:4));       % range slice
   disp(b.data(:));         % colon → column vector
+end
+
+function test_member_rooted_index_write()
+  % Scalar slot write into a class property's tensor.
+  b = Bag([10 20 30 40 50]);
+  b.data(1) = 99;
+  b.data(end) = 77;
+  disp(b.data);
+end
+
+function test_member_rooted_slice_write()
+  % Colon / range slice write into a class property's tensor.
+  b = Bag([10 20 30 40 50]);
+  b.data(2:4) = [-1, -2, -3];
+  disp(b.data);
+  b.data(:) = 0;
+  disp(b.data);
 end
 
 classdef Point

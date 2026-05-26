@@ -14,11 +14,20 @@
 
 import type { Expr, LValue, Span } from "../parser/index.js";
 import { TypeError, UnsupportedConstruct } from "./errors.js";
-import type { IRStmt, IndexSliceArg } from "./ir.js";
-import { isMultiElement, isNumeric, isScalar, typeToString } from "./types.js";
+import type { IRExpr, IRStmt, IndexSliceArg } from "./ir.js";
+import {
+  isMultiElement,
+  isNumeric,
+  isScalar,
+  type NumericType,
+  typeToString,
+} from "./types.js";
 import type { Lowerer } from "./lower.js";
 import { lowerSliceArg } from "./lowerIndexSlice.js";
-import { resolveIndexBase } from "./indexResolve.js";
+import {
+  resolveIndexBase,
+  resolveMemberRootedIndexBase,
+} from "./indexResolve.js";
 
 export function lowerIndexSliceStore(
   this: Lowerer,
@@ -26,19 +35,49 @@ export function lowerIndexSliceStore(
   exprAst: Expr,
   span: Span
 ): IRStmt | IRStmt[] {
-  if (lvalue.base.type !== "Ident") {
+  if (lvalue.base.type !== "Ident" && lvalue.base.type !== "Member") {
     throw new UnsupportedConstruct(
-      `indexed assignment requires a simple variable on the left ` +
+      `indexed assignment requires a simple variable or member chain on the left ` +
         `(got ${lvalue.base.type})`,
       span
     );
   }
-  const name = lvalue.base.name;
-  const r = resolveIndexBase.call(this, name, lvalue.indices.length, span, {
-    baseSpan: lvalue.base.span,
-    notInScope: "user-facing",
-    operation: "sliceWrite",
-  });
+  // Resolve either a bare-Ident base (existing path) or a member-rooted
+  // base. In the member case `base` is the OWNING ROOT and `baseCName`
+  // is the slot path (`<root>.<field>...`) for codegen; `fieldPath` /
+  // `leafTy` flow into the IR node so the emitter can target the slot.
+  let baseTy: NumericType;
+  let baseCName: string;
+  let base: Extract<IRExpr, { kind: "Var" }>;
+  let fieldPath: string[] | undefined;
+  let leafTy: NumericType | undefined;
+  let displayName: string;
+  if (lvalue.base.type === "Member") {
+    const m = resolveMemberRootedIndexBase.call(
+      this,
+      lvalue,
+      span,
+      "sliceWrite"
+    );
+    base = m.rootVar;
+    baseTy = m.leafTy;
+    baseCName = m.slotCName;
+    fieldPath = m.fieldPath;
+    leafTy = m.leafTy;
+    displayName = `${m.rootVar.name}.${m.fieldPath.join(".")}`;
+  } else {
+    const name = lvalue.base.name;
+    const r = resolveIndexBase.call(this, name, lvalue.indices.length, span, {
+      baseSpan: lvalue.base.span,
+      notInScope: "user-facing",
+      operation: "sliceWrite",
+    });
+    baseTy = r.baseTy;
+    baseCName = r.baseCName;
+    base = r.base;
+    displayName = name;
+  }
+  const r = { baseTy, baseCName, base };
 
   const isSingleSlot = lvalue.indices.length === 1;
   const slotHoists: IRStmt[] = [];
@@ -96,7 +135,7 @@ export function lowerIndexSliceStore(
   }
   if (!r.baseTy.isComplex && rawRhs.ty.isComplex) {
     throw new TypeError(
-      `cannot store a complex RHS into a real-typed tensor '${name}' ` +
+      `cannot store a complex RHS into a real-typed tensor '${displayName}' ` +
         `(would silently drop the imaginary part). Promote the base to ` +
         `complex first (e.g. via 'x = x + 0i' before the indexed write).`,
       exprAst.span
@@ -130,6 +169,7 @@ export function lowerIndexSliceStore(
     index: slots,
     rhs,
     span,
+    ...(fieldPath !== undefined ? { fieldPath, leafTy } : {}),
   };
   const allHoists = [...slotHoists, ...hoists];
   if (allHoists.length === 0) return store;

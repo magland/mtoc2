@@ -297,7 +297,15 @@ function emitStmt(s: IRStmt, indent: string, state: RuntimeState): string {
 
     case "IndexStore": {
       useRuntimeByName(state, "mtoc2_scalar_index");
-      const baseName = s.base.cName;
+      // Member-rooted writes target the field slot via dotted access
+      // on the (JS-side) struct/class object. The base Var still names
+      // the owning root for liveness; here we walk the field path to
+      // build the actual slot expression.
+      const baseName =
+        s.fieldPath !== undefined
+          ? `${s.base.cName}.${s.fieldPath.join(".")}`
+          : s.base.cName;
+      const slotTy = s.leafTy ?? s.base.ty;
       const idxs = s.indices.map(ix => emitExpr(ix, state));
       let offset: string;
       if (idxs.length === 1) {
@@ -317,12 +325,16 @@ function emitStmt(s: IRStmt, indent: string, state: RuntimeState): string {
         offset = terms.join(" + ");
       }
       const rhs = emitExpr(s.rhs, state);
-      if (s.base.ty.kind === "Numeric" && s.base.ty.isComplex) {
+      if (slotTy.kind === "Numeric" && slotTy.isComplex) {
         // Two-lane write. Hoist the RHS into a temp so we evaluate
         // the right-hand expression once even when it's an
         // unparenthesized {re, im} producer like `mtoc2_cmul(...)`.
-        const tmpOff = `_o_${baseName}`;
-        const tmpRhs = `_r_${baseName}`;
+        // The temp-var names use the root's cName to avoid clashes
+        // when multiple fields of the same struct are written in
+        // a single block (dot wouldn't be legal in a JS identifier).
+        const safeBase = s.base.cName;
+        const tmpOff = `_o_${safeBase}`;
+        const tmpRhs = `_r_${safeBase}`;
         const rhsRe =
           s.rhs.ty.kind === "Numeric" && s.rhs.ty.isComplex
             ? `${tmpRhs}.re`
@@ -361,7 +373,13 @@ function emitIndexSliceStoreJs(
   indent: string,
   state: RuntimeState
 ): string {
-  const baseIsComplex = s.base.ty.kind === "Numeric" && s.base.ty.isComplex;
+  // Same member-rooted slot-path treatment as the scalar IndexStore.
+  const baseName =
+    s.fieldPath !== undefined
+      ? `${s.base.cName}.${s.fieldPath.join(".")}`
+      : s.base.cName;
+  const slotTy = s.leafTy ?? s.base.ty;
+  const baseIsComplex = slotTy.kind === "Numeric" && slotTy.isComplex;
   const rhsTy = s.rhs.ty;
   const rhsIsScalarReal =
     rhsTy.kind === "Numeric" &&
@@ -374,7 +392,6 @@ function emitIndexSliceStoreJs(
   const rhsIsScalar = rhsIsScalarReal || rhsIsScalarComplex;
   const rhsIsComplex = rhsTy.kind === "Numeric" && rhsTy.isComplex;
   const rhsExpr = emitExpr(s.rhs, state);
-  const baseName = s.base.cName;
 
   // Per-slot write template. Reads one element from the RHS (a scalar
   // value or `_mtoc2_rhs.data/imag[k]`) and writes both data + imag
