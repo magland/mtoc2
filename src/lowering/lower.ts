@@ -41,7 +41,10 @@ import type {
 } from "../parser/index.js";
 import { BinaryOperation, UnaryOperation } from "../parser/index.js";
 import { offsetToLineCol } from "../parser/sourceLoc.js";
-import { tryExtractDottedName } from "../parser/astUtils.js";
+import {
+  tryExtractDottedName,
+  unwindMemberLvalue,
+} from "../parser/astUtils.js";
 import { UnsupportedConstruct, TypeError } from "./errors.js";
 import {
   type Type,
@@ -818,20 +821,14 @@ export class Lowerer {
     // Walk the Member chain to find the root Ident and the field
     // path (outermost → innermost). Reject any non-Ident root or
     // `MemberDynamic` step.
-    const fieldPath: string[] = [];
-    let cur: Expr = lv.base;
-    fieldPath.unshift(lv.name);
-    while (cur.type === "Member") {
-      fieldPath.unshift(cur.name);
-      cur = cur.base;
-    }
-    if (cur.type !== "Ident") {
+    const unwound = unwindMemberLvalue(lv);
+    if (unwound === null) {
       throw new UnsupportedConstruct(
         `assignment lvalue must be rooted at a named variable`,
         s.span
       );
     }
-    const rootName = cur.name;
+    const { rootName, fields: fieldPath } = unwound;
     const rootEntry = this.env.get(rootName);
     if (rootEntry === undefined) {
       throw new UnsupportedConstruct(

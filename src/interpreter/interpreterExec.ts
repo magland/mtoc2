@@ -1,7 +1,7 @@
 /**
  * Statement execution + helpers: execBody, execStmt, assignLValue,
- * collectMemberPath, expandForRange, autoDisp. Attached to
- * `Interpreter.prototype` from `interpreter.ts`.
+ * expandForRange, autoDisp. Attached to `Interpreter.prototype`
+ * from `interpreter.ts`.
  *
  * Mirrors numbl's interpreterExec split — same role here, smaller
  * surface because mtoc2 walks a tighter AST subset.
@@ -21,7 +21,11 @@ import {
   type RuntimeValue,
 } from "../runtime/value.js";
 import { UnsupportedConstruct } from "../lowering/errors.js";
-import { tryExtractDottedName } from "../parser/astUtils.js";
+import {
+  tryExtractDottedName,
+  unwindMemberChain,
+  unwindMemberLvalue,
+} from "../parser/astUtils.js";
 import {
   mtoc2_disp_complex,
   mtoc2_disp_double,
@@ -316,13 +320,14 @@ export function assignLValue(
         /* nothing extra — env already updated */
       };
     } else if (lv.base.type === "Member") {
-      const path = this.collectMemberPath(lv.base);
+      const path = unwindMemberChain(lv.base);
       if (path === null) {
         throw new UnsupportedConstruct(
           `interpreter: member-rooted indexed write requires a bare-Ident root`
         );
       }
-      const { rootName, fields } = path;
+      const rootName = path.root.name;
+      const fields = path.fields;
       let host = this.env.get(rootName) as
         | Record<string, RuntimeValue>
         | undefined;
@@ -554,7 +559,7 @@ export function assignLValue(
     // then write the field. Bare-Ident bases bind the result back
     // into the env so `s` reflects the mutation; nested bases mutate
     // in-place via the parent reference.
-    const path = this.collectMemberPath(lv);
+    const path = unwindMemberLvalue(lv);
     if (path === null) {
       throw new UnsupportedConstruct(
         `interpreter: only bare-Ident-rooted member assignment is supported`
@@ -593,29 +598,6 @@ export function assignLValue(
   throw new UnsupportedConstruct(
     `interpreter: lvalue '${lv.type}' is not yet implemented`
   );
-}
-
-/** Walk a chain of `Member` lvalues down to a bare `Ident` root.
- *  Returns the root variable name and the field path; returns null if
- *  the chain ends at something other than a bare ident (e.g. a
- *  function call or member-dynamic). */
-export function collectMemberPath(
-  this: Interpreter,
-  lv: LValue
-): { rootName: string; fields: string[] } | null {
-  void this;
-  const fields: string[] = [];
-  let cur: unknown = lv;
-  while (cur && typeof cur === "object" && (cur as LValue).type === "Member") {
-    const m = cur as Extract<LValue, { type: "Member" }>;
-    fields.unshift(m.name);
-    cur = m.base;
-  }
-  if (cur && typeof cur === "object" && (cur as Expr).type === "Ident") {
-    const id = cur as Extract<Expr, { type: "Ident" }>;
-    return { rootName: id.name, fields };
-  }
-  return null;
 }
 
 // ── For-range expansion ───────────────────────────────────────────────────

@@ -124,9 +124,6 @@ export class Interpreter {
     v: RuntimeValue,
     suppressed: boolean
   ) => void;
-  declare collectMemberPath: (
-    lv: LValue
-  ) => { rootName: string; fields: string[] } | null;
   declare expandForRange: (e: Expr) => RuntimeValue[];
   declare autoDisp: (name: string, v: RuntimeValue) => void;
 

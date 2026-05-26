@@ -4,7 +4,7 @@
  * lowering / runtime layers.
  */
 
-import type { Expr } from "./index.js";
+import type { Expr, LValue } from "./index.js";
 
 /** Walk a member-chain rooted in an `Ident` and return the dotted
  *  identifier (`pkg.fn`, `pkg.sub.fn`, `ClassName.staticMethod`).
@@ -26,4 +26,44 @@ export function tryExtractDottedName(e: Expr): string | null {
     if (base) return `${base}.${e.name}`;
   }
   return null;
+}
+
+/** Walk a `Member`-chain Expr down to its root Ident. Returns
+ *  `{ root, fields }` (fields in outermost-to-innermost order) or
+ *  null when the chain ends at anything other than a bare Ident.
+ *
+ *  Shared by Member-rooted lvalue and index-base walkers so the
+ *  same loop isn't repeated across the lowerer / interpreter. */
+export function unwindMemberChain(
+  e: Expr
+): { root: Extract<Expr, { type: "Ident" }>; fields: string[] } | null {
+  const fields: string[] = [];
+  let cur: Expr = e;
+  while (cur.type === "Member") {
+    fields.unshift(cur.name);
+    cur = cur.base;
+  }
+  if (cur.type !== "Ident") return null;
+  return { root: cur, fields };
+}
+
+/** LValue counterpart of `unwindMemberChain`: walk a `Member`
+ *  LValue chain down to its root Ident, returning the root name and
+ *  the full field path (including the outer Member's `name`). Returns
+ *  null when the chain ends at anything other than a bare Ident.
+ *
+ *  `LValue.Member` carries no span (unlike `Expr.Member`), so this
+ *  helper takes the LValue shape directly. */
+export function unwindMemberLvalue(
+  lv: LValue
+): { rootName: string; fields: string[] } | null {
+  if (lv.type !== "Member") return null;
+  const fields: string[] = [lv.name];
+  let cur: Expr = lv.base;
+  while (cur.type === "Member") {
+    fields.unshift(cur.name);
+    cur = cur.base;
+  }
+  if (cur.type !== "Ident") return null;
+  return { rootName: cur.name, fields };
 }

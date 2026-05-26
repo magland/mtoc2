@@ -181,8 +181,8 @@ ship as useful units, gated by the cross-runner.
   `test_scripts/classes.m`.
 
 - **MultiAssign with member / index lvalues.** `[s.a, s.b] =
-  swap(x, y)`, `[v(1), v(3)] = swap(...)`, `[s.M(1), s.M(3)] =
-  swap(...)`, and mixed-with-Var / discard / single-output
+swap(x, y)`, `[v(1), v(3)] = swap(...)`, `[s.M(1), s.M(3)] =
+swap(...)`, and mixed-with-Var / discard / single-output
   Member-lvalue cases all work end-to-end. Implemented by a temp-
   substitute pass in `lowerMultiAssign`: each non-Var lvalue
   lands the call's slot into a fresh `_mtoc2_t<N>` local, then a

@@ -17,6 +17,7 @@
  */
 
 import type { Expr, LValue, Span } from "../parser/index.js";
+import { unwindMemberChain } from "../parser/astUtils.js";
 import { TypeError, UnsupportedConstruct } from "./errors.js";
 import type { IRExpr } from "./ir.js";
 import {
@@ -81,22 +82,18 @@ export function resolveMemberRootedIndexBase(
       span
     );
   }
-  const fieldPath: string[] = [];
-  let cur: Expr = lvalue.base;
-  while (cur.type === "Member") {
-    fieldPath.unshift(cur.name);
-    cur = cur.base;
-  }
-  if (cur.type !== "Ident") {
+  const unwound = unwindMemberChain(lvalue.base);
+  if (unwound === null) {
     throw new UnsupportedConstruct(
-      `${opPrefix(operation)} requires a root variable (got chain rooted at ${cur.type})`,
+      `${opPrefix(operation)} requires a root variable`,
       lvalue.base.span
     );
   }
-  const rootName = cur.name;
+  const { root, fields: fieldPath } = unwound;
+  const rootName = root.name;
   const rootEntry = this.envLookup(rootName);
   if (rootEntry === undefined) {
-    throw new TypeError(`use of undefined variable '${rootName}'`, cur.span);
+    throw new TypeError(`use of undefined variable '${rootName}'`, root.span);
   }
   if (rootEntry.ty.kind !== "Struct" && rootEntry.ty.kind !== "Class") {
     throw new UnsupportedConstruct(
