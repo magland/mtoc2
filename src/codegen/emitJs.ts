@@ -4,24 +4,18 @@
  * shape — differing only in language and the I/O primitive (`$write(s)`
  * vs `printf(...)`).
  *
- * MVP scope (Phase 2):
- *   - scalar `NumLit` / `ImagLit` / `StringLit` / `Var`
- *   - `Binary` / `Unary` / `Call` dispatching through `builtin.emitJs`
- *   - user-function calls (`<mangled>(args)` — owned-args copy semantics
- *     are a no-op in JS since GC handles ownership)
- *   - `Assign`, `ExprStmt`, `If`, `While`, `For`, `ReturnFromFunction`,
- *     `Break`, `Continue`, `TypeComment`, `MultiAssignCall` (single
- *     output)
- *
- * Explicit `UnsupportedConstruct` for IR shapes that aren't wired yet —
- * tensor literals/concat/index/range, handles/struct/class lit/loads/
- * stores, multi-output (N≥2) MultiAssignCall. Those will be added as
- * the per-builtin `emitJs` retrofits in Phase 5 demand them.
+ * Pass-by-value protocol: owned-typed RHSes (Var / MemberLoad /
+ * HandleCaptureLoad) at Assign, user-function Call args, and
+ * MultiAssignCall args route through `emitOwnedRhsJs`, which wraps
+ * the expression in `mtoc2_deep_clone(...)`. JS GC handles lifetime,
+ * but value-semantics still need an explicit copy — otherwise
+ * `b = a; b.f = rhs` would mutate `a`. Owned-producing expressions
+ * (TensorBuild, StructLit, HandleLit, fresh-allocating helpers) are
+ * left alone — they already yield a fresh value.
  *
  * Builtin dispatch routes through `builtin.emitJs`. If a needed
  * builtin has no `emitJs` hook yet, `requireEmitJs` throws a clear
- * "no emitJs hook" error — the engine catches that and falls back to
- * the interpreter (Phase 3).
+ * "no emitJs hook" error.
  *
  * The emitted module has the shape:
  *   ```js
