@@ -15,14 +15,10 @@ import {
   isNumeric,
   isScalar,
   isScalarRealNumeric,
-  type NumericType,
   typeToString,
 } from "./types.js";
 import type { Lowerer } from "./lower.js";
-import {
-  resolveIndexBase,
-  resolveMemberRootedIndexBase,
-} from "./indexResolve.js";
+import { resolveIndexLvalueBase } from "./indexResolve.js";
 import { lowerIndexSliceStore } from "./lowerIndexSliceStore.js";
 
 export function lowerIndexStore(
@@ -31,42 +27,13 @@ export function lowerIndexStore(
   exprAst: Expr,
   span: Span
 ): IRStmt | IRStmt[] {
-  // Member-rooted LHS (`obj.field(i) = rhs`): the OWNED ROOT is the
-  // struct / class instance; codegen targets the field slot via
-  // `<root.cName>.<fieldPath>`. Otherwise the bare-Ident path applies.
-  if (lvalue.base.type !== "Ident" && lvalue.base.type !== "Member") {
-    throw new UnsupportedConstruct(
-      `indexed assignment requires a simple variable or member chain on the left ` +
-        `(got ${lvalue.base.type})`,
-      span
-    );
-  }
-  let baseTy: NumericType;
-  let baseCName: string;
-  let base: Extract<IRExpr, { kind: "Var" }>;
-  let fieldPath: string[] | undefined;
-  let leafTy: NumericType | undefined;
-  let displayName: string;
-  if (lvalue.base.type === "Member") {
-    const r = resolveMemberRootedIndexBase.call(this, lvalue, span, "write");
-    base = r.rootVar;
-    baseTy = r.leafTy;
-    baseCName = r.slotCName;
-    fieldPath = r.fieldPath;
-    leafTy = r.leafTy;
-    displayName = `${r.rootVar.name}.${r.fieldPath.join(".")}`;
-  } else {
-    const name = lvalue.base.name;
-    const r = resolveIndexBase.call(this, name, lvalue.indices.length, span, {
-      baseSpan: lvalue.base.span,
-      notInScope: "user-facing",
-      operation: "write",
-    });
-    baseTy = r.baseTy;
-    baseCName = r.baseCName;
-    base = r.base;
-    displayName = name;
-  }
+  // Resolve either a bare-Ident base (existing path) or a member-
+  // rooted base (`obj.field(i) = rhs`). In the member case the IR's
+  // `base` Var still names the OWNING root; codegen targets the
+  // field slot via `<root.cName>.<fieldPath>` and uses the field's
+  // NumericType for offset / complex-lane decisions.
+  const { base, baseTy, baseCName, fieldPath, leafTy, displayName } =
+    resolveIndexLvalueBase.call(this, lvalue, span, "write");
 
   // Range/colon slots dispatch to lowerIndexSliceStore — getting here
   // with one means the dispatcher logic is wrong.

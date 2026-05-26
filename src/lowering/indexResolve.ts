@@ -164,6 +164,72 @@ export function resolveMemberRootedIndexBase(
   return { rootVar, fieldPath, leafTy: stepTy, slotCName };
 }
 
+/** Unified resolution result for an indexed-write lvalue base —
+ *  whether the lvalue's base is a bare `Ident` or a `Member` chain.
+ *
+ *  `base` always names the OWNING root variable (for liveness +
+ *  ANF book-keeping). `baseCName` is the slot path codegen targets
+ *  — equal to `base.cName` for bare-Ident, or `<root>.<field>...`
+ *  for member-rooted. `baseTy` is the leaf NumericType (the field's
+ *  type for member-rooted; identical to `base.ty` otherwise) so
+ *  the offset / complex-lane / arity checks downstream don't care
+ *  which form the LHS took. `fieldPath` / `leafTy` are populated
+ *  only in the member-rooted case so the caller can stamp them
+ *  onto the `IndexStore` / `IndexSliceStore` IR node. */
+export interface IndexLvalueBase {
+  base: Extract<IRExpr, { kind: "Var" }>;
+  baseTy: NumericType;
+  baseCName: string;
+  fieldPath?: string[];
+  leafTy?: NumericType;
+  /** Source-level display name for error messages — `name` for
+   *  bare-Ident bases, `root.f1.f2...` for member-rooted bases. */
+  displayName: string;
+}
+
+/** Resolve an indexed-write lvalue's base — either a bare `Ident`
+ *  or a `Member` chain — to the unified `IndexLvalueBase` shape.
+ *  Single chokepoint shared by `lowerIndexStore` and
+ *  `lowerIndexSliceStore` so the Ident-vs-Member dispatch lives in
+ *  one place. Rejects any other base kind with a clear error. */
+export function resolveIndexLvalueBase(
+  this: Lowerer,
+  lvalue: Extract<LValue, { type: "Index" }>,
+  span: Span,
+  operation: IndexOperation
+): IndexLvalueBase {
+  if (lvalue.base.type === "Member") {
+    const m = resolveMemberRootedIndexBase.call(this, lvalue, span, operation);
+    return {
+      base: m.rootVar,
+      baseTy: m.leafTy,
+      baseCName: m.slotCName,
+      fieldPath: m.fieldPath,
+      leafTy: m.leafTy,
+      displayName: `${m.rootVar.name}.${m.fieldPath.join(".")}`,
+    };
+  }
+  if (lvalue.base.type === "Ident") {
+    const name = lvalue.base.name;
+    const r = resolveIndexBase.call(this, name, lvalue.indices.length, span, {
+      baseSpan: lvalue.base.span,
+      notInScope: "user-facing",
+      operation,
+    });
+    return {
+      base: r.base,
+      baseTy: r.baseTy,
+      baseCName: r.baseCName,
+      displayName: name,
+    };
+  }
+  throw new UnsupportedConstruct(
+    `indexed assignment requires a simple variable or member chain on the left ` +
+      `(got ${lvalue.base.type})`,
+    span
+  );
+}
+
 /** Validate and resolve the base variable for an index operation. */
 export function resolveIndexBase(
   this: Lowerer,
