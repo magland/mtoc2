@@ -12,6 +12,7 @@ test_class_property_no_default_mixed();
 test_member_rooted_index();
 test_member_rooted_index_write();
 test_member_rooted_slice_write();
+test_class_alias_isolation();
 
 function test_class_construct_basic()
   p = Point(3, 4);
@@ -115,6 +116,16 @@ function test_member_rooted_slice_write()
   b.data(2:4) = [-1, -2, -3];
   disp(b.data);
   b.data(:) = 0;
+  disp(b.data);
+end
+
+function test_class_alias_isolation()
+  % Same pass-by-value rule for class instances: `c = b` must not
+  % share storage, so a write through one alias doesn't leak.
+  a = Bag([1 2 3 4 5]);
+  b = a;
+  b.data(1) = 99;
+  disp(a.data);
   disp(b.data);
 end
 

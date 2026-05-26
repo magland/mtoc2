@@ -49,7 +49,7 @@ import type {
   MultiAssignCall,
 } from "../lowering/ir.js";
 import { UnsupportedConstruct } from "../lowering/errors.js";
-import { isColVecTy, isRowVecTy } from "../lowering/types.js";
+import { isColVecTy, isOwned, isRowVecTy } from "../lowering/types.js";
 import { requireEmitJs } from "../builtins/registry.js";
 import {
   lookupBuiltin,
@@ -202,13 +202,37 @@ function emitBody(
   return out.join("\n");
 }
 
+/** Emit a JS RHS expression with deep-clone wrapping when the
+ *  expression yields an owned-typed value via an alias path (Var,
+ *  MemberLoad, HandleCaptureLoad). Mirrors the c-aot
+ *  `emitOwnedRhs` shape — without this, `b = a; b.f = rhs` would
+ *  mutate `a` because the JS object reference is shared.
+ *  Owned-producing expressions (TensorBuild, StructLit, HandleLit,
+ *  fresh-allocating Calls / Binary / Unary) already yield a fresh
+ *  value, so they fall through to `emitExpr` unchanged. */
+function emitOwnedRhsJs(e: IRExpr, state: RuntimeState): string {
+  if (
+    e.kind === "Var" ||
+    (e.kind === "MemberLoad" && isOwned(e.ty)) ||
+    (e.kind === "HandleCaptureLoad" && isOwned(e.ty))
+  ) {
+    useRuntimeByName(state, "mtoc2_deep_clone");
+    return `mtoc2_deep_clone(${emitExpr(e, state)})`;
+  }
+  return emitExpr(e, state);
+}
+
 function emitStmt(s: IRStmt, indent: string, state: RuntimeState): string {
   switch (s.kind) {
     case "ExprStmt":
       return `${indent}${emitExpr(s.expr, state)};`;
 
-    case "Assign":
-      return `${indent}${s.cName} = ${emitExpr(s.expr, state)};`;
+    case "Assign": {
+      const rhs = isOwned(s.ty)
+        ? emitOwnedRhsJs(s.expr, state)
+        : emitExpr(s.expr, state);
+      return `${indent}${s.cName} = ${rhs};`;
+    }
 
     case "If": {
       const lines: string[] = [];
@@ -601,8 +625,14 @@ function emitMultiAssignCall(
 ): string {
   // Builtin path: dispatch through emitJs with outTargetsJs pre-built
   // as the destructure target names. JS destructure handles the
-  // multi-return naturally.
-  const args = s.args.map(a => emitExpr(a, state));
+  // multi-return naturally. Owned-typed args route through the
+  // deep-clone wrapper for the same pass-by-value reason single-
+  // output user-function calls do.
+  const args = s.args.map(a =>
+    isOwned(a.ty) && !s.isBuiltin
+      ? emitOwnedRhsJs(a, state)
+      : emitExpr(a, state)
+  );
   // Slot targets: each declared output's cName, or a synthesized
   // discard slot name (matched by `collectAssignedLocals`).
   const targets: string[] = s.outputs.map((slot, i) =>
@@ -698,9 +728,16 @@ function emitExpr(e: IRExpr, state: RuntimeState): string {
           useRuntime: makeJsUseRuntime(state),
         });
       }
-      // User-function call. Owned arguments don't need a copy wrapper
-      // in JS — GC handles lifetime.
-      const args = e.args.map(a => emitExpr(a, state)).join(", ");
+      // User-function call. Owned-typed args need a deep-clone
+      // wrapper at the call site: MATLAB pass-by-value requires
+      // that a callee's indexed write into its parameter not bleed
+      // back to the caller. JS GC takes care of lifetime, but not
+      // value-semantics — the deep_clone helper provides those.
+      const args = e.args
+        .map(a =>
+          isOwned(a.ty) ? emitOwnedRhsJs(a, state) : emitExpr(a, state)
+        )
+        .join(", ");
       return `${e.cName}(${args})`;
     }
 

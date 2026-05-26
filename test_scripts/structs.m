@@ -11,6 +11,9 @@ test_struct_nested();
 test_struct_field_indexed_write();
 test_struct_field_slice_write();
 test_struct_field_3d_write();
+test_struct_alias_isolation_assign();
+test_struct_alias_isolation_indexed();
+test_struct_arg_aliasing();
 
 function test_struct_basic()
   s = struct('x', 1, 'y', 2);
@@ -103,5 +106,38 @@ function test_struct_field_3d_write()
   s.A(:, :, 1) = [1, 2; 3, 4];
   s.A(:, :, 2) = [5, 6; 7, 8];
   disp(s.A);
+end
+
+function test_struct_alias_isolation_assign()
+  % MATLAB pass-by-value: `b = a` must not share storage. A bare
+  % field overwrite through `b` must not show through `a`.
+  a = struct('M', [1 2; 3 4]);
+  b = a;
+  b.M = [99 99; 99 99];
+  disp(a.M);
+  disp(b.M);
+end
+
+function test_struct_alias_isolation_indexed()
+  % Same isolation rule for indexed field writes — `b.M(i, j)` and
+  % `b.M(:, j)` must mutate `b`'s tensor alone.
+  a = struct('M', zeros(2, 2));
+  b = a;
+  b.M(1, 1) = 7;
+  b.M(:, 2) = [8; 9];
+  disp(a.M);
+  disp(b.M);
+end
+
+function test_struct_arg_aliasing()
+  % A function that mutates its struct param's field must not bleed
+  % the change back to the caller.
+  a = struct('M', zeros(2, 2));
+  bump(a);
+  disp(a.M);
+end
+
+function bump(s)
+  s.M(1, 1) = 42;
 end
 

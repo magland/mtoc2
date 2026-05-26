@@ -254,6 +254,13 @@ const REGISTRY: ReadonlyMap<string, RuntimeSnippet> = new Map<
   // exists so emitJs can activate the JS helpers without bringing
   // the C side along (the .h body is empty).
   ["mtoc2_scalar_index", loadSnippet("scalar_index.h")],
+  // JS-only deep-clone helper (paired with a stub `.h`). The c-aot
+  // path uses per-typedef `_copy` helpers from emitNamedTypedef for
+  // the same purpose; on the JS side, owned-typed Var/MemberLoad/
+  // capture-load RHSes wrap through this helper at emit time so a
+  // subsequent member or indexed write through one alias doesn't
+  // mutate the other.
+  ["mtoc2_deep_clone", loadSnippet("deep_clone.h")],
 
   // ── Tensor (real, multi-element) ──────────────────────────────────
   // Storage shape + alloc + the four "owned value" helpers (copy,
