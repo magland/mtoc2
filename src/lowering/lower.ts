@@ -63,13 +63,14 @@ import {
   isOwned,
   fieldType,
   shapeNumel,
-  structType,
   typeToString,
   VOID,
   unify,
   storageEquivalent,
   stripExactFromEnv,
   widenAfterIndexedWrite,
+  widenMemberLeafAfterIndexedWrite,
+  withPathTypeUpdated,
   withoutExact,
 } from "./types.js";
 import type { ClassRegistration } from "./classDefs.js";
@@ -1763,45 +1764,6 @@ function condIsPure(e: IRExpr): boolean {
   }
 }
 
-/** Return a copy of `t` with the type at `fieldPath` replaced by
- *  `newLeafTy`. Walks struct/class types; if the path can't be
- *  resolved (shouldn't happen — the caller already validated), the
- *  original type is returned unchanged. Other type kinds at a path
- *  step are returned as-is.
- *
- *  Used by `lowerAssignLValue` to refresh env after a MemberStore so
- *  subsequent reads of the touched field/property report the post-
- *  write rhs type rather than the construction-site default. */
-function withPathTypeUpdated(
-  t: Type,
-  fieldPath: ReadonlyArray<string>,
-  newLeafTy: Type
-): Type {
-  if (fieldPath.length === 0) return newLeafTy;
-  const [head, ...rest] = fieldPath;
-  if (t.kind === "Struct") {
-    return structType(
-      t.fields.map(f =>
-        f.name === head
-          ? { name: f.name, ty: withPathTypeUpdated(f.ty, rest, newLeafTy) }
-          : f
-      )
-    );
-  }
-  if (t.kind === "Class") {
-    return {
-      kind: "Class",
-      className: t.className,
-      properties: t.properties.map(p =>
-        p.name === head
-          ? { name: p.name, ty: withPathTypeUpdated(p.ty, rest, newLeafTy) }
-          : p
-      ),
-    };
-  }
-  return t;
-}
-
 /** Strip the surrounding `'` or `"` quotes the numbl parser stores as
  *  part of a `Char`/`String` literal's lexeme. */
 export function stripQuotes(s: string): string {
@@ -1858,28 +1820,6 @@ function tryRefreshExactAfterIndexedWrite(
   return true;
 }
 
-/** Widen a member-rooted leaf field's NumericType after an indexed
- *  write into that field — strip `exact`, broaden `sign` to
- *  `"unknown"` — and rebuild the parent struct/class type via
- *  `withPathTypeUpdated`. The optimisation of refreshing the exact
- *  carrier in place (the way bare-Ident writes do) is deferred. */
-function widenMemberLeafAfterIndexedWrite(
-  env: Map<string, { cName: string; ty: Type }>,
-  rootName: string,
-  fieldPath: ReadonlyArray<string>,
-  oldLeafTy: { kind: "Numeric"; exact?: unknown; sign: Sign } & Type
-): void {
-  const e = env.get(rootName);
-  if (e === undefined) return;
-  if (oldLeafTy.kind !== "Numeric") return;
-  if (oldLeafTy.exact === undefined && oldLeafTy.sign === "unknown") return;
-  const widened: Type = { ...oldLeafTy, exact: undefined, sign: "unknown" };
-  const newTy = withPathTypeUpdated(e.ty, fieldPath, widened);
-  env.set(rootName, { cName: e.cName, ty: newTy });
-}
-
-/** Walk a stmt-tree and collect names of LHS targets (Assign, MultiAssign,
- *  For loop vars). Used to widen loop-body-mutated env entries to non-exact. */
 /** Extract the rhs sign from an IndexStore / IndexSliceStore result so
  *  `widenAfterIndexedWrite` can unify it into the base's lattice sign.
  *  The store is always the last stmt in the result (lowerIndexSliceStore

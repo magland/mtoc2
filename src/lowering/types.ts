@@ -747,6 +747,69 @@ export function widenAfterIndexedWrite(
   }
 }
 
+/** Return a copy of `t` with the type at `fieldPath` replaced by
+ *  `newLeafTy`. Walks struct/class types; if the path can't be
+ *  resolved (shouldn't happen — the caller already validated), the
+ *  original type is returned unchanged. Other type kinds at a path
+ *  step are returned as-is.
+ *
+ *  Used by the env refresh after a MemberStore / member-rooted
+ *  IndexStore so subsequent reads of the touched field report the
+ *  post-write rhs type rather than the construction-site default. */
+export function withPathTypeUpdated(
+  t: Type,
+  fieldPath: ReadonlyArray<string>,
+  newLeafTy: Type
+): Type {
+  if (fieldPath.length === 0) return newLeafTy;
+  const [head, ...rest] = fieldPath;
+  if (t.kind === "Struct") {
+    return structType(
+      t.fields.map(f =>
+        f.name === head
+          ? { name: f.name, ty: withPathTypeUpdated(f.ty, rest, newLeafTy) }
+          : f
+      )
+    );
+  }
+  if (t.kind === "Class") {
+    return {
+      kind: "Class",
+      className: t.className,
+      properties: t.properties.map(p =>
+        p.name === head
+          ? { name: p.name, ty: withPathTypeUpdated(p.ty, rest, newLeafTy) }
+          : p
+      ),
+    };
+  }
+  return t;
+}
+
+/** Companion to `widenAfterIndexedWrite` for member-rooted indexed
+ *  writes (`obj.field(i) = rhs`). Strips `exact` and widens the
+ *  leaf field's `sign` to `"unknown"`, then rebuilds the parent
+ *  struct/class type via `withPathTypeUpdated`. The optimisation of
+ *  refreshing the leaf's exact carrier in place (the way bare-Ident
+ *  writes do) is deferred — see `tryRefreshExactAfterIndexedWrite`. */
+export function widenMemberLeafAfterIndexedWrite(
+  env: Map<string, { cName: string; ty: Type }>,
+  rootName: string,
+  fieldPath: ReadonlyArray<string>,
+  oldLeafTy: NumericType
+): void {
+  const e = env.get(rootName);
+  if (e === undefined) return;
+  if (oldLeafTy.exact === undefined && oldLeafTy.sign === "unknown") return;
+  const widened: NumericType = {
+    ...oldLeafTy,
+    exact: undefined,
+    sign: "unknown",
+  };
+  const newTy = withPathTypeUpdated(e.ty, fieldPath, widened);
+  env.set(rootName, { cName: e.cName, ty: newTy });
+}
+
 export function withoutExact(t: Type): Type {
   if (t.kind === "Numeric" && t.exact !== undefined) {
     const { exact: _e, ...rest } = t;
