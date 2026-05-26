@@ -43,7 +43,13 @@ import { cIdentForUserName } from "./lower.js";
  *  user with a legitimate dense-specialization need can raise it
  *  without recompiling. Defaults to 256. */
 const MAX_SPECS_PER_FUNCTION: number = (() => {
-  const raw = process.env.MTOC2_MAX_SPECS_PER_FUNCTION;
+  // `process` doesn't exist in the browser bundle — `globalThis.process`
+  // is undefined there. Guard so the module loads in both environments.
+  const env =
+    typeof globalThis !== "undefined" &&
+    (globalThis as { process?: { env?: Record<string, string | undefined> } })
+      .process?.env;
+  const raw = env ? env.MTOC2_MAX_SPECS_PER_FUNCTION : undefined;
   if (!raw) return 256;
   const n = Number.parseInt(raw, 10);
   if (Number.isFinite(n) && n > 0) return n;
