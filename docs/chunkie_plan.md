@@ -329,25 +329,30 @@ needed by later phases.
    should let other MATLAB toolboxes start working with little
    or no incremental effort — that's the parity payoff.
 
-   **Next concrete gap (probed after cells + try/catch + warning
-   landed):** running the driver through the interpreter now fails
-   at workspace-build time on `@chunker/chunker.m` with
-   `'properties' block attributes are not supported in v1`
-   (`src/lowering/classDefs.ts`). chunkie's `chunker` classdef uses
-   `properties(Access=private)`, `properties(Dependent,Access=public)`,
-   `properties(Hidden, Access=public)`, and
-   `properties(SetAccess=private)`. This is its own feature class —
-   MATLAB **property-block attributes** (`Access` / `GetAccess` /
-   `SetAccess` / `Hidden` / `Constant` and, hardest, `Dependent`
-   with paired `get.PropName` / `set.PropName` accessor methods).
-   The non-`Dependent` access attributes are mostly ignorable for a
-   single-file run (mtoc2 doesn't enforce visibility), but
-   `Dependent` properties have no storage and require routing reads
-   through their getter — a real semantic feature. Class attributes
-   (`classdef (Abstract) ...`) and inheritance are also still
-   rejected and may surface next. **Design lives in
-   [property_attributes_plan.md](property_attributes_plan.md)**; it's
-   the gateway to the rest of the chunkie class hierarchy.
+   **Property-block attributes — done.** The chunkie `@chunker/chunker.m`
+   classdef previously broke workspace-build with
+   `'properties' block attributes are not supported in v1`. The
+   three-phase landing in
+   [property_attributes_plan.md](property_attributes_plan.md)
+   ships the feature class: phase A passes through the no-op
+   attributes (`Access` / `GetAccess` / `SetAccess` / `Hidden`),
+   phase B adds `Dependent` properties with `get.X` / `set.X`
+   accessor routing in all three backends, and phase C wires
+   indexed reads through a dependent property (`obj.depProp(i,j)`).
+   The chunkie driver now advances past `@chunker/chunker.m`.
+
+   **Next concrete gap (probed after property-attrs landed):** the
+   driver now fails with `external method declarations are not
+supported in v1` (`src/lowering/classDefs.ts`). chunker's
+   classdef declares method signatures inside a `methods` block
+   (prototype rows without a `function` keyword) for external
+   `.m` files in `@chunker/`. mtoc2 currently rejects any
+   `m.signatures` entry; lifting that needs the resolver to map a
+   `methods` block signature to the corresponding
+   `@chunker/<name>.m` external method file. Distinct feature
+   class — likely its own design doc before starting. Class
+   attributes (`classdef (Abstract) ...`) and inheritance are
+   also still rejected and may surface after that.
 
 Don't sweat the numbering — if step 3 turns out to depend on step
 4, reshuffle. The list is a dependency graph more than a timeline.

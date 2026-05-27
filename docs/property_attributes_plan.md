@@ -1,13 +1,15 @@
 # Property-block attributes — plan
 
-**Status:** Design. No code has landed.
+**Status:** Landed (phases A, B, C). Subsequent edits to this doc
+should track follow-up work (storage-backed accessors, recursion
+guard, multi-output accessors, etc.) rather than rewriting the
+landed semantics.
 
-This is the next end-to-end gap surfaced by the chunkie driver
+This was the end-to-end gap surfaced by the chunkie driver
 (see [chunkie_plan.md](chunkie_plan.md)). Running
-`tmp/chunkie_ex01_circle.m` through the interpreter fails at
+`tmp/chunkie_ex01_circle.m` through the interpreter failed at
 workspace-build time with
-`'properties' block attributes are not supported in v1`
-([classDefs.ts:128](../src/lowering/classDefs.ts#L128)), because
+`'properties' block attributes are not supported in v1`, because
 `@chunker/chunker.m` declares several `properties(...)` blocks with
 attributes: `Access`, `SetAccess`, `Hidden`, and — the only one
 with real semantics — `Dependent`.
