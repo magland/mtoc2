@@ -13,6 +13,7 @@ test_member_rooted_index();
 test_member_rooted_index_write();
 test_member_rooted_slice_write();
 test_class_alias_isolation();
+test_class_attr_passthrough();
 
 function test_class_construct_basic()
   p = Point(3, 4);
@@ -129,6 +130,26 @@ function test_class_alias_isolation()
   disp(b.data);
 end
 
+function test_class_attr_passthrough()
+  % `properties` blocks with Access / GetAccess / SetAccess / Hidden
+  % attributes parse and behave as if the attribute weren't there —
+  % mtoc2 doesn't enforce visibility (matches numbl). Reads and
+  % writes work the same way as plain storage properties.
+  v = Vault(7, 11, 13);
+  disp(v.pub);
+  disp(v.priv);
+  disp(v.hid);
+  disp(v.setpriv);
+  v.pub = 100;
+  v.priv = 200;
+  v.hid = 300;
+  v.setpriv = 400;
+  disp(v.pub);
+  disp(v.priv);
+  disp(v.hid);
+  disp(v.setpriv);
+end
+
 classdef Point
   properties
     x = 0
@@ -205,6 +226,31 @@ classdef MixedDef
   methods
     function obj = MixedDef(x)
       obj.dynamic = x;
+    end
+  end
+end
+
+classdef Vault
+  % Each properties block carries an attribute that mtoc2 must accept
+  % silently (matching numbl). Storage and dispatch are unchanged.
+  properties (Access = public)
+    pub = 0
+  end
+  properties (Access = private)
+    priv = 0
+  end
+  properties (Hidden, Access = public)
+    hid = 0
+  end
+  properties (SetAccess = private)
+    setpriv = 0
+  end
+  methods
+    function obj = Vault(a, b, c)
+      obj.pub = a;
+      obj.priv = b;
+      obj.hid = c;
+      obj.setpriv = a + b + c;
     end
   end
 end

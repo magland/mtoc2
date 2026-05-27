@@ -345,9 +345,9 @@ needed by later phases.
    `Dependent` properties have no storage and require routing reads
    through their getter — a real semantic feature. Class attributes
    (`classdef (Abstract) ...`) and inheritance are also still
-   rejected and may surface next. Plan this as its own phase (likely
-   its own design doc) before starting; it's the gateway to the rest
-   of the chunkie class hierarchy.
+   rejected and may surface next. **Design lives in
+   [property_attributes_plan.md](property_attributes_plan.md)**; it's
+   the gateway to the rest of the chunkie class hierarchy.
 
 Don't sweat the numbering — if step 3 turns out to depend on step
 4, reshuffle. The list is a dependency graph more than a timeline.

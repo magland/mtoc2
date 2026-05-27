@@ -124,9 +124,32 @@ export function registerClassDef(
   for (const m of s.members) {
     switch (m.type) {
       case "Properties": {
-        if (m.attributes.length > 0) {
+        // Property-block attributes. mtoc2 doesn't enforce visibility,
+        // so `Access` / `GetAccess` / `SetAccess` / `Hidden` are
+        // accepted silently — matches numbl, which ignores them in
+        // `extractClassInfo`. `Dependent` is a real semantic feature
+        // (no storage; reads/writes route through `get.X` / `set.X`)
+        // and lands in phase B; reject explicitly until then with a
+        // pointer to the plan. Everything else is rejected by name.
+        for (const attr of m.attributes) {
+          const lower = attr.name.toLowerCase();
+          if (
+            lower === "access" ||
+            lower === "getaccess" ||
+            lower === "setaccess" ||
+            lower === "hidden"
+          ) {
+            continue;
+          }
+          if (lower === "dependent") {
+            throw new UnsupportedConstruct(
+              `'properties(Dependent, ...)' is not yet supported ` +
+                `(planned in docs/property_attributes_plan.md phase B)`,
+              s.span
+            );
+          }
           throw new UnsupportedConstruct(
-            `'properties' block attributes are not supported in v1`,
+            `'properties' block attribute '${attr.name}' is not supported in v1`,
             s.span
           );
         }
