@@ -329,6 +329,26 @@ needed by later phases.
    should let other MATLAB toolboxes start working with little
    or no incremental effort — that's the parity payoff.
 
+   **Next concrete gap (probed after cells + try/catch + warning
+   landed):** running the driver through the interpreter now fails
+   at workspace-build time on `@chunker/chunker.m` with
+   `'properties' block attributes are not supported in v1`
+   (`src/lowering/classDefs.ts`). chunkie's `chunker` classdef uses
+   `properties(Access=private)`, `properties(Dependent,Access=public)`,
+   `properties(Hidden, Access=public)`, and
+   `properties(SetAccess=private)`. This is its own feature class —
+   MATLAB **property-block attributes** (`Access` / `GetAccess` /
+   `SetAccess` / `Hidden` / `Constant` and, hardest, `Dependent`
+   with paired `get.PropName` / `set.PropName` accessor methods).
+   The non-`Dependent` access attributes are mostly ignorable for a
+   single-file run (mtoc2 doesn't enforce visibility), but
+   `Dependent` properties have no storage and require routing reads
+   through their getter — a real semantic feature. Class attributes
+   (`classdef (Abstract) ...`) and inheritance are also still
+   rejected and may surface next. Plan this as its own phase (likely
+   its own design doc) before starting; it's the gateway to the rest
+   of the chunkie class hierarchy.
+
 Don't sweat the numbering — if step 3 turns out to depend on step
 4, reshuffle. The list is a dependency graph more than a timeline.
 
