@@ -7,8 +7,9 @@
  *   repmat(A, [m n p ...])  — Form B: dim-vector reps (must be static)
  *
  * Discipline:
- *   - A may be a scalar or a tensor of real-double / logical elements;
- *     complex inputs are rejected with `UnsupportedConstruct` (v1).
+ *   - A may be a scalar or a tensor of double / logical / complex
+ *     elements. Complex inputs route through `mtoc2_tensor_repmat_complex`
+ *     (or `_fill_nd_complex` for scalar A).
  *   - Each rep arg is a scalar real double; statically-known finite
  *     integers pin the corresponding output axis, dynamic scalars leave
  *     that axis as `unknown` in the result lattice.
@@ -40,21 +41,32 @@ import {
   MTOC2_MAX_NDIM,
   isNumeric,
   isScalar,
+  scalarComplex,
   scalarDouble,
   shapeNumel,
   signFromExactArray,
   signFromNumber,
+  tensorComplex,
+  tensorComplexFromDims,
   tensorDouble,
   tensorDoubleFromDims,
   typeToString,
 } from "../../../lowering/types.js";
 import type { DimInfo, NumericType, Type } from "../../../lowering/types.js";
 import type { Builtin } from "../../registry.js";
-import { exactDouble, exactRealArray } from "../_shared.js";
+import {
+  exactComplex,
+  exactComplexArray,
+  exactDouble,
+  exactRealArray,
+} from "../_shared.js";
 import type { RuntimeTensor, RuntimeValue } from "../../../runtime/value.js";
+import { isComplexValue } from "../../../runtime/value.js";
 import {
   mtoc2_tensor_fill_nd as jsFillNd,
+  mtoc2_tensor_fill_nd_complex as jsFillNdComplex,
   mtoc2_tensor_repmat as jsRepmat,
+  mtoc2_tensor_repmat_complex as jsRepmatComplex,
 } from "../../runtime/snippets.gen.js";
 
 /** Per-axis rep resolution. `argIndex` is the position in the original
@@ -270,11 +282,6 @@ export const repmat: Builtin = {
         `'repmat' first arg must be numeric (got ${typeToString(a)})`
       );
     }
-    if (a.isComplex) {
-      throw new UnsupportedConstruct(
-        `'repmat' on complex tensors is not yet supported`
-      );
-    }
     if (a.elem !== "double" && a.elem !== "logical") {
       throw new TypeError(
         `'repmat' first arg must be a real double / logical (got ${a.elem})`
@@ -297,6 +304,21 @@ export const repmat: Builtin = {
         while (outShape.length < 2) outShape.push(1);
         const total = shapeNumel(outShape);
         // Scalar input: every cell = the scalar's value.
+        if (a.isComplex) {
+          const cx = exactComplex(a);
+          if (outShape.every(s => s === 1)) {
+            if (cx !== undefined) return [scalarComplex(cx)];
+            return [scalarComplex()];
+          }
+          if (cx !== undefined && total <= EXACT_ARRAY_MAX_ELEMENTS) {
+            const re = new Float64Array(total);
+            const im = new Float64Array(total);
+            re.fill(cx.re);
+            im.fill(cx.im);
+            return [tensorComplex(outShape, { re, im })];
+          }
+          return [tensorComplex(outShape)];
+        }
         const scalarExact = exactDouble(a);
         if (outShape.every(s => s === 1)) {
           if (scalarExact !== undefined) {
@@ -321,6 +343,23 @@ export const repmat: Builtin = {
         const padShape = padTo(inShape, 1, outNdim);
         const padReps = padTo(repVals, 1, outNdim);
         const outShape = padShape.map((s, i) => s * padReps[i]);
+        if (a.isComplex) {
+          if (outShape.every(s => s === 1)) {
+            const cx = exactComplexArray(a);
+            if (cx !== undefined && cx.re.length === 1) {
+              return [scalarComplex({ re: cx.re[0], im: cx.im[0] })];
+            }
+            return [scalarComplex()];
+          }
+          const total = shapeNumel(outShape);
+          const cx = exactComplexArray(a);
+          if (cx !== undefined && total <= EXACT_ARRAY_MAX_ELEMENTS) {
+            const tiledRe = tileExact(cx.re, padShape, padReps);
+            const tiledIm = tileExact(cx.im, padShape, padReps);
+            return [tensorComplex(outShape, { re: tiledRe, im: tiledIm })];
+          }
+          return [tensorComplex(outShape)];
+        }
         // Normalize: mtoc2 tensors are always ≥ 2-D. inShape is
         // already ≥ 2-D and outNdim ≥ inShape.length, so outShape is too.
         if (outShape.every(s => s === 1)) {
@@ -366,6 +405,7 @@ export const repmat: Builtin = {
         dims.push({ kind: "unknown" });
       }
     }
+    if (a.isComplex) return [tensorComplexFromDims(dims)];
     const t = tensorDoubleFromDims(dims);
     t.sign = a.sign;
     return [t];
@@ -381,17 +421,23 @@ export const repmat: Builtin = {
 
     if (scalarInput) {
       useRuntime("mtoc2_tensor_fill_nd");
-      // Pad reps to ≥ 2 axes for the helper call (mtoc2 ≥ 2-D rule).
       const padReps = reps.slice();
       while (padReps.length < 2) {
         padReps.push({ kind: "exact", value: 1, argIndex: 0 });
       }
       const dimList = padReps.map(r => repC(r, argsC)).join(", ");
+      if (a.isComplex) {
+        useRuntime("mtoc2_cscalar");
+        return `mtoc2_tensor_fill_nd_complex(creal(${argsC[0]}), cimag(${argsC[0]}), ${padReps.length}, (long[]){${dimList}})`;
+      }
       return `mtoc2_tensor_fill_nd((double)(${argsC[0]}), ${padReps.length}, (long[]){${dimList}})`;
     }
 
     useRuntime("mtoc2_tensor_repmat");
     const dimList = reps.map(r => repC(r, argsC)).join(", ");
+    if (a.isComplex) {
+      return `mtoc2_tensor_repmat_complex(${argsC[0]}, ${reps.length}, (long[]){${dimList}})`;
+    }
     return `mtoc2_tensor_repmat(${argsC[0]}, ${reps.length}, (long[]){${dimList}})`;
   },
 
@@ -410,11 +456,17 @@ export const repmat: Builtin = {
         padReps.push({ kind: "exact", value: 1, argIndex: 0 });
       }
       const dimList = padReps.map(r => repJs(r, argsJs)).join(", ");
+      if (a.isComplex) {
+        return `mtoc2_tensor_fill_nd_complex(${argsJs[0]}.re, ${argsJs[0]}.im, ${padReps.length}, [${dimList}])`;
+      }
       return `mtoc2_tensor_fill_nd(${argsJs[0]}, ${padReps.length}, [${dimList}])`;
     }
 
     useRuntime("mtoc2_tensor_repmat");
     const dimList = reps.map(r => repJs(r, argsJs)).join(", ");
+    if (a.isComplex) {
+      return `mtoc2_tensor_repmat_complex(${argsJs[0]}, ${reps.length}, [${dimList}])`;
+    }
     return `mtoc2_tensor_repmat(${argsJs[0]}, ${reps.length}, [${dimList}])`;
   },
 
@@ -437,6 +489,20 @@ export const repmat: Builtin = {
     if (scalarInput) {
       const padReps = repVals.slice();
       while (padReps.length < 2) padReps.push(1);
+      if (a.isComplex) {
+        const v0 = args[0];
+        const cx = isComplexValue(v0)
+          ? v0
+          : { re: typeof v0 === "number" ? v0 : Number(v0 as unknown), im: 0 };
+        return [
+          jsFillNdComplex(
+            cx.re,
+            cx.im,
+            padReps.length,
+            padReps
+          ) as unknown as RuntimeTensor,
+        ];
+      }
       const scalarVal =
         typeof args[0] === "number"
           ? (args[0] as number)
@@ -450,6 +516,15 @@ export const repmat: Builtin = {
       ];
     }
 
+    if (a.isComplex) {
+      return [
+        jsRepmatComplex(
+          args[0] as RuntimeTensor,
+          repVals.length,
+          repVals
+        ) as unknown as RuntimeTensor,
+      ];
+    }
     return [
       jsRepmat(
         args[0] as RuntimeTensor,

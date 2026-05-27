@@ -15,9 +15,10 @@
  *                         the k-th diagonal position.
  *
  * Mirrors numbl's `diag` tensor-branch in
- * `interpreter/builtins/array-manipulation.ts`. The sparse-matrix
- * branch is N/A (mtoc2 has no sparse type), and complex inputs are
- * deferred with `UnsupportedConstruct`.
+ * `interpreter/builtins/array-manipulation.ts`. Real and complex
+ * inputs both supported (complex routes through `*_diag_*_complex`
+ * runtime helpers); the sparse-matrix branch is N/A (mtoc2 has no
+ * sparse type).
  *
  * Input shape must be statically known (matches numbl's eager
  * dispatch on rows/cols), and `k` must be statically known so the
@@ -30,20 +31,34 @@ import {
   EXACT_ARRAY_MAX_ELEMENTS,
   isNumeric,
   isScalar,
+  scalarComplex,
   scalarDouble,
   signFromNumber,
+  tensorComplex,
   tensorDouble,
   typeToString,
 } from "../../../lowering/types.js";
 import type { NumericType, Type } from "../../../lowering/types.js";
 import type { Builtin } from "../../registry.js";
-import { exactDouble, exactRealArray } from "../_shared.js";
+import {
+  exactComplex,
+  exactComplexArray,
+  exactDouble,
+  exactRealArray,
+} from "../_shared.js";
 import type { RuntimeTensor } from "../../../runtime/value.js";
-import { isTensor, makeTensor } from "../../../runtime/value.js";
+import {
+  isComplexValue,
+  isTensor,
+  makeTensor,
+} from "../../../runtime/value.js";
 import {
   mtoc2_tensor_diag_construct as jsDiagConstruct,
   mtoc2_tensor_diag_extract as jsDiagExtract,
   mtoc2_tensor_diag_from_scalar as jsDiagFromScalar,
+  mtoc2_tensor_diag_construct_complex as jsDiagConstructComplex,
+  mtoc2_tensor_diag_extract_complex as jsDiagExtractComplex,
+  mtoc2_tensor_diag_from_scalar_complex as jsDiagFromScalarComplex,
 } from "../../runtime/snippets.gen.js";
 
 /** Resolve the optional `k` argument to a JS integer. Throws on
@@ -103,11 +118,6 @@ export const diag: Builtin = {
         `'diag' first arg must be a double or logical tensor (got ${a.elem})`
       );
     }
-    if (a.isComplex) {
-      throw new UnsupportedConstruct(
-        `'diag' on complex tensors is not yet supported`
-      );
-    }
 
     const k = resolveK(argTypes);
     const absK = Math.abs(k);
@@ -115,7 +125,11 @@ export const diag: Builtin = {
     // ── Scalar input ─────────────────────────────────────────
     if (isScalar(a)) {
       if (k === 0) {
-        // Pass-through: 1×1 diag(v) is just v.
+        if (a.isComplex) {
+          const cx = exactComplex(a);
+          if (cx !== undefined) return [scalarComplex(cx)];
+          return [scalarComplex()];
+        }
         const v = exactDouble(a);
         if (v !== undefined) {
           return [scalarDouble(signFromNumber(v), v)];
@@ -126,6 +140,19 @@ export const diag: Builtin = {
       const m = 1 + absK;
       const shape = [m, m];
       const total = m * m;
+      if (a.isComplex) {
+        const cx = exactComplex(a);
+        if (cx !== undefined && total <= EXACT_ARRAY_MAX_ELEMENTS) {
+          const re = new Float64Array(total);
+          const im = new Float64Array(total);
+          const r = k < 0 ? -k : 0;
+          const c = k > 0 ? k : 0;
+          re[r + c * m] = cx.re;
+          im[r + c * m] = cx.im;
+          return [tensorComplex(shape, { re, im })];
+        }
+        return [tensorComplex(shape)];
+      }
       const v = exactDouble(a);
       if (v !== undefined && total <= EXACT_ARRAY_MAX_ELEMENTS) {
         const data = new Float64Array(total);
@@ -156,6 +183,21 @@ export const diag: Builtin = {
       const m = vecLen + absK;
       const shape = [m, m];
       const total = m * m;
+      if (a.isComplex) {
+        const cx = exactComplexArray(a);
+        if (cx !== undefined && total <= EXACT_ARRAY_MAX_ELEMENTS) {
+          const re = new Float64Array(total);
+          const im = new Float64Array(total);
+          for (let i = 0; i < vecLen; i++) {
+            const r = k < 0 ? i - k : i;
+            const c = k > 0 ? i + k : i;
+            re[r + c * m] = cx.re[i];
+            im[r + c * m] = cx.im[i];
+          }
+          return [tensorComplex(shape, { re, im })];
+        }
+        return [tensorComplex(shape)];
+      }
       const arr = exactRealArray(a);
       if (arr !== undefined && total <= EXACT_ARRAY_MAX_ELEMENTS) {
         const data = new Float64Array(total);
@@ -171,14 +213,25 @@ export const diag: Builtin = {
 
     // Extract path.
     const diagLen = diagonalLength(rows, cols, k);
-    const arr = exactRealArray(a);
 
     if (diagLen === 0) {
       // Empty diagonal — 0×1 column vector. Cannot carry exact data.
+      if (a.isComplex) return [tensorComplex([0, 1])];
       return [tensorDouble([0, 1])];
     }
     if (diagLen === 1) {
       // Single-element diagonal degenerates to a scalar.
+      if (a.isComplex) {
+        const cx = exactComplexArray(a);
+        if (cx !== undefined) {
+          const r = k < 0 ? -k : 0;
+          const c = k > 0 ? k : 0;
+          const idx = r + c * rows;
+          return [scalarComplex({ re: cx.re[idx], im: cx.im[idx] })];
+        }
+        return [scalarComplex()];
+      }
+      const arr = exactRealArray(a);
       if (arr !== undefined) {
         const r = k < 0 ? -k : 0;
         const c = k > 0 ? k : 0;
@@ -189,6 +242,22 @@ export const diag: Builtin = {
     }
 
     const shape = [diagLen, 1];
+    if (a.isComplex) {
+      const cx = exactComplexArray(a);
+      if (cx !== undefined && diagLen <= EXACT_ARRAY_MAX_ELEMENTS) {
+        const re = new Float64Array(diagLen);
+        const im = new Float64Array(diagLen);
+        for (let i = 0; i < diagLen; i++) {
+          const r = k < 0 ? -k + i : i;
+          const c = k > 0 ? k + i : i;
+          re[i] = cx.re[r + c * rows];
+          im[i] = cx.im[r + c * rows];
+        }
+        return [tensorComplex(shape, { re, im })];
+      }
+      return [tensorComplex(shape)];
+    }
+    const arr = exactRealArray(a);
     if (arr !== undefined && diagLen <= EXACT_ARRAY_MAX_ELEMENTS) {
       const data = new Float64Array(diagLen);
       for (let i = 0; i < diagLen; i++) {
@@ -207,6 +276,11 @@ export const diag: Builtin = {
 
     if (isScalar(a)) {
       if (k === 0) return argsC[0];
+      if (a.isComplex) {
+        useRuntime("mtoc2_tensor_diag");
+        useRuntime("mtoc2_cscalar");
+        return `mtoc2_tensor_diag_from_scalar_complex(creal(${argsC[0]}), cimag(${argsC[0]}), ${k}L)`;
+      }
       useRuntime("mtoc2_tensor_diag");
       return `mtoc2_tensor_diag_from_scalar(${argsC[0]}, ${k}L)`;
     }
@@ -215,6 +289,10 @@ export const diag: Builtin = {
     const cols = (a.shape as number[])[1];
 
     if (rows === 1 || cols === 1) {
+      if (a.isComplex) {
+        useRuntime("mtoc2_tensor_diag");
+        return `mtoc2_tensor_diag_construct_complex(${argsC[0]}, ${k}L)`;
+      }
       useRuntime("mtoc2_tensor_diag");
       return `mtoc2_tensor_diag_construct(${argsC[0]}, ${k}L)`;
     }
@@ -224,7 +302,15 @@ export const diag: Builtin = {
       const r = k < 0 ? -k : 0;
       const c = k > 0 ? k : 0;
       const offset = r + c * rows;
+      if (a.isComplex) {
+        useRuntime("mtoc2_cscalar");
+        return `mtoc2_cmake(${argsC[0]}.real[${offset}], ${argsC[0]}.imag != NULL ? ${argsC[0]}.imag[${offset}] : 0.0)`;
+      }
       return `${argsC[0]}.real[${offset}]`;
+    }
+    if (a.isComplex) {
+      useRuntime("mtoc2_tensor_diag");
+      return `mtoc2_tensor_diag_extract_complex(${argsC[0]}, ${k}L)`;
     }
     useRuntime("mtoc2_tensor_diag");
     return `mtoc2_tensor_diag_extract(${argsC[0]}, ${k}L)`;
@@ -236,6 +322,10 @@ export const diag: Builtin = {
 
     if (isScalar(a)) {
       if (k === 0) return argsJs[0];
+      if (a.isComplex) {
+        useRuntime("mtoc2_tensor_diag");
+        return `mtoc2_tensor_diag_from_scalar_complex(${argsJs[0]}.re, ${argsJs[0]}.im, ${k})`;
+      }
       useRuntime("mtoc2_tensor_diag");
       return `mtoc2_tensor_diag_from_scalar(${argsJs[0]}, ${k})`;
     }
@@ -244,6 +334,10 @@ export const diag: Builtin = {
     const cols = (a.shape as number[])[1];
 
     if (rows === 1 || cols === 1) {
+      if (a.isComplex) {
+        useRuntime("mtoc2_tensor_diag");
+        return `mtoc2_tensor_diag_construct_complex(${argsJs[0]}, ${k})`;
+      }
       useRuntime("mtoc2_tensor_diag");
       return `mtoc2_tensor_diag_construct(${argsJs[0]}, ${k})`;
     }
@@ -253,7 +347,14 @@ export const diag: Builtin = {
       const r = k < 0 ? -k : 0;
       const c = k > 0 ? k : 0;
       const offset = r + c * rows;
+      if (a.isComplex) {
+        return `{ re: ${argsJs[0]}.data[${offset}], im: ${argsJs[0]}.imag !== undefined ? ${argsJs[0]}.imag[${offset}] : 0 }`;
+      }
       return `${argsJs[0]}.data[${offset}]`;
+    }
+    if (a.isComplex) {
+      useRuntime("mtoc2_tensor_diag");
+      return `mtoc2_tensor_diag_extract_complex(${argsJs[0]}, ${k})`;
     }
     useRuntime("mtoc2_tensor_diag");
     return `mtoc2_tensor_diag_extract(${argsJs[0]}, ${k})`;
@@ -265,6 +366,15 @@ export const diag: Builtin = {
 
     if (isScalar(a)) {
       if (k === 0) return [args[0]];
+      if (a.isComplex) {
+        const v = args[0];
+        const cx = isComplexValue(v)
+          ? v
+          : { re: typeof v === "number" ? v : Number(v), im: 0 };
+        return [
+          jsDiagFromScalarComplex(cx.re, cx.im, k) as unknown as RuntimeTensor,
+        ];
+      }
       const v = typeof args[0] === "number" ? args[0] : Number(args[0]);
       return [jsDiagFromScalar(v, k) as unknown as RuntimeTensor];
     }
@@ -279,6 +389,9 @@ export const diag: Builtin = {
     const cols = t.shape[1];
 
     if (rows === 1 || cols === 1) {
+      if (a.isComplex) {
+        return [jsDiagConstructComplex(t, k) as unknown as RuntimeTensor];
+      }
       return [jsDiagConstruct(t, k) as unknown as RuntimeTensor];
     }
 
@@ -289,7 +402,15 @@ export const diag: Builtin = {
     if (diagLen === 1) {
       const r = k < 0 ? -k : 0;
       const c = k > 0 ? k : 0;
-      return [t.data[r + c * rows]];
+      const idx = r + c * rows;
+      if (a.isComplex) {
+        const im = t.imag !== undefined ? t.imag[idx] : 0;
+        return [{ re: t.data[idx], im }];
+      }
+      return [t.data[idx]];
+    }
+    if (a.isComplex) {
+      return [jsDiagExtractComplex(t, k) as unknown as RuntimeTensor];
     }
     return [jsDiagExtract(t, k) as unknown as RuntimeTensor];
   },

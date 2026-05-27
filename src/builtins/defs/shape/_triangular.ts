@@ -9,8 +9,8 @@
  *     family-specific predicate + runtime helper.
  *
  * Mirrors `triPart` in numbl's
- * `interpreter/builtins/array-extras.ts`. Sparse and complex inputs
- * are deferred with `UnsupportedConstruct`; rank > 2 is rejected.
+ * `interpreter/builtins/array-extras.ts`. Real and complex inputs
+ * both supported; sparse inputs and rank > 2 are deferred / rejected.
  */
 
 import { TypeError, UnsupportedConstruct } from "../../../lowering/errors.js";
@@ -18,8 +18,10 @@ import {
   EXACT_ARRAY_MAX_ELEMENTS,
   isNumeric,
   isScalar,
+  scalarComplex,
   scalarDouble,
   signFromNumber,
+  tensorComplex,
   tensorDouble,
   typeToString,
 } from "../../../lowering/types.js";
@@ -30,12 +32,19 @@ import type {
   EmitCArgs,
   EmitJsArgs,
 } from "../../registry.js";
-import { exactDouble, exactRealArray } from "../_shared.js";
+import {
+  exactComplex,
+  exactComplexArray,
+  exactDouble,
+  exactRealArray,
+} from "../_shared.js";
 import type { RuntimeTensor } from "../../../runtime/value.js";
 import { isTensor, makeTensor } from "../../../runtime/value.js";
 import {
   mtoc2_tensor_triu as jsTriu,
   mtoc2_tensor_tril as jsTril,
+  mtoc2_tensor_triu_complex as jsTriuComplex,
+  mtoc2_tensor_tril_complex as jsTrilComplex,
 } from "../../runtime/snippets.gen.js";
 
 /** Resolve the optional `k` argument to a JS integer. Throws on
@@ -68,16 +77,22 @@ function resolveK(name: string, argTypes: Type[]): number {
 interface TriangularSpec {
   /** Source-level name (registry key). */
   name: string;
-  /** C runtime helper name (e.g. `"mtoc2_tensor_triu"`). */
+  /** C runtime helper name for real-input (e.g. `"mtoc2_tensor_triu"`). */
   cHelper: string;
+  /** C runtime helper name for complex-input
+   *  (e.g. `"mtoc2_tensor_triu_complex"`). */
+  cHelperComplex: string;
   /** Keep predicate matching numbl's `triPart` (column-major i,j). */
   keep(i: number, j: number, k: number): boolean;
-  /** JS-side helper (from `snippets.gen.js`). */
+  /** JS-side helper for real input. */
   jsHelper: (a: RuntimeTensor, k: number) => unknown;
+  /** JS-side helper for complex input. */
+  jsHelperComplex: (a: RuntimeTensor, k: number) => unknown;
 }
 
 export function defineTriangular(spec: TriangularSpec): Builtin {
-  const { name, cHelper, keep, jsHelper } = spec;
+  const { name, cHelper, cHelperComplex, keep, jsHelper, jsHelperComplex } =
+    spec;
 
   function transfer(argTypes: Type[], nargout: number): Type[] {
     if (argTypes.length < 1 || argTypes.length > 2) {
@@ -102,18 +117,21 @@ export function defineTriangular(spec: TriangularSpec): Builtin {
         `'${name}' first arg must be a double or logical tensor (got ${a.elem})`
       );
     }
-    if (a.isComplex) {
-      throw new UnsupportedConstruct(
-        `'${name}' on complex tensors is not yet supported`
-      );
-    }
-
     const k = resolveK(name, argTypes);
 
     // ── Scalar input ─────────────────────────────────────────
     if (isScalar(a)) {
       // Numbl behavior: scalar is treated as a 1×1 matrix; keep iff
       // predicate(0,0,k). Result stays scalar.
+      if (a.isComplex) {
+        const cx = exactComplex(a);
+        if (cx !== undefined) {
+          return [scalarComplex(keep(0, 0, k) ? cx : { re: 0, im: 0 })];
+        }
+        return [
+          keep(0, 0, k) ? scalarComplex() : scalarComplex({ re: 0, im: 0 }),
+        ];
+      }
       const v = exactDouble(a);
       if (v !== undefined) {
         const kept = keep(0, 0, k) ? v : 0;
@@ -141,6 +159,24 @@ export function defineTriangular(spec: TriangularSpec): Builtin {
     const [rows, cols] = a.shape;
     const shape = [rows, cols];
     const total = rows * cols;
+    if (a.isComplex) {
+      const cx = exactComplexArray(a);
+      if (cx !== undefined && total <= EXACT_ARRAY_MAX_ELEMENTS) {
+        const re = new Float64Array(total);
+        const im = new Float64Array(total);
+        for (let j = 0; j < cols; j++) {
+          for (let i = 0; i < rows; i++) {
+            if (keep(i, j, k)) {
+              const idx = i + j * rows;
+              re[idx] = cx.re[idx];
+              im[idx] = cx.im[idx];
+            }
+          }
+        }
+        return [tensorComplex(shape, { re, im })];
+      }
+      return [tensorComplex(shape)];
+    }
     const arr = exactRealArray(a);
     if (arr !== undefined && total <= EXACT_ARRAY_MAX_ELEMENTS) {
       const data = new Float64Array(total);
@@ -162,9 +198,17 @@ export function defineTriangular(spec: TriangularSpec): Builtin {
     const k = resolveK(name, argTypes);
 
     if (isScalar(a)) {
+      if (a.isComplex) {
+        useRuntime("mtoc2_cscalar");
+        return keep(0, 0, k) ? argsC[0] : `mtoc2_cmake(0.0, 0.0)`;
+      }
       return keep(0, 0, k) ? argsC[0] : "0.0";
     }
 
+    if (a.isComplex) {
+      useRuntime("mtoc2_tensor_triangular");
+      return `${cHelperComplex}(${argsC[0]}, ${k}L)`;
+    }
     useRuntime("mtoc2_tensor_triangular");
     return `${cHelper}(${argsC[0]}, ${k}L)`;
   }
@@ -174,9 +218,17 @@ export function defineTriangular(spec: TriangularSpec): Builtin {
     const k = resolveK(name, argTypes);
 
     if (isScalar(a)) {
+      if (a.isComplex) {
+        useRuntime("mtoc2_cscalar");
+        return keep(0, 0, k) ? argsJs[0] : `mtoc2_cmake(0, 0)`;
+      }
       return keep(0, 0, k) ? argsJs[0] : "0";
     }
 
+    if (a.isComplex) {
+      useRuntime("mtoc2_tensor_triangular");
+      return `${cHelperComplex}(${argsJs[0]}, ${k})`;
+    }
     useRuntime("mtoc2_tensor_triangular");
     return `${cHelper}(${argsJs[0]}, ${k})`;
   }
@@ -187,6 +239,7 @@ export function defineTriangular(spec: TriangularSpec): Builtin {
 
     if (isScalar(a)) {
       if (keep(0, 0, k)) return [args[0]];
+      if (a.isComplex) return [{ re: 0, im: 0 }];
       return [0];
     }
 
@@ -204,6 +257,9 @@ export function defineTriangular(spec: TriangularSpec): Builtin {
     if (rows === 0 || cols === 0) {
       return [makeTensor([rows, cols], new Float64Array(0))];
     }
+    if (a.isComplex) {
+      return [jsHelperComplex(t, k) as unknown as RuntimeTensor];
+    }
     return [jsHelper(t, k) as unknown as RuntimeTensor];
   }
 
@@ -212,4 +268,4 @@ export function defineTriangular(spec: TriangularSpec): Builtin {
 
 // Re-export the JS helpers so the per-builtin files don't each have to
 // re-import them.
-export { jsTriu, jsTril };
+export { jsTriu, jsTril, jsTriuComplex, jsTrilComplex };

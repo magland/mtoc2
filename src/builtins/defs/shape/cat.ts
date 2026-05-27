@@ -11,8 +11,9 @@
  *   - dim>=3 → grow a new outer axis; result is N-D.
  *
  * Discipline:
- *   - Every non-dim arg must be real numeric (double or logical).
- *     Complex inputs are rejected with `UnsupportedConstruct`.
+ *   - Every non-dim arg must be numeric (double or logical), real
+ *     or complex. Any complex input contaminates the result to
+ *     complex (real inputs flow through with `imag = 0` lanes).
  *   - Scalar args are treated as 1×1 tensors (matching numbl).
  *   - Empty inputs along the cat axis are dropped at runtime. A zero-
  *     element input also drops when its non-cat dims don't match the
@@ -36,14 +37,23 @@ import {
   isNumeric,
   isScalar,
   shapeNumel,
+  tensorComplex,
   tensorDouble,
   typeToString,
 } from "../../../lowering/types.js";
 import type { NumericType, Type } from "../../../lowering/types.js";
 import type { Builtin } from "../../registry.js";
 import type { RuntimeTensor, RuntimeValue } from "../../../runtime/value.js";
-import { exactDouble, exactRealArray } from "../_shared.js";
-import { mtoc2_tensor_cat as jsCat } from "../../runtime/snippets.gen.js";
+import {
+  exactComplex,
+  exactComplexArray,
+  exactDouble,
+  exactRealArray,
+} from "../_shared.js";
+import {
+  mtoc2_tensor_cat as jsCat,
+  mtoc2_tensor_cat_complex as jsCatComplex,
+} from "../../runtime/snippets.gen.js";
 
 /** Compile-time view of an input arg for the shape-derivation passes. */
 interface InputView {
@@ -51,8 +61,13 @@ interface InputView {
   shape: (number | null)[];
   /** Total element count when every axis is known; null otherwise. */
   total: number | null;
-  /** Exact data when both `total` is known and the input had exact data. */
+  /** Real-side exact data when the input had exact data. */
   exact?: Float64Array | number;
+  /** Imag-side exact data (complex inputs only). For complex scalars
+   *  this is a `number`; for complex tensors a `Float64Array`. */
+  exactIm?: Float64Array | number;
+  /** True iff the source arg was complex-typed. */
+  isComplex: boolean;
   /** Original argTypes index (1-based wrt full argTypes). */
   idx: number;
 }
@@ -98,30 +113,37 @@ function viewsForInputs(argTypes: Type[], ndim: number): InputView[] {
         `'cat' arg ${i + 1} must be numeric (got ${typeToString(a)})`
       );
     }
-    if (a.isComplex) {
-      throw new UnsupportedConstruct(
-        `'cat' on complex tensors is not yet supported`
-      );
-    }
     if (a.elem !== "double" && a.elem !== "logical") {
       throw new TypeError(
-        `'cat' arg ${i + 1} must be a real double or logical (got ${a.elem})`
+        `'cat' arg ${i + 1} must be a double or logical (got ${a.elem})`
       );
     }
     if (isScalar(a)) {
-      const ex = exactDouble(a);
       const shape: (number | null)[] = new Array(ndim).fill(1);
-      views.push({
-        shape,
-        total: 1,
-        exact: ex,
-        idx: i,
-      });
+      if (a.isComplex) {
+        const cx = exactComplex(a);
+        views.push({
+          shape,
+          total: 1,
+          exact: cx !== undefined ? cx.re : undefined,
+          exactIm: cx !== undefined ? cx.im : undefined,
+          isComplex: true,
+          idx: i,
+        });
+      } else {
+        const ex = exactDouble(a);
+        views.push({
+          shape,
+          total: 1,
+          exact: ex,
+          isComplex: false,
+          idx: i,
+        });
+      }
       continue;
     }
     // Tensor.
     if (a.dims.length > ndim) {
-      // Should already be ndim ≥ a.dims.length; assertion only.
       throw new UnsupportedConstruct(
         `'cat' result ndim ${ndim} cannot accommodate input rank ${a.dims.length}`
       );
@@ -139,13 +161,26 @@ function viewsForInputs(argTypes: Type[], ndim: number): InputView[] {
         total = null;
       }
     }
-    const arr = exactRealArray(a);
-    views.push({
-      shape,
-      total,
-      exact: arr,
-      idx: i,
-    });
+    if (a.isComplex) {
+      const cx = exactComplexArray(a);
+      views.push({
+        shape,
+        total,
+        exact: cx !== undefined ? cx.re : undefined,
+        exactIm: cx !== undefined ? cx.im : undefined,
+        isComplex: true,
+        idx: i,
+      });
+    } else {
+      const arr = exactRealArray(a);
+      views.push({
+        shape,
+        total,
+        exact: arr,
+        isComplex: false,
+        idx: i,
+      });
+    }
   }
   return views;
 }
@@ -258,20 +293,28 @@ function deriveResultShape(
 }
 
 /** Folded column-major copy: place every kept view's slab into `data`.
- *  Caller must have already validated shapes are compatible. */
+ *  Caller must have already validated shapes are compatible. When
+ *  `lane` is `"im"`, reads `v.exactIm` instead of `v.exact`; a real
+ *  view contributes zeros to the imag lane. */
 function foldExact(
   views: InputView[],
   resultShape: number[],
   refShape: number[],
   dimIdx: number,
-  ndim: number
+  ndim: number,
+  lane: "re" | "im" = "re"
 ): Float64Array | undefined {
-  // Every view must have exact data and known shape.
   for (const v of views) {
     if (v.shape.some(s => s === null)) return undefined;
     if (v.total === null) return undefined;
-    if (v.total === 0) continue; // empty — no data needed.
-    if (v.exact === undefined) return undefined;
+    if (v.total === 0) continue;
+    if (lane === "re") {
+      if (v.exact === undefined) return undefined;
+    } else {
+      // imag lane: a real view contributes zeros; a complex view must
+      // have exactIm data.
+      if (v.isComplex && v.exactIm === undefined) return undefined;
+    }
   }
 
   const total = shapeNumel(resultShape);
@@ -288,7 +331,6 @@ function foldExact(
     let dstOff = outer * strideDim * resultShape[dimIdx];
     for (const v of views) {
       if (v.total === 0) {
-        // Empty — possibly dropped at runtime.
         const shp = v.shape.map(s => s as number);
         let compat = true;
         for (let d = 0; d < ndim; d++) {
@@ -299,19 +341,22 @@ function foldExact(
           }
         }
         if (!compat) continue;
-        // Compatible empty: contributes 0 along cat dim.
         continue;
       }
       const shp = v.shape.map(s => s as number);
       const srcDimSize = shp[dimIdx];
       const blockSize = strideDim * srcDimSize;
       const srcOff = outer * blockSize;
-      // exact is either a Float64Array or (for scalar) a number.
-      if (typeof v.exact === "number") {
-        // scalar — blockSize is 1.
-        out[dstOff] = v.exact;
-      } else if (v.exact instanceof Float64Array) {
-        out.set(v.exact.subarray(srcOff, srcOff + blockSize), dstOff);
+      const src = lane === "re" ? v.exact : v.exactIm;
+      if (src === undefined) {
+        // imag lane for a real view → zeros (Float64Array default).
+        dstOff += blockSize;
+        continue;
+      }
+      if (typeof src === "number") {
+        out[dstOff] = src;
+      } else if (src instanceof Float64Array) {
+        out.set(src.subarray(srcOff, srcOff + blockSize), dstOff);
       } else {
         return undefined;
       }
@@ -355,6 +400,7 @@ export const cat: Builtin = {
     }
 
     const views = viewsForInputs(argTypes, ndim);
+    const anyComplex = views.some(v => v.isComplex);
     const {
       shape: resultShapeMaybe,
       allStatic,
@@ -362,20 +408,40 @@ export const cat: Builtin = {
     } = deriveResultShape(views, dim - 1, ndim);
 
     if (allStatic) {
-      // Strip trailing 1s down to a 2-axis minimum (matches numbl /
-      // mtoc2's universal "min-2D" rule, applied via tensorDouble).
       const trimmed = resultShapeMaybe.map(s => s as number);
       while (trimmed.length > 2 && trimmed[trimmed.length - 1] === 1) {
         trimmed.pop();
       }
       while (trimmed.length < 2) trimmed.push(1);
 
-      // Exact-fold attempt — only when nothing got trimmed away in a
-      // way that loses the cat-axis position.
+      if (anyComplex) {
+        let exact: { re: Float64Array; im: Float64Array } | undefined;
+        if (refShape !== undefined) {
+          const reFolded = foldExact(
+            views,
+            resultShapeMaybe.map(s => s as number),
+            refShape,
+            dim - 1,
+            ndim,
+            "re"
+          );
+          const imFolded = foldExact(
+            views,
+            resultShapeMaybe.map(s => s as number),
+            refShape,
+            dim - 1,
+            ndim,
+            "im"
+          );
+          if (reFolded !== undefined && imFolded !== undefined) {
+            exact = { re: reFolded, im: imFolded };
+          }
+        }
+        return [tensorComplex(trimmed, exact)];
+      }
+
       let exact: Float64Array | undefined;
       if (refShape !== undefined) {
-        // Refold with the un-trimmed shape (the same data layout under
-        // column-major).
         const folded = foldExact(
           views,
           resultShapeMaybe.map(s => s as number),
@@ -388,8 +454,6 @@ export const cat: Builtin = {
       return [tensorDouble(trimmed, exact)];
     }
 
-    // Dynamic — only the cat axis is unknown.
-    // Build a min-2D shape with the known non-cat axes pinned.
     const shape: number[] = [];
     let unknownAxisFound = false;
     for (const s of resultShapeMaybe) {
@@ -400,16 +464,14 @@ export const cat: Builtin = {
       shape.push(s);
     }
     if (!unknownAxisFound) {
-      // Shouldn't reach here when allStatic is false. Fall back to
-      // a conservative tensorDouble with a fully-known shape.
       const trimmed = shape.slice();
       while (trimmed.length > 2 && trimmed[trimmed.length - 1] === 1) {
         trimmed.pop();
       }
       while (trimmed.length < 2) trimmed.push(1);
+      if (anyComplex) return [tensorComplex(trimmed)];
       return [tensorDouble(trimmed)];
     }
-    // Build the dims lattice manually since some axes are unknown.
     const dims = resultShapeMaybe.map(s =>
       s === null
         ? ({ kind: "unknown" } as const)
@@ -417,7 +479,6 @@ export const cat: Builtin = {
           ? { kind: "exact" as const, value: 1 }
           : { kind: "exact" as const, value: s }
     );
-    // Trim trailing exact-1.
     while (
       dims.length > 2 &&
       dims[dims.length - 1].kind === "exact" &&
@@ -428,7 +489,7 @@ export const cat: Builtin = {
     const t: NumericType = {
       kind: "Numeric",
       elem: "double",
-      isComplex: false,
+      isComplex: anyComplex,
       dims,
       sign: "unknown",
     };
@@ -442,11 +503,40 @@ export const cat: Builtin = {
     useRuntime("mtoc2_tensor_cat");
     const dim = resolveDim(argTypes);
     const nin = argTypes.length - 1;
+    const anyComplex = argTypes.slice(1).some(a => isNumeric(a) && a.isComplex);
     if (nin === 0) {
-      // Empty cat: numbl returns the canonical empty `[0,0]` tensor.
-      // Build via the alloc helper directly.
+      if (anyComplex) {
+        useRuntime("mtoc2_tensor_alloc_nd_complex");
+        return `mtoc2_tensor_alloc_nd_complex(2, (long[]){0L, 0L})`;
+      }
       useRuntime("mtoc2_tensor_alloc_nd");
       return `mtoc2_tensor_alloc_nd(2, (long[]){0L, 0L})`;
+    }
+    if (anyComplex) {
+      useRuntime("mtoc2_cscalar");
+      const argInits: string[] = [];
+      for (let i = 1; i < argTypes.length; i++) {
+        const a = argTypes[i];
+        if (isNumeric(a) && isScalar(a)) {
+          if (a.isComplex) {
+            argInits.push(
+              `{.kind = 1, .scalar_re = creal(${argsC[i]}), .scalar_im = cimag(${argsC[i]}), .tensor = {0}}`
+            );
+          } else {
+            argInits.push(
+              `{.kind = 1, .scalar_re = (double)(${argsC[i]}), .scalar_im = 0.0, .tensor = {0}}`
+            );
+          }
+        } else {
+          argInits.push(
+            `{.kind = 0, .scalar_re = 0.0, .scalar_im = 0.0, .tensor = ${argsC[i]}}`
+          );
+        }
+      }
+      return (
+        `mtoc2_tensor_cat_complex(${dim}L, ${nin}, ` +
+        `(mtoc2_cat_complex_arg_t[]){${argInits.join(", ")}})`
+      );
     }
     const argInits: string[] = [];
     for (let i = 1; i < argTypes.length; i++) {
@@ -467,7 +557,12 @@ export const cat: Builtin = {
     useRuntime("mtoc2_tensor_cat");
     const dim = resolveDim(argTypes);
     const nin = argTypes.length - 1;
+    const anyComplex = argTypes.slice(1).some(a => isNumeric(a) && a.isComplex);
     if (nin === 0) {
+      if (anyComplex) {
+        useRuntime("mtoc2_tensor_alloc_nd_complex");
+        return `mtoc2_tensor_alloc_nd_complex(2, [0, 0])`;
+      }
       useRuntime("mtoc2_tensor_alloc_nd");
       return `mtoc2_tensor_alloc_nd(2, [0, 0])`;
     }
@@ -475,14 +570,21 @@ export const cat: Builtin = {
     for (let i = 1; i < argTypes.length; i++) {
       items.push(argsJs[i]);
     }
-    return `mtoc2_tensor_cat(${dim}, ${nin}, [${items.join(", ")}])`;
+    const helper = anyComplex ? "mtoc2_tensor_cat_complex" : "mtoc2_tensor_cat";
+    return `${helper}(${dim}, ${nin}, [${items.join(", ")}])`;
   },
 
   call({ args, argTypes }) {
     const dim = resolveDim(argTypes);
+    const anyComplex = argTypes.slice(1).some(a => isNumeric(a) && a.isComplex);
     const inputs: RuntimeValue[] = [];
     for (let i = 1; i < args.length; i++) {
       inputs.push(args[i]);
+    }
+    if (anyComplex) {
+      return [
+        jsCatComplex(dim, inputs.length, inputs) as unknown as RuntimeTensor,
+      ];
     }
     return [jsCat(dim, inputs.length, inputs) as unknown as RuntimeTensor];
   },

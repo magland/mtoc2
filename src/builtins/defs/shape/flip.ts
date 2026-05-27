@@ -8,17 +8,27 @@ import {
   isMultiElement,
   isNumeric,
   isScalar,
+  scalarComplex,
   scalarDouble,
   shapeNumel,
   signFromNumber,
+  tensorComplex,
   tensorDouble,
   typeToString,
 } from "../../../lowering/types.js";
 import type { NumericType } from "../../../lowering/types.js";
 import type { Builtin } from "../../registry.js";
-import { exactDouble, exactRealArray } from "../_shared.js";
+import {
+  exactComplex,
+  exactComplexArray,
+  exactDouble,
+  exactRealArray,
+} from "../_shared.js";
 import type { RuntimeTensor } from "../../../runtime/value.js";
-import { mtoc2_tensor_flip as jsFlip } from "../../runtime/snippets.gen.js";
+import {
+  mtoc2_tensor_flip as jsFlip,
+  mtoc2_tensor_flip_complex as jsFlipComplex,
+} from "../../runtime/snippets.gen.js";
 
 function flipExact(
   src: Float64Array,
@@ -109,11 +119,6 @@ function defineFlip(opts: {
           `'${opts.name}' arg must be numeric (got ${typeToString(a)})`
         );
       }
-      if (a.isComplex) {
-        throw new TypeError(
-          `'${opts.name}' on complex tensors is not yet supported`
-        );
-      }
       if (a.elem !== "double" && a.elem !== "logical") {
         throw new TypeError(
           `'${opts.name}' arg must be a real double or logical (got ${a.elem})`
@@ -121,6 +126,11 @@ function defineFlip(opts: {
       }
 
       if (isScalar(a)) {
+        if (a.isComplex) {
+          const cx = exactComplex(a);
+          if (cx !== undefined) return [scalarComplex(cx)];
+          return [scalarComplex()];
+        }
         const v = exactDouble(a);
         if (v !== undefined) return [scalarDouble(signFromNumber(v), v)];
         return [scalarDouble(a.sign)];
@@ -131,6 +141,20 @@ function defineFlip(opts: {
         argTypes as NumericType[],
         opts.fixedAxis
       );
+
+      if (a.isComplex) {
+        const cx = exactComplexArray(a);
+        if (a.shape !== undefined && cx !== undefined) {
+          const total = shapeNumel(a.shape);
+          if (total <= EXACT_ARRAY_MAX_ELEMENTS) {
+            const reOut = flipExact(cx.re, a.shape, axisIdx);
+            const imOut = flipExact(cx.im, a.shape, axisIdx);
+            return [tensorComplex(a.shape, { re: reOut, im: imOut })];
+          }
+        }
+        if (a.shape !== undefined) return [tensorComplex(a.shape)];
+        return [{ ...a, exact: undefined }];
+      }
 
       const arr = exactRealArray(a);
       if (a.shape !== undefined && arr !== undefined) {
@@ -146,7 +170,6 @@ function defineFlip(opts: {
       return [{ ...a, exact: undefined }];
     },
     emitC({ argsC, argTypes, useRuntime }) {
-      useRuntime("mtoc2_tensor_flip");
       const a = argTypes[0] as NumericType;
       if (!isMultiElement(a)) {
         return argsC[0];
@@ -156,10 +179,14 @@ function defineFlip(opts: {
         argTypes as NumericType[],
         opts.fixedAxis
       );
+      if (a.isComplex) {
+        useRuntime("mtoc2_tensor_flip");
+        return `mtoc2_tensor_flip_complex(${argsC[0]}, ${axisIdx}L)`;
+      }
+      useRuntime("mtoc2_tensor_flip");
       return `mtoc2_tensor_flip(${argsC[0]}, ${axisIdx}L)`;
     },
     emitJs({ argsJs, argTypes, useRuntime }) {
-      useRuntime("mtoc2_tensor_flip");
       const a = argTypes[0] as NumericType;
       if (!isMultiElement(a)) return argsJs[0];
       const axisIdx = resolveFlipAxis(
@@ -167,6 +194,11 @@ function defineFlip(opts: {
         argTypes as NumericType[],
         opts.fixedAxis
       );
+      if (a.isComplex) {
+        useRuntime("mtoc2_tensor_flip");
+        return `mtoc2_tensor_flip_complex(${argsJs[0]}, ${axisIdx})`;
+      }
+      useRuntime("mtoc2_tensor_flip");
       return `mtoc2_tensor_flip(${argsJs[0]}, ${axisIdx})`;
     },
     call({ args, argTypes }) {
@@ -177,6 +209,14 @@ function defineFlip(opts: {
         argTypes as NumericType[],
         opts.fixedAxis
       );
+      if (a.isComplex) {
+        return [
+          jsFlipComplex(
+            args[0] as RuntimeTensor,
+            axisIdx
+          ) as unknown as RuntimeTensor,
+        ];
+      }
       return [
         jsFlip(args[0] as RuntimeTensor, axisIdx) as unknown as RuntimeTensor,
       ];

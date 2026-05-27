@@ -9,16 +9,18 @@
  *                 downward (kept block extends into the |k| sub-
  *                 diagonals).
  *
- * `k` must be a statically-known integer literal. Real input only;
- * complex / rank > 2 are deferred with `UnsupportedConstruct`. Mirrors
- * numbl's `triu` in `interpreter/builtins/array-extras.ts`.
+ * `k` must be a statically-known integer literal. Real and complex
+ * inputs both supported; rank > 2 is deferred with `UnsupportedConstruct`.
+ * Mirrors numbl's `triu` in `interpreter/builtins/array-extras.ts`.
  */
 
-import { defineTriangular, jsTriu } from "./_triangular.js";
+import { defineTriangular, jsTriu, jsTriuComplex } from "./_triangular.js";
 
 export const triu = defineTriangular({
   name: "triu",
   cHelper: "mtoc2_tensor_triu",
+  cHelperComplex: "mtoc2_tensor_triu_complex",
   keep: (i, j, k) => j - i >= k,
   jsHelper: jsTriu,
+  jsHelperComplex: jsTriuComplex,
 });

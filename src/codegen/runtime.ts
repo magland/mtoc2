@@ -347,7 +347,10 @@ const REGISTRY: ReadonlyMap<string, RuntimeSnippet> = new Map<
   // MATLAB's `nan(n)` n×n shorthand.
   [
     "mtoc2_tensor_fill_nd",
-    loadSnippet("tensor_fill_nd.h", ["mtoc2_tensor_alloc_nd"]),
+    loadSnippet("tensor_fill_nd.h", [
+      "mtoc2_tensor_alloc_nd",
+      "mtoc2_tensor_alloc_nd_complex",
+    ]),
   ],
   [
     "mtoc2_tensor_fill_square",
@@ -428,6 +431,8 @@ const REGISTRY: ReadonlyMap<string, RuntimeSnippet> = new Map<
       "mtoc2_alloc",
       // JS sibling allocates via `mtoc2_tensor_alloc_nd`.
       "mtoc2_tensor_alloc_nd",
+      // `flip_complex` (same file) needs the complex allocator.
+      "mtoc2_tensor_alloc_nd_complex",
     ]),
   ],
   // `sort(a)` (single-output) and `[v, i] = sort(a)` (two-output).
@@ -466,20 +471,11 @@ const REGISTRY: ReadonlyMap<string, RuntimeSnippet> = new Map<
   // `isequal` over real numeric values. `_tt` (tensor vs tensor) and
   // `_st` (scalar vs tensor); scalar-vs-scalar is emitted inline.
   ["mtoc2_isequal", loadSnippet("isequal.h", ["mtoc2_tensor_t"])],
-  // Real-tensor → logical-tensor predicates (`isnan`, `logical`).
+  // Tensor → logical-tensor predicates (`isnan`, `isinf`, `isfinite`,
+  // `logical`) and their `_complex` siblings (same file).
   [
     "mtoc2_tensor_predicate",
     loadSnippet("tensor_predicate.h", ["mtoc2_tensor_t", "mtoc2_alloc"]),
-  ],
-  // Complex-tensor → logical-tensor predicates (`isnan_complex`,
-  // `isinf_complex`, `isfinite_complex`, `not_complex`). The result
-  // is real-typed (logical); only the input needs complex storage.
-  [
-    "mtoc2_tensor_predicate_complex",
-    loadSnippet("tensor_predicate_complex.h", [
-      "mtoc2_tensor_t",
-      "mtoc2_alloc",
-    ]),
   ],
   // Prefix scans (`cumsum`, `cumprod`). One snippet defines both
   // helpers; the builtin dispatches on op kind.
@@ -491,30 +487,42 @@ const REGISTRY: ReadonlyMap<string, RuntimeSnippet> = new Map<
       "mtoc2_tensor_alloc_nd",
     ]),
   ],
-  // `repmat` — tile a real tensor by the given per-axis repetition counts.
+  // `repmat` (real + complex sibling in the same file).
   [
     "mtoc2_tensor_repmat",
-    loadSnippet("tensor_repmat.h", ["mtoc2_tensor_t", "mtoc2_tensor_alloc_nd"]),
+    loadSnippet("tensor_repmat.h", [
+      "mtoc2_tensor_t",
+      "mtoc2_tensor_alloc_nd",
+      "mtoc2_tensor_alloc_nd_complex",
+    ]),
   ],
-  // `diag` — construct a diagonal matrix from a vector, or extract a
-  // diagonal from a matrix. One snippet defines the three entry points.
+  // `diag` (3 real entry points + 3 complex siblings in the same file).
   [
     "mtoc2_tensor_diag",
-    loadSnippet("tensor_diag.h", ["mtoc2_tensor_t", "mtoc2_tensor_alloc"]),
+    loadSnippet("tensor_diag.h", [
+      "mtoc2_tensor_t",
+      "mtoc2_tensor_alloc",
+      "mtoc2_tensor_alloc_nd_complex",
+    ]),
   ],
-  // `triu` / `tril` — upper / lower triangular mask. One snippet
-  // defines both `mtoc2_tensor_triu` and `mtoc2_tensor_tril`.
+  // `triu` / `tril` (real + complex siblings in the same file).
   [
     "mtoc2_tensor_triangular",
     loadSnippet("tensor_triangular.h", [
       "mtoc2_tensor_t",
       "mtoc2_tensor_alloc",
+      "mtoc2_tensor_alloc_nd_complex",
     ]),
   ],
-  // `cat(dim, A, B, ...)` — concatenate tensors / scalars along a dim.
+  // `cat` (real + complex sibling; complex variant uses
+  // `mtoc2_cat_complex_arg_t`).
   [
     "mtoc2_tensor_cat",
-    loadSnippet("tensor_cat.h", ["mtoc2_tensor_t", "mtoc2_tensor_alloc_nd"]),
+    loadSnippet("tensor_cat.h", [
+      "mtoc2_tensor_t",
+      "mtoc2_tensor_alloc_nd",
+      "mtoc2_tensor_alloc_nd_complex",
+    ]),
   ],
   // `besselh(nu, 1, x)` for nu in {0, 1} via POSIX `j0/j1/y0/y1`.
   // One snippet defines both scalar and tensor entry points; the
@@ -523,10 +531,10 @@ const REGISTRY: ReadonlyMap<string, RuntimeSnippet> = new Map<
     "mtoc2_tensor_besselh",
     loadSnippet("tensor_besselh.h", ["mtoc2_tensor_t", "mtoc2_alloc"]),
   ],
-  // Elementwise logical ops on real tensors. `~` (unary not) is the
-  // only resident today; `|` / `&` will share the same snippet when
-  // they land. Result tensors are logical-typed; the storage is still
-  // `double` (the type system carries the logical flag).
+  // Elementwise logical ops on tensors (`~` for real and complex).
+  // `|` / `&` will share the same snippet when they land. Result
+  // tensors are logical-typed; the storage is still `double` (the
+  // type system carries the logical flag).
   [
     "mtoc2_tensor_logical_real",
     loadSnippet("tensor_logical_real.h", ["mtoc2_tensor_t", "mtoc2_alloc"]),

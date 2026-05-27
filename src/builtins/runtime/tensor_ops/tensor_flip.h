@@ -18,6 +18,10 @@
  * Out-of-range `dimIdx` (≥ ndim) is a no-op flip — numbl returns
  * the input unchanged in that case (the "axis is size 1" rule). We
  * still allocate a fresh copy so the owned-value invariant holds.
+ *
+ * `mtoc2_tensor_flip_complex` is the sibling that walks both lanes;
+ * it tolerates `a.imag == NULL` (a real tensor that flowed in via a
+ * complex-typed route) by zero-filling the output imag lane.
  */
 
 #include <string.h>
@@ -54,6 +58,50 @@ static mtoc2_tensor_t mtoc2_tensor_flip(mtoc2_tensor_t a, long dimIdx) {
         a.real + srcOff,
         (size_t)strideDim * sizeof(double)
       );
+    }
+  }
+  return r;
+}
+
+static mtoc2_tensor_t mtoc2_tensor_flip_complex(mtoc2_tensor_t a, long dimIdx) {
+  long total = 1;
+  for (int i = 0; i < a.ndim; i++) total *= a.dims[i];
+  mtoc2_tensor_t r = mtoc2_tensor_alloc_nd_complex(a.ndim, a.dims);
+  int srcHasImag = (a.imag != NULL);
+
+  long axisSize = (dimIdx >= 0 && dimIdx < (long)a.ndim) ? a.dims[dimIdx] : 1;
+  if (axisSize <= 1) {
+    if (total > 0) {
+      memcpy(r.real, a.real, (size_t)total * sizeof(double));
+      if (srcHasImag) {
+        memcpy(r.imag, a.imag, (size_t)total * sizeof(double));
+      } else {
+        memset(r.imag, 0, (size_t)total * sizeof(double));
+      }
+    }
+    return r;
+  }
+
+  if (!srcHasImag && total > 0) {
+    memset(r.imag, 0, (size_t)total * sizeof(double));
+  }
+
+  long strideDim = 1;
+  for (long d = 0; d < dimIdx; d++) strideDim *= a.dims[d];
+  long slabSize = strideDim * axisSize;
+  long numOuter = total / slabSize;
+
+  for (long outer = 0; outer < numOuter; outer++) {
+    long base = outer * slabSize;
+    for (long k = 0; k < axisSize; k++) {
+      long srcOff = base + k * strideDim;
+      long dstOff = base + (axisSize - 1 - k) * strideDim;
+      memcpy(r.real + dstOff, a.real + srcOff,
+             (size_t)strideDim * sizeof(double));
+      if (srcHasImag) {
+        memcpy(r.imag + dstOff, a.imag + srcOff,
+               (size_t)strideDim * sizeof(double));
+      }
     }
   }
   return r;

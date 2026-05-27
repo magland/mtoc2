@@ -23,6 +23,11 @@ test_real_lift_opaque();
 test_complex_predicates_scalar();
 test_complex_predicates_tensor();
 test_complex_not();
+test_complex_shape_flip();
+test_complex_shape_repmat();
+test_complex_shape_triangular();
+test_complex_shape_diag();
+test_complex_shape_cat();
 
 function test_literals()
   disp(1i);
@@ -286,4 +291,52 @@ function test_complex_not()
   disp(~(0+1i));
   w = [0+0i, 1+0i, 0+1i, 2+3i];
   disp(~w);
+end
+
+% flip / flipud / fliplr on complex tensors — both lanes are
+% mirrored along the chosen axis.
+function test_complex_shape_flip()
+  v = [1+1i, 2-2i, 3+3i, 4-4i];
+  disp(flip(v));
+  m = [1+1i, 2; 3, 4-4i];
+  disp(flipud(m));
+  disp(fliplr(m));
+end
+
+% repmat on complex scalar / tensor inputs — tile both lanes.
+function test_complex_shape_repmat()
+  disp(repmat(1+2i, 2, 3));
+  disp(repmat([1+1i, 2-2i], 2, 1));
+  disp(repmat([1+1i; 2-2i], 1, 3));
+end
+
+% triu / tril on complex tensors — kept entries copy both lanes,
+% rejected entries zero both lanes.
+function test_complex_shape_triangular()
+  m = [1+1i, 2+2i, 3; 4-4i, 5+5i, 6-6i; 7+7i, 8-8i, 9+9i];
+  disp(triu(m));
+  disp(tril(m));
+  disp(triu(m, 1));
+  disp(tril(m, -1));
+end
+
+% diag on complex inputs: construct from vector, extract from matrix,
+% scalar-on-off-diagonal, and the degenerate diagLen=1 scalar form.
+function test_complex_shape_diag()
+  v = [1+1i, 2-2i, 3+3i];
+  disp(diag(v));
+  disp(diag(v, 1));
+  m = [1+1i, 2; 3-3i, 4+4i];
+  disp(diag(m));
+  disp(diag(m, 1));
+  disp(diag(5+3i));
+  disp(diag(5+3i, 1));
+end
+
+% cat: pure complex, complex + real mix, and complex scalar splice.
+function test_complex_shape_cat()
+  disp(cat(1, [1+1i, 2], [3, 4-4i]));
+  disp(cat(2, [1+1i; 2-2i], [3+3i; 4]));
+  disp(cat(1, [1+1i, 2], [3, 4]));
+  disp(cat(2, 1+1i, 2-2i, 3));
 end

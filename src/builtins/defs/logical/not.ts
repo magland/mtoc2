@@ -130,7 +130,7 @@ export const notBuiltin: Builtin = {
     const a = argTypes[0] as NumericType;
     if (isMultiElement(a)) {
       if (a.isComplex) {
-        useRuntime("mtoc2_tensor_predicate_complex");
+        useRuntime("mtoc2_tensor_logical_real");
         return `mtoc2_tensor_not_complex(${argsC[0]})`;
       }
       useRuntime("mtoc2_tensor_logical_real");
@@ -150,7 +150,7 @@ export const notBuiltin: Builtin = {
     const a = argTypes[0] as NumericType;
     if (isMultiElement(a)) {
       if (a.isComplex) {
-        useRuntime("mtoc2_tensor_predicate_complex");
+        useRuntime("mtoc2_tensor_logical_real");
         return `mtoc2_tensor_not_complex(${argsJs[0]})`;
       }
       useRuntime("mtoc2_tensor_logical_real");

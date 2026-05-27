@@ -142,7 +142,7 @@ export function defineUnaryPred(opts: UnaryPredOpts): Builtin {
       if (a.isComplex) {
         useRuntime("mtoc2_cscalar");
         if (isMultiElement(a)) {
-          useRuntime("mtoc2_tensor_predicate_complex");
+          useRuntime("mtoc2_tensor_predicate");
           return `${complex!.tensorHelperComplex}(${argsC[0]})`;
         }
         const re = `creal(${argsC[0]})`;
@@ -159,7 +159,7 @@ export function defineUnaryPred(opts: UnaryPredOpts): Builtin {
       const a = argTypes[0] as NumericType;
       if (a.isComplex) {
         if (isMultiElement(a)) {
-          useRuntime("mtoc2_tensor_predicate_complex");
+          useRuntime("mtoc2_tensor_predicate");
           return `${complex!.tensorHelperComplex}(${argsJs[0]})`;
         }
         // Scalar complex: `{re, im}` shape.

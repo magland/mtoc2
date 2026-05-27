@@ -18,7 +18,9 @@
  *     `iStart = max(0, -k)`, `jStart = max(0, k)`.
  *
  * Storage column-major in/out to match `mtoc2_tensor_t`. Result is
- * freshly owned; `imag` is NULL (complex path handled at lowering).
+ * freshly owned. The `*_complex` siblings walk both lanes (with
+ * `imag == NULL` treated as zero so a real-input that flowed through
+ * a complex route still works).
  */
 
 #include <string.h>
@@ -66,6 +68,72 @@ static mtoc2_tensor_t mtoc2_tensor_diag_extract(mtoc2_tensor_t a, long k) {
     long r = iStart + i;
     long c = jStart + i;
     out.real[i] = a.real[r + c * rows];
+  }
+  return out;
+}
+
+static mtoc2_tensor_t mtoc2_tensor_diag_from_scalar_complex(double re,
+                                                            double im,
+                                                            long k) {
+  long absk = k < 0 ? -k : k;
+  long m = 1 + absk;
+  long dims2[2] = {m, m};
+  mtoc2_tensor_t out = mtoc2_tensor_alloc_nd_complex(2, dims2);
+  if (m > 0) {
+    memset(out.real, 0, (size_t)m * (size_t)m * sizeof(double));
+    memset(out.imag, 0, (size_t)m * (size_t)m * sizeof(double));
+  }
+  long r = k < 0 ? -k : 0;
+  long c = k > 0 ? k : 0;
+  out.real[r + c * m] = re;
+  out.imag[r + c * m] = im;
+  return out;
+}
+
+static mtoc2_tensor_t mtoc2_tensor_diag_construct_complex(mtoc2_tensor_t v,
+                                                          long k) {
+  long rows = v.dims[0];
+  long cols = v.dims[1];
+  long vecLen = rows > cols ? rows : cols;
+  long absk = k < 0 ? -k : k;
+  long m = vecLen + absk;
+  long dims2[2] = {m, m};
+  mtoc2_tensor_t out = mtoc2_tensor_alloc_nd_complex(2, dims2);
+  if (m > 0) {
+    memset(out.real, 0, (size_t)m * (size_t)m * sizeof(double));
+    memset(out.imag, 0, (size_t)m * (size_t)m * sizeof(double));
+  }
+  int srcHasImag = (v.imag != NULL);
+  for (long i = 0; i < vecLen; i++) {
+    long r = k < 0 ? i - k : i;
+    long c = k > 0 ? i + k : i;
+    out.real[r + c * m] = v.real[i];
+    if (srcHasImag) out.imag[r + c * m] = v.imag[i];
+  }
+  return out;
+}
+
+static mtoc2_tensor_t mtoc2_tensor_diag_extract_complex(mtoc2_tensor_t a,
+                                                        long k) {
+  long rows = a.dims[0];
+  long cols = a.dims[1];
+  long iStart = k < 0 ? -k : 0;
+  long jStart = k > 0 ? k : 0;
+  long avail_r = rows - iStart;
+  long avail_c = cols - jStart;
+  long diagLen = avail_r < avail_c ? avail_r : avail_c;
+  if (diagLen < 0) diagLen = 0;
+  long dims2[2] = {diagLen, 1};
+  mtoc2_tensor_t out = mtoc2_tensor_alloc_nd_complex(2, dims2);
+  int srcHasImag = (a.imag != NULL);
+  if (diagLen > 0 && !srcHasImag) {
+    memset(out.imag, 0, (size_t)diagLen * sizeof(double));
+  }
+  for (long i = 0; i < diagLen; i++) {
+    long r = iStart + i;
+    long c = jStart + i;
+    out.real[i] = a.real[r + c * rows];
+    if (srcHasImag) out.imag[i] = a.imag[r + c * rows];
   }
   return out;
 }
