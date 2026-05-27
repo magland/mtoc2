@@ -397,15 +397,28 @@ export function assignLValue(
     if (lv.base.type === "Ident") {
       baseName = lv.base.name;
       const existing = this.env.get(baseName);
-      if (existing === undefined) {
-        throw new UnsupportedConstruct(
-          `interpreter: indexed assignment requires '${baseName}' to be ` +
-            `an already-bound tensor`
-        );
-      }
+      // MATLAB auto-create: `v(...) = rhs` on an undefined `v` creates
+      // it with a shape inferred from the index slots and the rhs.
+      // MATLAB auto-grow: `v(...) = rhs` whose indices exceed the
+      // current shape resizes `v` (zero-padding) to fit. Both numbl-
+      // standard behaviors; mtoc2's interpreter used to reject either
+      // case as "requires an already-bound tensor".
       let tensorBase: RuntimeTensor;
-      if (isTensor(existing)) {
-        tensorBase = existing;
+      if (existing === undefined) {
+        tensorBase = autoCreateForIndexedWrite.call(
+          this,
+          baseName,
+          lv.indices,
+          v
+        );
+      } else if (isTensor(existing)) {
+        const grown = maybeGrowForIndexedWrite.call(
+          this,
+          existing,
+          lv.indices,
+          v
+        );
+        tensorBase = grown ?? existing;
       } else if (
         typeof existing === "number" ||
         typeof existing === "boolean"
@@ -415,12 +428,19 @@ export function assignLValue(
         // Promote to a 1×1 tensor before the indexed write; numbl's
         // value-tagging never collapses scalars so an indexed write
         // like `a(1) = 5` works uniformly there.
-        tensorBase = makeTensor(
+        const promoted = makeTensor(
           [1, 1],
           new Float64Array([
             typeof existing === "number" ? existing : existing ? 1 : 0,
           ])
         );
+        const grown = maybeGrowForIndexedWrite.call(
+          this,
+          promoted,
+          lv.indices,
+          v
+        );
+        tensorBase = grown ?? promoted;
       } else {
         throw new UnsupportedConstruct(
           `interpreter: indexed assignment requires '${baseName}' to be ` +
@@ -807,6 +827,201 @@ export function assignLValue(
   const _exhaustive: never = lv;
   void _exhaustive;
   throw new UnsupportedConstruct(`interpreter: unhandled lvalue`);
+}
+
+// ── Auto-create / auto-grow for indexed writes ───────────────────────────
+
+/** Compute the per-axis upper bound contributed by a single index
+ *  expression. Used by both auto-create (no existing tensor) and
+ *  auto-grow (existing tensor too small to fit the write).
+ *
+ *  Colon contributes `null` — its extent is "whatever the existing
+ *  / rhs gives us", deferred to the caller. Scalar / Range slots
+ *  resolve to a concrete maximum. Expressions that need the `end`
+ *  keyword to resolve are rejected (the auto-create path has no
+ *  base tensor to query for `end`). */
+function axisUpperBound(
+  this: Interpreter,
+  e: Expr,
+  endContext: { baseTensor: RuntimeTensor; axis: number | "linear" } | null
+): number | null {
+  if (e.type === "Colon") return null;
+  // `end` inside an index slot resolves against the current base
+  // tensor's axis. Push the context (when supplied) for the duration
+  // of the inner eval — auto-grow on an existing tensor can supply
+  // it; auto-create on undefined cannot, so `end` in that context
+  // would surface as "'end' used outside an index slot".
+  const pushed = endContext !== null;
+  if (pushed) this.endStack.push(endContext!);
+  try {
+    if (e.type === "Range") {
+      const s = toScalarNumber(this.evalExpr(e.start));
+      const en = toScalarNumber(this.evalExpr(e.end));
+      return Math.max(Math.floor(s), Math.floor(en));
+    }
+    const v = this.evalExpr(e);
+    // Non-scalar index (logical mask, vector-of-indices) — no axis
+    // upper bound that auto-grow can act on. Returning `null` signals
+    // the caller to bail out and let the scatter loop handle bounds.
+    if (typeof v === "number") return Math.floor(v);
+    if (typeof v === "boolean") return v ? 1 : 0;
+    return null;
+  } finally {
+    if (pushed) this.endStack.pop();
+  }
+}
+
+/** Total element count of a runtime value that's about to be stored
+ *  into one or more tensor slots. Bare numbers / booleans / 1×1
+ *  tensors count as 1. Used by the auto-create / auto-grow path to
+ *  infer the deferred Colon extents from the rhs. */
+function rhsNumel(v: RuntimeValue): number {
+  if (typeof v === "number" || typeof v === "boolean") return 1;
+  if (isTensor(v)) return v.data.length;
+  return 1;
+}
+
+function rhsShape(v: RuntimeValue): number[] {
+  if (isTensor(v)) return v.shape.slice();
+  return [1, 1];
+}
+
+/** Build a fresh zero tensor sized to fit the indices + rhs. Used
+ *  when an indexed write targets an undefined variable (MATLAB-style
+ *  auto-create). Returns a tensor padded to at least 2 axes (matches
+ *  numbl's shape canonicalization). */
+export function autoCreateForIndexedWrite(
+  this: Interpreter,
+  baseName: string,
+  indices: ReadonlyArray<Expr>,
+  rhs: RuntimeValue
+): RuntimeTensor {
+  const rshape = rhsShape(rhs);
+  const dims: number[] = [];
+  let colonAxis = 0;
+  for (let i = 0; i < indices.length; i++) {
+    // No existing tensor → `end` is undefined in this branch; pass
+    // null so any reference surfaces with the standard error.
+    const bound = axisUpperBound.call(this, indices[i], null);
+    if (bound === null) {
+      // Colon: take the rhs's matching dimension. For a single Colon
+      // slot the linear interpretation gives total numel.
+      if (indices.length === 1) {
+        dims.push(rhsNumel(rhs));
+      } else {
+        dims.push(rshape[colonAxis] ?? 1);
+        colonAxis++;
+      }
+    } else {
+      if (bound < 1) {
+        throw new UnsupportedConstruct(
+          `interpreter: indexed write of '${baseName}' has a 0 or ` +
+            `negative index along axis ${i + 1}`
+        );
+      }
+      dims.push(bound);
+      colonAxis++;
+    }
+  }
+  // Pad to a minimum of 2 axes (MATLAB's canonical shape rule).
+  while (dims.length < 2) dims.push(1);
+  const total = dims.reduce((a, b) => a * b, 1);
+  return makeTensor(dims, new Float64Array(total));
+}
+
+/** When an indexed write reaches beyond the current tensor's shape,
+ *  build a larger zero-padded tensor that fits the indices + rhs and
+ *  copy the existing data into it. Returns the new tensor, or null
+ *  if the existing shape already covers the write. */
+export function maybeGrowForIndexedWrite(
+  this: Interpreter,
+  existing: RuntimeTensor,
+  indices: ReadonlyArray<Expr>,
+  _rhs: RuntimeValue
+): RuntimeTensor | null {
+  const cur = existing.shape;
+  // Single-index access on an existing tensor is *linear* indexing
+  // (MATLAB column-major) — the bound applies to total numel, not to
+  // axis 0. If bound ≤ numel, no growth is needed. Without this
+  // special case `v(5) = x` on a 1×5 row erroneously grows axis 0
+  // from 1 to 5. Logical-mask / vector-of-indices writes return
+  // bound = null; we defer to the scatter loop's bounds check.
+  if (indices.length === 1) {
+    const bound = axisUpperBound.call(this, indices[0], {
+      baseTensor: existing,
+      axis: "linear",
+    });
+    if (bound === null) return null;
+    if (bound < 1) return null;
+    const numel = cur.reduce((a, b) => a * b, 1);
+    if (bound <= numel) return null;
+    // Grow along the existing orientation. Row-vector → grow cols;
+    // col-vector → grow rows; default → grow first non-unit axis.
+    const required = cur.slice();
+    while (required.length < 2) required.push(1);
+    if (cur.length >= 2 && cur[0] === 1) {
+      required[1] = bound;
+    } else if (cur.length >= 2 && cur[1] === 1) {
+      required[0] = bound;
+    } else {
+      required[0] = bound;
+    }
+    const newTotal = required.reduce((a, b) => a * b, 1);
+    const newData = new Float64Array(newTotal);
+    for (let k = 0; k < existing.data.length; k++) {
+      newData[k] = existing.data[k];
+    }
+    return makeTensor(required, newData);
+  }
+  const required: number[] = cur.slice();
+  let grew = false;
+  for (let i = 0; i < indices.length; i++) {
+    const bound = axisUpperBound.call(this, indices[i], {
+      baseTensor: existing,
+      axis: i,
+    });
+    let need: number;
+    if (bound === null) {
+      // Colon: keep the current dim (the colon spans whatever's
+      // already there). Shape-mismatch with the rhs surfaces inside
+      // the scatter loop.
+      need = cur[i] ?? 1;
+    } else {
+      if (bound < 1) return null;
+      need = bound;
+    }
+    while (required.length <= i) required.push(1);
+    if (need > required[i]) {
+      required[i] = need;
+      grew = true;
+    }
+  }
+  if (!grew && required.length === cur.length) return null;
+  while (required.length < 2) required.push(1);
+  // Build a fresh tensor of the new shape and copy the old data
+  // into it column-major. The simplest correct path is to compute
+  // each old element's column-major linear offset in both the old
+  // and new shape and assign. With heavy growth this is O(n_old),
+  // which is fine.
+  const total = required.reduce((a, b) => a * b, 1);
+  const data = new Float64Array(total);
+  const oldShape = cur;
+  const oldTotal = oldShape.reduce((a, b) => a * b, 1);
+  const ndim = required.length;
+  for (let k = 0; k < oldTotal; k++) {
+    let rem = k;
+    let newOff = 0;
+    let stride = 1;
+    for (let d = 0; d < ndim; d++) {
+      const oldDim = oldShape[d] ?? 1;
+      const idx = rem % oldDim;
+      rem = Math.floor(rem / oldDim);
+      newOff += idx * stride;
+      stride *= required[d];
+    }
+    data[newOff] = existing.data[k];
+  }
+  return makeTensor(required, data);
 }
 
 // ── For-range expansion ───────────────────────────────────────────────────

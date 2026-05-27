@@ -96,6 +96,7 @@ import { iscell } from "./defs/logical/iscell.js";
 import { isstruct } from "./defs/logical/isstruct.js";
 import { isa } from "./defs/logical/isa.js";
 import { fieldnames } from "./defs/logical/fieldnames.js";
+import { isnumeric } from "./defs/logical/isnumeric.js";
 import { trueBuiltin, falseBuiltin } from "./defs/logical/boolconst.js";
 import { isequal } from "./defs/logical/isequal.js";
 import { isreal } from "./defs/logical/isreal.js";
@@ -219,6 +220,7 @@ for (const b of [
   isstruct,
   isa,
   fieldnames,
+  isnumeric,
   trueBuiltin,
   falseBuiltin,
   isequal,

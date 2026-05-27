@@ -33,7 +33,11 @@ import { translateProject, type SourceFile } from "./translate.js";
 import { Workspace, parseFiles } from "./workspace/workspace.js";
 import { extractDriverPrologue } from "./workspace/driverPrologue.js";
 import { parseMFile } from "./parser/index.js";
-import { UnsupportedConstruct } from "./lowering/errors.js";
+import {
+  RuntimeError as RuntimeErrorClass,
+  TypeError as MtocTypeError,
+  UnsupportedConstruct,
+} from "./lowering/errors.js";
 import { applyPlotRecord, newPlotDispatchState } from "./utils/plotAdapter.js";
 import { PLOT_PREFIX } from "./utils/plotProtocol.js";
 import type { PlotRecord } from "./utils/wasmRunner.worker.js";
@@ -625,10 +629,17 @@ async function runInterpreter(
     }).runProgram(remainingBody);
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
-    if (e instanceof UnsupportedConstruct && e.span) {
+    if (
+      (e instanceof UnsupportedConstruct ||
+        e instanceof MtocTypeError ||
+        e instanceof RuntimeErrorClass) &&
+      e.span
+    ) {
       const where =
         e.span.start !== undefined ? ` (offset ${e.span.start})` : "";
-      console.error(`${e.span.file ?? "interpreter"}: ${msg}${where}`);
+      console.error(
+        `${e.span.file ?? "interpreter"}: ${e.name}: ${msg}${where}`
+      );
     } else {
       console.error(`interpreter: ${msg}`);
     }

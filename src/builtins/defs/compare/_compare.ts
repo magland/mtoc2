@@ -14,6 +14,7 @@ import {
   isScalar,
   scalarLogical,
   type Type,
+  type NumericType,
 } from "../../../lowering/types.js";
 import type { Builtin } from "../../registry.js";
 import {
@@ -21,6 +22,7 @@ import {
   exactDouble,
   exactScalarAsComplex,
 } from "../_shared.js";
+import { isTensor, makeTensor } from "../../../runtime/value.js";
 
 export type CompareKind = "eq" | "ne" | "rel";
 
@@ -46,6 +48,42 @@ export function defineCompare(
         throw new UnsupportedConstruct(
           `'${name}' does not support multi-output (nargout=${nargout})`
         );
+      }
+      // Elementwise tensor comparison: either operand may be a non-
+      // scalar real numeric tensor. The result is a logical tensor of
+      // the broadcast shape. v1: interpreter-only (the call hook
+      // handles it); AOT lowering can still reject by failing to
+      // produce a scalar emit for the tensor case — emit hooks below.
+      const a = argTypes[0];
+      const b = argTypes[1];
+      const aTensor = isNumeric(a) && !isScalar(a);
+      const bTensor = isNumeric(b) && !isScalar(b);
+      if (aTensor || bTensor) {
+        if (!isNumeric(a) || !isNumeric(b)) {
+          throw new TypeError(
+            `'${name}' elementwise: both args must be numeric`
+          );
+        }
+        if (a.isComplex || b.isComplex) {
+          throw new UnsupportedConstruct(
+            `'${name}' elementwise: complex tensor compare is not ` +
+              `supported in mtoc2 yet`
+          );
+        }
+        // Result is a logical tensor shaped like the broadcast — we
+        // don't have a static broadcast helper handy, so produce an
+        // un-shape-known logical tensor type. The interpreter call
+        // hook will compute the actual shape; AOT consumers will
+        // surface a shape-unknown error at their emit boundary.
+        return [
+          {
+            kind: "Numeric",
+            elem: "logical",
+            isComplex: false,
+            dims: [{ kind: "unknown" }, { kind: "unknown" }],
+            sign: "nonneg",
+          } as NumericType,
+        ];
       }
       requireScalarRealOrComplex(argTypes[0], `'${name}' arg 1`);
       requireScalarRealOrComplex(argTypes[1], `'${name}' arg 2`);
@@ -117,6 +155,59 @@ export function defineCompare(
       return `((${argsJs[0]} ${cOp} ${argsJs[1]}) ? 1 : 0)`;
     },
     call({ args, argTypes }) {
+      // Elementwise tensor path: at least one side is a non-scalar
+      // tensor. Numbl's `elementwise.ts` broadcasts scalar↔tensor and
+      // requires matching shapes for tensor↔tensor; mirror that here.
+      // Complex tensor compare is rejected at transfer.
+      const aIsTensor = isTensor(args[0]);
+      const bIsTensor = isTensor(args[1]);
+      if (aIsTensor || bIsTensor) {
+        const scalarTo = (v: unknown): number =>
+          typeof v === "number"
+            ? v
+            : typeof v === "boolean"
+              ? v
+                ? 1
+                : 0
+              : Number(v);
+        const op = (x: number, y: number): number =>
+          kind === "eq"
+            ? x === y
+              ? 1
+              : 0
+            : kind === "ne"
+              ? x !== y
+                ? 1
+                : 0
+              : fold(x, y)
+                ? 1
+                : 0;
+        if (aIsTensor && bIsTensor) {
+          const at = args[0] as { data: ArrayLike<number>; shape: number[] };
+          const bt = args[1] as { data: ArrayLike<number>; shape: number[] };
+          if (at.data.length !== bt.data.length) {
+            throw new TypeError(
+              `'${name}' elementwise: tensor shapes don't match ` +
+                `(${at.shape.join("×")} vs ${bt.shape.join("×")})`
+            );
+          }
+          const data = new Float64Array(at.data.length);
+          for (let i = 0; i < at.data.length; i++) {
+            data[i] = op(at.data[i], bt.data[i]);
+          }
+          return [{ ...makeTensor(at.shape.slice(), data), isLogical: true }];
+        }
+        const t = (aIsTensor ? args[0] : args[1]) as {
+          data: ArrayLike<number>;
+          shape: number[];
+        };
+        const s = scalarTo(aIsTensor ? args[1] : args[0]);
+        const data = new Float64Array(t.data.length);
+        for (let i = 0; i < t.data.length; i++) {
+          data[i] = aIsTensor ? op(t.data[i], s) : op(s, t.data[i]);
+        }
+        return [{ ...makeTensor(t.shape.slice(), data), isLogical: true }];
+      }
       const aCx = isScalarComplex(argTypes[0]);
       const bCx = isScalarComplex(argTypes[1]);
       if (aCx || bCx) {

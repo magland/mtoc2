@@ -170,7 +170,8 @@ export class Interpreter {
     args: RuntimeValue[],
     argTypes: Type[],
     nargout: number,
-    sourceName: string
+    sourceName: string,
+    span?: Span
   ) => RuntimeValue[];
 
   // Used by assignLValue to clone struct-shaped objects while

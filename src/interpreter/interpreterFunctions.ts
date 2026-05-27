@@ -20,7 +20,11 @@ import {
 import { getBuiltin } from "../builtins/index.js";
 import type { Builtin } from "../builtins/registry.js";
 import { inferTypeFromValue } from "../runtime/inferType.js";
-import { RuntimeError, UnsupportedConstruct } from "../lowering/errors.js";
+import {
+  RuntimeError,
+  UnsupportedConstruct,
+  withSpan,
+} from "../lowering/errors.js";
 import { Environment } from "./environment.js";
 import { Interpreter } from "./interpreter.js";
 
@@ -48,7 +52,7 @@ export function callOpBuiltin(
     );
   }
   const argTypes = args.map(inferTypeFromValue);
-  return this.invokeBuiltin(b, args, argTypes, 1, name)[0];
+  return this.invokeBuiltin(b, args, argTypes, 1, name, span)[0];
 }
 
 /** Resolve `name` against the workspace + builtin registry per MATLAB
@@ -187,7 +191,7 @@ export function callByName(
               span
             );
           }
-          return this.invokeBuiltin(fb, args, argTypes, nargout, name);
+          return this.invokeBuiltin(fb, args, argTypes, nargout, name, span);
         }
         case "userFunction":
           return this.callUserFunction(
@@ -206,7 +210,7 @@ export function callByName(
               span
             );
           }
-          return this.invokeBuiltin(ub, args, argTypes, nargout, name);
+          return this.invokeBuiltin(ub, args, argTypes, nargout, name, span);
         }
         case "classConstructor": {
           const reg = this.workspace.classes.get(target.className);
@@ -256,7 +260,7 @@ export function callByName(
   // and any mtoc2 builtin numbl's resolver doesn't yet know about.
   const b = getBuiltin(name);
   if (b !== undefined) {
-    return this.invokeBuiltin(b, args, argTypes, nargout, name);
+    return this.invokeBuiltin(b, args, argTypes, nargout, name, span);
   }
 
   throw new RuntimeError(`Undefined function or variable '${name}'`, span);
@@ -393,18 +397,29 @@ export function invokeBuiltin(
   args: RuntimeValue[],
   argTypes: Type[],
   nargout: number,
-  sourceName: string
+  sourceName: string,
+  span?: Span
 ): RuntimeValue[] {
   if (!b.call) {
     throw new UnsupportedConstruct(
-      `builtin '${sourceName}' has no interpreter implementation (call hook)`
+      `builtin '${sourceName}' has no interpreter implementation (call hook)`,
+      span
     );
   }
   // Validate via transfer first, on the same `argTypes` the c-aot
   // and js-aot paths consume. This is the contract: if transfer
   // rejects an arg shape, every backend rejects it the same way.
+  // Backfill any thrown error's span from the call site so the CLI
+  // can point users at the offending source location.
+  const call = b.call;
+  if (span !== undefined) {
+    return withSpan(span, () => {
+      b.transfer(argTypes, nargout);
+      return call({ args, argTypes, nargout, ctx: this.ctx });
+    });
+  }
   b.transfer(argTypes, nargout);
-  return b.call({ args, argTypes, nargout, ctx: this.ctx });
+  return call({ args, argTypes, nargout, ctx: this.ctx });
 }
 
 /** Execute a user-function body in a fresh `Environment`, binding
