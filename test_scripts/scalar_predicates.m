@@ -12,6 +12,8 @@ test_isequal_tensor();
 test_isequal_scalar_tensor();
 test_isequal_complex();
 test_isequal_nargs();
+test_isreal_basic();
+test_isempty_basic();
 
 function test_isfield_struct()
   s = struct('alpha', 1, 'beta', 2);
@@ -144,4 +146,24 @@ end
 function test_isequal_nargs()
   disp(isequal(3, 3, 3));
   disp(isequal(3, 3, 4));
+end
+
+function test_isreal_basic()
+  disp(isreal(5));
+  disp(isreal([1 2 3]));
+  disp(isreal(3i));            % complex scalar literal
+  z = (2 + 3i) + 0;           % runtime complex scalar
+  disp(isreal(z));
+  disp(isreal(2 + 0i));        % zero imaginary → real
+  w = [1+2i, 3-1i] + 0;       % runtime complex tensor
+  disp(isreal(w));
+end
+
+function test_isempty_basic()
+  disp(isempty([]));
+  disp(isempty([1 2 3]));
+  disp(isempty(5));
+  disp(isempty(zeros(0, 3)));  % statically-empty shape
+  n = numel([1 2 3 4]);        % keep a runtime scalar around
+  disp(isempty(zeros(1, n)));  % runtime-shaped, non-empty
 end
