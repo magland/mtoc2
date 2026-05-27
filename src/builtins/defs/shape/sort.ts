@@ -6,6 +6,9 @@
  *   - `b = sort(a, 'ascend' | 'descend')` — explicit mode
  *   - `[v, i] = sort(...)`                — values + 1-based positions
  *
+ * Real and complex inputs both supported. Complex sort orders by
+ * magnitude (then phase as tiebreak), matching numbl / MATLAB.
+ *
  * `dim` arg and `sort(a, dim, mode)` form are out of scope for v1 —
  * the runtime helper walks the flat column-major buffer and the
  * type system restricts inputs to 1×N / N×1 vectors. The descending
@@ -17,22 +20,26 @@ import { TypeError, UnsupportedConstruct } from "../../../lowering/errors.js";
 import {
   isDimOne,
   isMultiElement,
+  isNumeric,
   isText,
+  tensorComplexFromDims,
   tensorDoubleFromDims,
   type NumericType,
   type Type,
   typeToString,
 } from "../../../lowering/types.js";
 import type { Builtin } from "../../registry.js";
-import { requireRealDouble } from "../_shared.js";
+import { requireRealOrComplex } from "../_shared.js";
 import type { RuntimeTensor } from "../../../runtime/value.js";
 import {
   mtoc2_sort_real as jsSortReal,
   mtoc2_sort_real_2 as jsSortReal2,
+  mtoc2_sort_complex as jsSortComplex,
+  mtoc2_sort_complex_2 as jsSortComplex2,
 } from "../../runtime/snippets.gen.js";
 
 function requireVectorInput(a: Type): NumericType {
-  requireRealDouble(a, "'sort' arg 1");
+  requireRealOrComplex(a, "'sort' arg 1");
   const aN = a as NumericType;
   if (!isMultiElement(aN)) {
     throw new UnsupportedConstruct(
@@ -91,40 +98,50 @@ export const sort: Builtin = {
       );
     }
     const aN = requireVectorInput(argTypes[0]);
-    // Validate the mode arg even though emit re-derives it — the
-    // call site should surface the error at type-check time.
     parseMode(argTypes);
-    const v = tensorDoubleFromDims(aN.dims.slice());
+    const v = aN.isComplex
+      ? tensorComplexFromDims(aN.dims.slice())
+      : tensorDoubleFromDims(aN.dims.slice());
     if (nargout === 1) return [v];
+    // The index output is always real (positive ints), regardless of
+    // input complexity.
     const idx = tensorDoubleFromDims(aN.dims.slice());
     idx.sign = "positive";
     return [v, idx];
   },
   emitC({ argsC, argTypes, nargout, outArgsC, useRuntime }) {
     useRuntime("mtoc2_sort_real");
+    const aN = argTypes[0] as NumericType;
+    const isComplex = isNumeric(aN) && aN.isComplex;
     const desc = parseMode(argTypes) ? 1 : 0;
+    const base = isComplex ? "mtoc2_sort_complex" : "mtoc2_sort_real";
     if (nargout === 1) {
-      return `mtoc2_sort_real(${argsC[0]}, ${desc})`;
+      return `${base}(${argsC[0]}, ${desc})`;
     }
     const outs = outArgsC ?? [];
-    return `mtoc2_sort_real_2(${argsC[0]}, ${desc}, ${outs.join(", ")})`;
+    return `${base}_2(${argsC[0]}, ${desc}, ${outs.join(", ")})`;
   },
   emitJs({ argsJs, argTypes, nargout, useRuntime }) {
     useRuntime("mtoc2_sort_real");
+    const aN = argTypes[0] as NumericType;
+    const isComplex = isNumeric(aN) && aN.isComplex;
     const desc = parseMode(argTypes) ? "true" : "false";
-    if (nargout === 1) return `mtoc2_sort_real(${argsJs[0]}, ${desc})`;
-    // The JS-side `mtoc2_sort_real_2` returns `{v, ix}` instead of
-    // populating out-pointers. Wrap inline so the call site spreads
-    // it directly.
-    return `(o => [o.v, o.ix])(mtoc2_sort_real_2(${argsJs[0]}, ${desc}))`;
+    const base = isComplex ? "mtoc2_sort_complex" : "mtoc2_sort_real";
+    if (nargout === 1) return `${base}(${argsJs[0]}, ${desc})`;
+    return `(o => [o.v, o.ix])(${base}_2(${argsJs[0]}, ${desc}))`;
   },
   call({ args, argTypes, nargout }) {
     const a = args[0] as RuntimeTensor;
+    const aN = argTypes[0] as NumericType;
+    const isComplex = isNumeric(aN) && aN.isComplex;
     const desc = parseMode(argTypes);
     if (nargout === 1) {
-      return [jsSortReal(a, desc) as unknown as RuntimeTensor];
+      const fn = isComplex ? jsSortComplex : jsSortReal;
+      return [fn(a, desc) as unknown as RuntimeTensor];
     }
-    const out = jsSortReal2(a, desc) as unknown as {
+    const out = (isComplex
+      ? jsSortComplex2(a, desc)
+      : jsSortReal2(a, desc)) as unknown as {
       v: RuntimeTensor;
       ix: RuntimeTensor;
     };

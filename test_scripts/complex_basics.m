@@ -29,6 +29,7 @@ test_complex_shape_triangular();
 test_complex_shape_diag();
 test_complex_shape_cat();
 test_complex_cumulative();
+test_complex_sort();
 
 function test_literals()
   disp(1i);
@@ -357,4 +358,22 @@ function test_complex_cumulative()
   %!numbl:opaque w
   disp(cumsum(w));
   disp(cumprod(w));
+end
+
+% sort on complex vectors — order by magnitude (then phase as
+% tiebreak), matching numbl / MATLAB.
+function test_complex_sort()
+  v = [3-3i, 1+1i, 4+0i, 1-1i, 5+5i];
+  disp(sort(v));
+  disp(sort(v, 'descend'));
+  [s, ix] = sort(v);
+  disp(s);
+  disp(ix);
+  % Column vector
+  c = [3+0i; 1+2i; 2-1i];
+  disp(sort(c));
+  % Opaque path forces the runtime kernel.
+  w = [3+0i, 1+0i, 2+0i, 1+0i];
+  %!numbl:opaque w
+  disp(sort(w));
 end

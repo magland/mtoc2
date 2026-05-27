@@ -447,6 +447,8 @@ const REGISTRY: ReadonlyMap<string, RuntimeSnippet> = new Map<
       "mtoc2_tensor_assign",
       // JS sibling allocs via `mtoc2_tensor_alloc_nd`.
       "mtoc2_tensor_alloc_nd",
+      // `sort_complex` (same file) needs the complex allocator.
+      "mtoc2_tensor_alloc_nd_complex",
     ]),
   ],
   // `meshgrid(x, y)` — single-output (returns X) plus multi-output
