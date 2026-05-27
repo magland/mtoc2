@@ -31,6 +31,7 @@ import { gt } from "./defs/compare/gt.js";
 import { ge } from "./defs/compare/ge.js";
 import { disp } from "./defs/io/disp.js";
 import { errorBuiltin } from "./defs/io/error.js";
+import { warningBuiltin } from "./defs/io/warning.js";
 import { fprintf } from "./defs/io/fprintf.js";
 import { sprintfBuiltin } from "./defs/io/sprintf.js";
 import { length } from "./defs/reduction/length.js";
@@ -112,6 +113,7 @@ for (const b of [
   ge,
   disp,
   errorBuiltin,
+  warningBuiltin,
   fprintf,
   sprintfBuiltin,
   length,

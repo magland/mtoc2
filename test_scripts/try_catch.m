@@ -7,6 +7,7 @@ test_try_catch_no_var();
 test_try_no_catch();
 test_try_catch_nested();
 test_try_in_function();
+test_warning_does_not_throw();
 
 function test_try_catch_basic_id()
   try
@@ -71,4 +72,17 @@ function y = compute_with_fallback(x)
   catch
     y = 0;
   end
+end
+
+function test_warning_does_not_throw()
+  % Warnings should print but NOT propagate through try/catch —
+  % the catch body should not execute.
+  fired = 0;
+  try
+    warning('this should print but not throw');
+    fired = 1;
+  catch
+    fired = 99;
+  end
+  disp(fired);
 end

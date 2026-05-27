@@ -236,6 +236,13 @@ const REGISTRY: ReadonlyMap<string, RuntimeSnippet> = new Map<
   // this entry; the JS sibling is what threads the identifier
   // through to the interpreter's TryCatch handler.
   ["mtoc2_error_fmt_id", loadSnippet("error_fmt.h", ["mtoc2_format_engine"])],
+  // Warning. Same shape as error but the c-aot path is real (no
+  // throw); both runtimes prefix `Warning: ` and append `\n`.
+  ["mtoc2_warning_fmt", loadSnippet("warning_fmt.h", ["mtoc2_format_engine"])],
+  [
+    "mtoc2_warning_fmt_id",
+    loadSnippet("warning_fmt.h", ["mtoc2_format_engine"]),
+  ],
   [
     "mtoc2_assert_scalar_fmt",
     loadSnippet("assert_fmt.h", ["mtoc2_format_engine"]),
