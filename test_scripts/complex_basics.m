@@ -30,6 +30,7 @@ test_complex_shape_diag();
 test_complex_shape_cat();
 test_complex_cumulative();
 test_complex_sort();
+test_complex_dot();
 
 function test_literals()
   disp(1i);
@@ -376,4 +377,25 @@ function test_complex_sort()
   w = [3+0i, 1+0i, 2+0i, 1+0i];
   %!numbl:opaque w
   disp(sort(w));
+end
+
+% `dot` on complex (and mixed) vectors / matrices. Numbl/MATLAB use
+% `sum(conj(a) .* b)`; the result is complex whenever either operand
+% is complex.
+function test_complex_dot()
+  a = [1+1i, 2-2i];
+  b = [3+0i, 4+4i];
+  disp(dot(a, b));
+  % Real + complex mix
+  disp(dot([1, 2], [1+1i, 2-2i]));
+  disp(dot([1+1i, 2-2i], [1, 2]));
+  % Matrix form (column-wise dot)
+  M = [1+1i, 2; 3, 4-4i];
+  N = [0+1i, 1; 2, 0+3i];
+  disp(dot(M, N));
+  % Opaque path
+  x = [1+1i, 2-2i];
+  y = [3+0i, 4+4i];
+  %!numbl:opaque x y
+  disp(dot(x, y));
 end

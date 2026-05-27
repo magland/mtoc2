@@ -202,12 +202,17 @@ const REGISTRY: ReadonlyMap<string, RuntimeSnippet> = new Map<
   ["mtoc2_disp_text", loadSnippet("disp_text.h", ["mtoc2_text_view_t"])],
   ["mtoc2_strcmp", loadSnippet("strcmp.h", ["mtoc2_text_view_t"])],
   ["mtoc2_strcmpi", loadSnippet("strcmp.h", ["mtoc2_text_view_t"])],
-  // One snippet provides both `mtoc2_dot_real` (vector → scalar) and
-  // `mtoc2_dot_real_matrix` (matrix → 1×N row vector); the call site
-  // only needs to activate this entry once.
+  // One snippet provides `mtoc2_dot_real` (vector → scalar),
+  // `mtoc2_dot_real_matrix` (matrix → 1×N row vector), and the
+  // `_complex` siblings (complex result for any-complex input).
   [
     "mtoc2_dot_real",
-    loadSnippet("tensor_dot.h", ["mtoc2_tensor_t", "mtoc2_alloc"]),
+    loadSnippet("tensor_dot.h", [
+      "mtoc2_tensor_t",
+      "mtoc2_alloc",
+      "mtoc2_cscalar",
+      "mtoc2_tensor_alloc_nd_complex",
+    ]),
   ],
   [
     "mtoc2_uniquetol_real",
