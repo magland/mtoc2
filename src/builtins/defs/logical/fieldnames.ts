@@ -5,10 +5,11 @@
  * cell-element type being `char` (matches MATLAB; numbl wraps as
  * string but mtoc2 follows MATLAB by emitting chars).
  *
- * Interpreter-only for now (registered as a `call`-hook builtin
- * without `transfer` / `emitC` / `emitJs`); the AOT path would
- * need to materialize a heterogeneous-len cell of chars which is
- * a different feature class.
+ * Interpreter-only for now; the AOT path would need to materialize
+ * a heterogeneous-len cell of chars which is a different feature
+ * class. The `emitC` / `emitJs` hooks exist so the registry-shape
+ * invariant holds but they raise `UnsupportedConstruct` rather than
+ * letting the framework's generic "no emitC hook" surface.
  */
 
 import { TypeError, UnsupportedConstruct } from "../../../lowering/errors.js";
@@ -49,6 +50,16 @@ export const fieldnames: Builtin = {
     // cell. AOT (c-aot / js-aot) consumers will hit downstream
     // errors when they try to materialize an Unknown result.
     return [UNKNOWN];
+  },
+  emitC() {
+    throw new UnsupportedConstruct(
+      `'fieldnames' is interpreter-only; the c-aot backend can't materialize a runtime-length cell of chars`
+    );
+  },
+  emitJs() {
+    throw new UnsupportedConstruct(
+      `'fieldnames' is interpreter-only; the js-aot backend can't materialize a runtime-length cell of chars`
+    );
   },
   call({ args }) {
     const v = args[0];

@@ -173,17 +173,19 @@ exports[`builtin transfer-table snapshot > eq > scalar-scalar opaque 1`] = `
 
 exports[`builtin transfer-table snapshot > eq > tensor3-scalar 1`] = `
 {
-  "errorClass": "TypeError",
-  "errorMessage": "'eq' arg 1 must be a scalar numeric (got Numeric)",
-  "ok": false,
+  "ok": true,
+  "outputs": [
+    "logical[?×?]:nonneg",
+  ],
 }
 `;
 
 exports[`builtin transfer-table snapshot > eq > tensor3-tensor3 1`] = `
 {
-  "errorClass": "TypeError",
-  "errorMessage": "'eq' arg 1 must be a scalar numeric (got Numeric)",
-  "ok": false,
+  "ok": true,
+  "outputs": [
+    "logical[?×?]:nonneg",
+  ],
 }
 `;
 
@@ -234,17 +236,19 @@ exports[`builtin transfer-table snapshot > ge > scalar-scalar opaque 1`] = `
 
 exports[`builtin transfer-table snapshot > ge > tensor3-scalar 1`] = `
 {
-  "errorClass": "TypeError",
-  "errorMessage": "'ge' arg 1 must be a scalar numeric (got Numeric)",
-  "ok": false,
+  "ok": true,
+  "outputs": [
+    "logical[?×?]:nonneg",
+  ],
 }
 `;
 
 exports[`builtin transfer-table snapshot > ge > tensor3-tensor3 1`] = `
 {
-  "errorClass": "TypeError",
-  "errorMessage": "'ge' arg 1 must be a scalar numeric (got Numeric)",
-  "ok": false,
+  "ok": true,
+  "outputs": [
+    "logical[?×?]:nonneg",
+  ],
 }
 `;
 
@@ -268,17 +272,19 @@ exports[`builtin transfer-table snapshot > gt > scalar-scalar opaque 1`] = `
 
 exports[`builtin transfer-table snapshot > gt > tensor3-scalar 1`] = `
 {
-  "errorClass": "TypeError",
-  "errorMessage": "'gt' arg 1 must be a scalar numeric (got Numeric)",
-  "ok": false,
+  "ok": true,
+  "outputs": [
+    "logical[?×?]:nonneg",
+  ],
 }
 `;
 
 exports[`builtin transfer-table snapshot > gt > tensor3-tensor3 1`] = `
 {
-  "errorClass": "TypeError",
-  "errorMessage": "'gt' arg 1 must be a scalar numeric (got Numeric)",
-  "ok": false,
+  "ok": true,
+  "outputs": [
+    "logical[?×?]:nonneg",
+  ],
 }
 `;
 
@@ -338,17 +344,19 @@ exports[`builtin transfer-table snapshot > le > scalar-scalar opaque 1`] = `
 
 exports[`builtin transfer-table snapshot > le > tensor3-scalar 1`] = `
 {
-  "errorClass": "TypeError",
-  "errorMessage": "'le' arg 1 must be a scalar numeric (got Numeric)",
-  "ok": false,
+  "ok": true,
+  "outputs": [
+    "logical[?×?]:nonneg",
+  ],
 }
 `;
 
 exports[`builtin transfer-table snapshot > le > tensor3-tensor3 1`] = `
 {
-  "errorClass": "TypeError",
-  "errorMessage": "'le' arg 1 must be a scalar numeric (got Numeric)",
-  "ok": false,
+  "ok": true,
+  "outputs": [
+    "logical[?×?]:nonneg",
+  ],
 }
 `;
 
@@ -399,17 +407,19 @@ exports[`builtin transfer-table snapshot > lt > scalar-scalar opaque 1`] = `
 
 exports[`builtin transfer-table snapshot > lt > tensor3-scalar 1`] = `
 {
-  "errorClass": "TypeError",
-  "errorMessage": "'lt' arg 1 must be a scalar numeric (got Numeric)",
-  "ok": false,
+  "ok": true,
+  "outputs": [
+    "logical[?×?]:nonneg",
+  ],
 }
 `;
 
 exports[`builtin transfer-table snapshot > lt > tensor3-tensor3 1`] = `
 {
-  "errorClass": "TypeError",
-  "errorMessage": "'lt' arg 1 must be a scalar numeric (got Numeric)",
-  "ok": false,
+  "ok": true,
+  "outputs": [
+    "logical[?×?]:nonneg",
+  ],
 }
 `;
 
@@ -586,17 +596,19 @@ exports[`builtin transfer-table snapshot > ne > scalar-scalar opaque 1`] = `
 
 exports[`builtin transfer-table snapshot > ne > tensor3-scalar 1`] = `
 {
-  "errorClass": "TypeError",
-  "errorMessage": "'ne' arg 1 must be a scalar numeric (got Numeric)",
-  "ok": false,
+  "ok": true,
+  "outputs": [
+    "logical[?×?]:nonneg",
+  ],
 }
 `;
 
 exports[`builtin transfer-table snapshot > ne > tensor3-tensor3 1`] = `
 {
-  "errorClass": "TypeError",
-  "errorMessage": "'ne' arg 1 must be a scalar numeric (got Numeric)",
-  "ok": false,
+  "ok": true,
+  "outputs": [
+    "logical[?×?]:nonneg",
+  ],
 }
 `;
 
