@@ -21,6 +21,14 @@
  * still hits the `addpath` builtin's `transfer`, which errors with a
  * span-attributed message. `rmpath` / `savepath` are always rejected
  * by their own `transfer` hooks; the extractor never accepts them.
+ *
+ * Function-file auto-invoke: a driver whose body (after the prologue)
+ * contains only function/classdef definitions and no top-level
+ * statements is a "function file" — running it means calling its
+ * first function with zero arguments. The extractor appends a
+ * synthesized 0-arg call so every execution path (interpreter,
+ * js-aot, c-aot) treats it the same way. Mirrors numbl's
+ * `Interpreter.run` (interpreter.ts).
  */
 import type { AbstractSyntaxTree, Stmt, Expr, Span } from "../parser/index.js";
 import { UnsupportedConstruct } from "../lowering/errors.js";
@@ -74,7 +82,38 @@ export function extractDriverPrologue(
       addpaths.push({ dir: d.dir, position: d.position, span: s.span });
     }
   }
-  return { addpaths, remainingBody: ast.body.slice(i) };
+  const remainingBody = withFunctionFileEntry(ast.body.slice(i));
+  return { addpaths, remainingBody };
+}
+
+/** If `body` is a function file — only function/classdef definitions,
+ *  no top-level statements — append a synthesized 0-arg call to the
+ *  first function so the driver actually runs it. Otherwise return
+ *  `body` unchanged. Matches numbl's `Interpreter.run`: "Function
+ *  file: call the first function with 0 args". */
+function withFunctionFileEntry(body: Stmt[]): Stmt[] {
+  let firstFn: (Stmt & { type: "Function" }) | null = null;
+  for (const s of body) {
+    if (s.type === "Function") {
+      if (firstFn === null) firstFn = s;
+    } else if (s.type !== "ClassDef") {
+      // A real top-level statement — not a function file.
+      return body;
+    }
+  }
+  if (firstFn === null) return body;
+  const call: Stmt = {
+    type: "ExprStmt",
+    expr: {
+      type: "FuncCall",
+      name: firstFn.name,
+      args: [],
+      span: firstFn.span,
+    },
+    suppressed: true,
+    span: firstFn.span,
+  };
+  return [...body, call];
 }
 
 function parseAddpathArgs(
