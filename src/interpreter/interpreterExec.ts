@@ -719,6 +719,18 @@ export function assignLValue(
       | undefined;
     if (host === undefined || typeof host !== "object" || host === null) {
       host = {};
+    } else if (
+      isTensor(host as unknown as RuntimeValue) ||
+      isCharRV(host as unknown as RuntimeValue)
+    ) {
+      // MATLAB-style "empty as sentinel": `s = []; s.a = rhs;` promotes
+      // the empty tensor to a fresh struct, then writes the field.
+      // Non-empty tensors / char arrays also get promoted on a member
+      // write — matches numbl's behavior, which routes through
+      // `mSetField` on any non-struct base. Pragma: this is the
+      // mtoc2-interpreter side only; AOT has rigid types and would
+      // need explicit struct construction.
+      host = {};
     } else {
       host = Interpreter.cloneStructLocal(host);
     }

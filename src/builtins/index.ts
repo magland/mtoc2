@@ -88,9 +88,13 @@ import { pi, eps, Inf, inf, NaNBuiltin, nan } from "./defs/math/constants.js";
 import { notBuiltin } from "./defs/logical/not.js";
 import { oror } from "./defs/logical/oror.js";
 import { andand } from "./defs/logical/andand.js";
+import { orBuiltin } from "./defs/logical/or.js";
+import { andBuiltin } from "./defs/logical/and.js";
 import { isfield } from "./defs/logical/isfield.js";
 import { isscalar } from "./defs/logical/isscalar.js";
 import { iscell } from "./defs/logical/iscell.js";
+import { isstruct } from "./defs/logical/isstruct.js";
+import { isa } from "./defs/logical/isa.js";
 import { trueBuiltin, falseBuiltin } from "./defs/logical/boolconst.js";
 import { isequal } from "./defs/logical/isequal.js";
 import { isreal } from "./defs/logical/isreal.js";
@@ -206,9 +210,13 @@ for (const b of [
   notBuiltin,
   oror,
   andand,
+  orBuiltin,
+  andBuiltin,
   isfield,
   isscalar,
   iscell,
+  isstruct,
+  isa,
   trueBuiltin,
   falseBuiltin,
   isequal,

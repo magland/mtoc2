@@ -117,19 +117,23 @@ export function evalExpr(this: Interpreter, e: Expr): RuntimeValue {
       return out[0];
     }
     case "Binary": {
-      const left = this.evalExpr(e.left);
-      const right = this.evalExpr(e.right);
-      // `&&` / `||` short-circuit — handled before generic dispatch
-      // so the right operand doesn't evaluate when the left already
-      // decides. (MATLAB semantics: scalar operands only, but the
-      // interpreter doesn't enforce that here — the type check would
-      // belong in `andand`/`oror`'s transfer.)
+      // `&&` / `||` short-circuit — evaluate the LHS, decide, only
+      // touch the RHS when the LHS doesn't decide. This is the
+      // load-bearing semantics for the common MATLAB pattern
+      // `if nargin < 1 || isempty(arg)` — `isempty(arg)` would error
+      // on the unbound parameter under eager evaluation.
       if (e.op === BinaryOperation.AndAnd) {
-        return isTruthy(left) && isTruthy(right) ? 1 : 0;
+        const left = this.evalExpr(e.left);
+        if (!isTruthy(left)) return 0;
+        return isTruthy(this.evalExpr(e.right)) ? 1 : 0;
       }
       if (e.op === BinaryOperation.OrOr) {
-        return isTruthy(left) || isTruthy(right) ? 1 : 0;
+        const left = this.evalExpr(e.left);
+        if (isTruthy(left)) return 1;
+        return isTruthy(this.evalExpr(e.right)) ? 1 : 0;
       }
+      const left = this.evalExpr(e.left);
+      const right = this.evalExpr(e.right);
       const name = BINOP_BUILTIN[e.op];
       if (!name) {
         throw new UnsupportedConstruct(

@@ -17,6 +17,9 @@ test_isempty_basic();
 test_ndims_ismatrix();
 test_rowcol();
 test_char_string_int();
+test_isstruct_basic();
+test_isa_basic();
+test_or_and_functional();
 
 function test_isfield_struct()
   s = struct('alpha', 1, 'beta', 2);
@@ -200,4 +203,56 @@ function test_char_string_int()
   disp(isstring('hi'));
   disp(isinteger(5));
   disp(isinteger(3.5));
+end
+
+function test_isstruct_basic()
+  s = struct('a', 1, 'b', 2);
+  disp(isstruct(s));
+  disp(isstruct(5));
+  disp(isstruct('hi'));
+  disp(isstruct([1 2 3]));
+  % Class instances are NOT structs (matches MATLAB / numbl).
+  p = PredPoint(3, 4);
+  disp(isstruct(p));
+end
+
+function test_isa_basic()
+  disp(isa(5, 'double'));
+  disp(isa(true, 'logical'));
+  disp(isa('hi', 'char'));
+  disp(isa("hi", 'string'));
+  disp(isa(struct('a', 1), 'struct'));
+  disp(isa(5, 'numeric'));
+  disp(isa(true, 'numeric'));  % logical is NOT numeric
+  % Class instance: name match wins.
+  p = PredPoint(1, 2);
+  disp(isa(p, 'PredPoint'));
+  disp(isa(p, 'double'));
+end
+
+function test_or_and_functional()
+  % Functional `or(a, b)` / `and(a, b)` mirror the corresponding
+  % short-circuit operators for scalar args (the runtime difference
+  % between `|` and `||` is moot once both args have been evaluated
+  % by the call site).
+  disp(or(true, false));
+  disp(or(false, false));
+  disp(and(true, true));
+  disp(and(true, false));
+  % Mixed-shape pattern from chunkerpref: `or(isstruct(x), isa(x, 'C'))`.
+  s = struct('a', 1);
+  disp(or(isstruct(s), isa(s, 'PredPoint')));
+end
+
+classdef PredPoint
+  properties
+    x = 0
+    y = 0
+  end
+  methods
+    function obj = PredPoint(x, y)
+      obj.x = x;
+      obj.y = y;
+    end
+  end
 end
