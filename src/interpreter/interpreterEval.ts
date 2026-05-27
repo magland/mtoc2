@@ -433,6 +433,25 @@ export function evalExpr(this: Interpreter, e: Expr): RuntimeValue {
               fn.span.file
             )[0];
           }
+          // Dependent property indexed read: `obj.depProp(args)`.
+          // Call the getter to produce the value, then route the
+          // args through the standard tensor-indexing path.
+          const getter = reg?.getters.get(e.name);
+          if (getter !== undefined) {
+            const value = this.callUserFunction(
+              getter,
+              [base],
+              1,
+              e.span,
+              getter.span.file
+            )[0];
+            if (isTensor(value)) {
+              return this.indexTensor(value, e.args, e.span);
+            }
+            // Non-tensor getter result with index args — rare; matches
+            // numbl's behavior of falling through to the generic
+            // dispatcher, which would error here.
+          }
         }
         // Struct / class field that's a tensor: treat as a member-
         // rooted index read (`obj.data(i)`). Read the field into a

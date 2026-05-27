@@ -19,6 +19,8 @@ test_dependent_property_setter();
 test_dependent_property_multiple();
 test_dependent_getter_calling_method();
 test_dependent_property_read_only();
+test_dependent_property_indexed_read();
+test_dependent_property_indexed_slice();
 
 function test_class_construct_basic()
   p = Point(3, 4);
@@ -167,6 +169,26 @@ function test_dependent_getter_calling_method()
   % The interpreter and AOT backends both dispatch the inner call.
   s = SumDep(2, 3);
   disp(s.total);
+end
+
+function test_dependent_property_indexed_read()
+  % `obj.depProp(i, j)` calls the getter first, then indexes the
+  % resulting tensor. The result is a freshly-owned value;
+  % subsequent indexing happens on it.
+  m = Mat3(2, 4);
+  disp(m.transposed(1, 1));
+  disp(m.transposed(2, 1));
+  disp(m.transposed(3, 2));
+end
+
+function test_dependent_property_indexed_slice()
+  % Same routing for slice indices (range / colon args). The
+  % getter's tensor result is sliced by the standard tensor-slice
+  % path.
+  m = Mat3(2, 4);
+  disp(m.transposed(:, 1));
+  disp(m.transposed(2, :));
+  disp(m.transposed(2:3, 1:2));
 end
 
 function test_dependent_property_read_only()
@@ -379,6 +401,26 @@ classdef SumDep
     end
     function s = get.total(obj)
       s = obj.computeSum();
+    end
+  end
+end
+
+classdef Mat3
+  % Backing storage is a 2-D matrix; the Dependent `transposed`
+  % returns its transpose. Used to exercise indexed reads through
+  % the getter (phase C of the property-attributes plan).
+  properties
+    data
+  end
+  properties (Dependent)
+    transposed
+  end
+  methods
+    function obj = Mat3(r, c)
+      obj.data = reshape(1:(r*c), r, c);
+    end
+    function t = get.transposed(obj)
+      t = obj.data';
     end
   end
 end

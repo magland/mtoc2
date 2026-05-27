@@ -419,6 +419,26 @@ export function assignLValue(
       }
       const rootName = path.root.name;
       const fields = path.fields;
+      // Indexed write through a dependent property would require
+      // invoking the getter, splicing, then the setter — not
+      // supported in v1. Match the lowerer's rejection so all three
+      // backends fail with the same message shape.
+      if (fields.length === 1 && this.workspace !== undefined) {
+        const rootRV = this.env.get(rootName);
+        const tag =
+          rootRV && typeof rootRV === "object" && rootRV !== null
+            ? (rootRV as { mtoc2Class?: string }).mtoc2Class
+            : undefined;
+        if (tag !== undefined) {
+          const reg = this.workspace.classes.get(tag);
+          if (reg?.dependentProperties.has(fields[0])) {
+            throw new UnsupportedConstruct(
+              `interpreter: indexed write of dependent property ` +
+                `'${rootName}.${fields[0]}' via indexing is not supported in v1`
+            );
+          }
+        }
+      }
       let host = this.env.get(rootName) as
         | Record<string, RuntimeValue>
         | undefined;

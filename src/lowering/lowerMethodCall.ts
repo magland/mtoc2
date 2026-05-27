@@ -114,16 +114,27 @@ export function lowerMethodCall(
   // pre-hoist the field load to a fresh temp so the downstream
   // `IndexLoad` / `IndexSlice` has a real `Var` to anchor on (the
   // temp also gives `end`-keyword resolution a concrete `dims[k]` to
-  // query).
+  // query). Dependent properties take a parallel path: the source
+  // value is a getter Call instead of a `MemberLoad`.
+  const reg = this.classReg(base.ty.className);
   const classProperties = base.ty.properties;
   const isProperty = classProperties.some(p => p.name === e.name);
-  const isMethod = (() => {
-    const cls = this.classReg(base.ty.className);
-    if (cls === undefined) return false;
-    return cls.methods.has(e.name) || cls.staticMethods.has(e.name);
-  })();
+  const isDependent = reg?.dependentProperties.has(e.name) ?? false;
+  const isMethod = reg
+    ? reg.methods.has(e.name) || reg.staticMethods.has(e.name)
+    : false;
   if (isProperty && !isMethod) {
     return lowerMemberRootedIndex.call(this, base, e.name, e.args, e.span);
+  }
+  if (isDependent && reg !== undefined) {
+    return lowerDependentPropertyIndex.call(
+      this,
+      base,
+      reg,
+      e.name,
+      e.args,
+      e.span
+    );
   }
   const args = e.args.map(a => this.lowerExpr(a));
   for (const a of args) {
@@ -146,16 +157,16 @@ export function lowerMethodCall(
       e.span
     );
   }
-  const reg = this.classReg(target.className);
-  if (reg === undefined) {
+  const targetReg = this.classReg(target.className);
+  if (targetReg === undefined) {
     throw new UnsupportedConstruct(
       `internal: class '${target.className}' missing from workspace registry`,
       e.span
     );
   }
   const method = target.stripInstance
-    ? reg.staticMethods.get(target.methodName)
-    : reg.methods.get(target.methodName);
+    ? targetReg.staticMethods.get(target.methodName)
+    : targetReg.methods.get(target.methodName);
   if (method === undefined) {
     throw new TypeError(
       `class '${target.className}' has no ${target.stripInstance ? "static " : ""}method '${target.methodName}'`,
@@ -184,9 +195,60 @@ export function lowerMethodCall(
       // the method FuncStmt's source file (the external file for an
       // `@<Cls>/<m>.m` method, the classdef file for an in-body
       // method) rather than always salting on the classdef file.
-      definingFile: method.span.file ?? reg.file,
+      definingFile: method.span.file ?? targetReg.file,
     }
   );
+}
+
+/** Lowers `obj.depProp(args)` where `depProp` is a `Dependent`
+ *  property: call the getter to produce the value, hoist the result
+ *  to a fresh temp, then run the args through the standard
+ *  `lowerIndexLoad` / `lowerIndexSlice` path on the temp. v1
+ *  rejects the corresponding write form (`obj.depProp(args) = rhs`)
+ *  at `lowerAssignLValue` — splicing through the getter then setter
+ *  is deferred. */
+export function lowerDependentPropertyIndex(
+  this: Lowerer,
+  base: IRExpr,
+  reg: import("./classDefs.js").ClassRegistration,
+  propName: string,
+  argExprs: ReadonlyArray<Expr>,
+  span: Span
+): IRExpr {
+  const getter = reg.getters.get(propName);
+  if (getter === undefined) {
+    // `registerClassDef` guarantees every Dependent property has a
+    // getter, so this should be unreachable.
+    throw new UnsupportedConstruct(
+      `internal: dependent property '${reg.className}.${propName}' has no getter`,
+      span
+    );
+  }
+  const getterCall = buildUserFunctionCall.call(
+    this,
+    getter,
+    [base],
+    `${reg.className}.get.${propName}`,
+    span,
+    {
+      specSource: classMethodSpecSource(reg.className, `get.${propName}`),
+      definingFile: getter.span.file ?? reg.file,
+    }
+  );
+  const tempName = this.freshTempName();
+  this.env.set(tempName, { cName: tempName, ty: getterCall.ty });
+  this.pendingExprHoists.push({
+    kind: "Assign",
+    name: tempName,
+    cName: tempName,
+    ty: getterCall.ty,
+    expr: getterCall,
+    span,
+  });
+  if (argExprs.some(isSliceArg)) {
+    return lowerIndexSlice.call(this, tempName, argExprs, span);
+  }
+  return lowerIndexLoad.call(this, tempName, argExprs, span);
 }
 
 /** Lowers `obj.field(args)` where `field` is a class property (not a

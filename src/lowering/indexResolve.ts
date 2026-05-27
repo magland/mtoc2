@@ -108,6 +108,22 @@ export function resolveMemberRootedIndexBase(
     const fname = fieldPath[i];
     const ft = fieldType(stepTy, fname);
     if (ft === undefined) {
+      // If the field is a `Dependent` property of the current class
+      // step, surface a more specific error — the field is intended
+      // to be read via its `get.X` accessor; an indexed write through
+      // it isn't supported in v1 (would need to invoke the getter,
+      // splice the rhs into the result, and call the setter).
+      if (stepTy.kind === "Class") {
+        const reg = this.classReg(stepTy.className);
+        if (reg?.dependentProperties.has(fname)) {
+          throw new UnsupportedConstruct(
+            `${opPrefix(operation)} of dependent property ` +
+              `'${rootName}.${fieldPath.slice(0, i + 1).join(".")}' ` +
+              `via indexing is not supported in v1`,
+            lvalue.base.span
+          );
+        }
+      }
       throw new TypeError(
         `'${rootName}.${fieldPath.slice(0, i + 1).join(".")}': no such ` +
           `field on type ${typeToString(stepTy)}`,
