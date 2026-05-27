@@ -315,6 +315,28 @@ opposite-sign or unknown rhs widens to `unknown`. The same hook
 also clears `exact` on String env entries and recursively widens
 nested struct/class fields via `withoutExact`.
 
+### 4. Type-changing reassignment splits at the top level
+
+A variable reassigned to a value whose C storage is incompatible with
+its prior binding — `char` → `double`, scalar ↔ tensor, real ↔ complex,
+a struct with a different field set, etc. (anything `storageEquivalent`
+rejects) — can't reuse the same C local. `recordAssignment` handles this
+by **splitting**: it mints a fresh `_mtoc2_<cName>__v<N>` local, repoints
+the name's env entry at it, and emits the Assign into the new local.
+Earlier reads keep the old binding; later reads see the new one. The
+predeclare walk keys by cName, so each binding is declared, lived, and
+freed independently — `x = 'hi'; disp(x); x = 5; disp(x)` works in every
+backend.
+
+The split only happens at `controlDepth === 0` (straight-line script /
+function scope). Inside a non-folded `if` / `while` / `for` body the
+branch-env merge keeps a single cName per name and can't reconcile two
+storage categories, so an incompatible reassignment there raises
+`UnsupportedConstruct` with a span. (A _folded_ branch is straight-line
+code at the enclosing depth, so a split inside one is fine.) The
+interpreter, which walks the AST and rebinds values directly, accepts
+the control-flow case too — one of the documented backend gaps.
+
 ## Specialization keys
 
 Function calls specialize per (canonicalized) input-type tuple.
