@@ -471,6 +471,27 @@ const REGISTRY: ReadonlyMap<string, RuntimeSnippet> = new Map<
     "mtoc2_tensor_predicate",
     loadSnippet("tensor_predicate.h", ["mtoc2_tensor_t", "mtoc2_alloc"]),
   ],
+  // Prefix scans (`cumsum`, `cumprod`). One snippet defines both
+  // helpers; the builtin dispatches on op kind.
+  [
+    "mtoc2_tensor_cumulative",
+    loadSnippet("tensor_cumulative.h", [
+      "mtoc2_tensor_t",
+      "mtoc2_alloc",
+      "mtoc2_tensor_alloc_nd",
+    ]),
+  ],
+  // `repmat` — tile a real tensor by the given per-axis repetition counts.
+  [
+    "mtoc2_tensor_repmat",
+    loadSnippet("tensor_repmat.h", ["mtoc2_tensor_t", "mtoc2_tensor_alloc_nd"]),
+  ],
+  // `diag` — construct a diagonal matrix from a vector, or extract a
+  // diagonal from a matrix. One snippet defines the three entry points.
+  [
+    "mtoc2_tensor_diag",
+    loadSnippet("tensor_diag.h", ["mtoc2_tensor_t", "mtoc2_tensor_alloc"]),
+  ],
   // `besselh(nu, 1, x)` for nu in {0, 1} via POSIX `j0/j1/y0/y1`.
   // One snippet defines both scalar and tensor entry points; the
   // builtin dispatches via the exact value of `nu`.

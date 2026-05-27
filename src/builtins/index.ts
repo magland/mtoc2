@@ -98,6 +98,12 @@ import { isempty } from "./defs/logical/isempty.js";
 import { isnan } from "./defs/logical/isnan.js";
 import { logical } from "./defs/logical/logical.js";
 import { isinf, isfinite } from "./defs/logical/isinf.js";
+import { classBuiltin } from "./defs/logical/classBuiltin.js";
+import { cumsum } from "./defs/reduction/cumsum.js";
+import { cumprod } from "./defs/reduction/cumprod.js";
+import { repmat } from "./defs/shape/repmat.js";
+import { diag } from "./defs/shape/diag.js";
+import { doubleBuiltin } from "./defs/math/double.js";
 import {
   ischarBuiltin,
   isstring,
@@ -214,6 +220,12 @@ for (const b of [
   ismatrix,
   isrow,
   iscolumn,
+  classBuiltin,
+  cumsum,
+  cumprod,
+  repmat,
+  diag,
+  doubleBuiltin,
   strcmp,
   strcmpi,
 ]) {
