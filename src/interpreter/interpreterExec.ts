@@ -683,7 +683,22 @@ export function assignLValue(
     // For member-rooted writes, writeBack shows the root struct/class
     // (and was set up at the top of this branch).
     if (lv.base.type === "Ident") {
-      if (!suppressed) this.autoDisp(baseName, baseVal);
+      // 1-element collapse — match mtoc2's "scalars are bare
+      // numbers, not 1×1 tensors" convention. Without this, an
+      // `a(1) = 5` on a scalar `a` leaves `a` as a 1×1 tensor and
+      // downstream scalar-typed builtins (eq, prod, ...) see a
+      // tensor argument they can't unbox.
+      if (
+        isTensor(baseVal) &&
+        baseVal.data.length === 1 &&
+        baseVal.imag === undefined
+      ) {
+        const collapsed = baseVal.data[0];
+        this.env.set(baseName, collapsed);
+        if (!suppressed) this.autoDisp(baseName, collapsed);
+      } else if (!suppressed) {
+        this.autoDisp(baseName, baseVal);
+      }
     } else {
       writeBack();
     }

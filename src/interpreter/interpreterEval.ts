@@ -819,6 +819,17 @@ export function indexTensor(
       outRe[k] = base.data[ix - 1];
       if (outIm !== undefined) outIm[k] = base.imag![ix - 1];
     }
+    // Single-element slice collapses to a scalar: mtoc2's runtime
+    // convention is "scalar values are bare numbers (or {re,im}), not
+    // 1×1 tensors". Without this collapse, downstream builtins that
+    // check `isScalar(argType)` and pull `Number(arg)` see NaN (the
+    // tensor object isn't a number), turning every operation on the
+    // result silently wrong. Numbl scalar values pass through as
+    // bare numbers via the same convention.
+    if (n === 1) {
+      if (outIm !== undefined) return { re: outRe[0], im: outIm[0] };
+      return outRe[0];
+    }
     const shape = isRowBase ? [1, n] : [n, 1];
     if (outIm !== undefined) return makeComplexTensor(shape, outRe, outIm);
     return makeTensor(shape, outRe);
