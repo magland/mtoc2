@@ -259,13 +259,40 @@ export function execStmt(this: Interpreter, s: Stmt): void {
     case "Directive":
       return;
 
+    case "TryCatch": {
+      // Run the try body. On any catchable exception, bind the
+      // wrapped MException-shape struct to `catchVar` (if present)
+      // and run the catch body. `Break` / `Continue` / `Return`
+      // signal exceptions are control-flow markers and propagate
+      // through `try` unchanged. `UnsupportedConstruct` is a
+      // translator-level "this isn't implemented yet" error — re-
+      // throw so the user sees a proper failure instead of
+      // silently entering the catch arm.
+      try {
+        this.execBody(s.tryBody);
+      } catch (e) {
+        if (
+          e instanceof BreakSignal ||
+          e instanceof ContinueSignal ||
+          e instanceof ReturnSignal ||
+          e instanceof UnsupportedConstruct
+        ) {
+          throw e;
+        }
+        if (s.catchVar !== null) {
+          this.env.set(s.catchVar, wrapErrorAsMException(e));
+        }
+        this.execBody(s.catchBody);
+      }
+      return;
+    }
+
     // `global` / `persistent` change variable storage in MATLAB. The
     // interpreter currently has no shared-state slot; silently doing
     // nothing here would let user code read garbage. Raise loudly
     // until storage classes are wired through Environment.
     case "Global":
     case "Persistent":
-    case "TryCatch":
     case "Synth":
       throw new UnsupportedConstruct(
         `interpreter: stmt '${s.type}' is not yet implemented`,
@@ -772,6 +799,39 @@ export function autoDisp(
   } else {
     this.ctx.helpers.write(String(v) + "\n");
   }
+}
+
+/** Wrap a thrown error into a numbl-compatible `MException`-shape
+ *  struct: `{identifier, message, cause, stack}`. `identifier` is
+ *  read off `e.identifier` when present (numbl's RuntimeError-style
+ *  shape); otherwise it's the empty string. `cause` is an empty
+ *  0×0 cell; `stack` is an empty 0×0 cell as a placeholder (numbl
+ *  populates a struct array, but mtoc2's catch-binding consumers
+ *  don't probe it today).
+ *
+ *  Matches numbl `runtime/runtime.ts:562` `wrapError` so the
+ *  cross-runner sees the same field shape from a `catch ME` arm. */
+function wrapErrorAsMException(e: unknown): RuntimeValue {
+  let identifier = "";
+  let message = "";
+  if (e !== null && typeof e === "object") {
+    const o = e as { identifier?: string; message?: string };
+    if (typeof o.identifier === "string") identifier = o.identifier;
+    if (typeof o.message === "string") message = o.message;
+  } else {
+    message = String(e);
+  }
+  const emptyCell = {
+    mtoc2Tag: "cell",
+    shape: [0, 0],
+    data: [],
+  } as unknown as RuntimeValue;
+  return {
+    identifier: { mtoc2Tag: "char", value: identifier },
+    message: { mtoc2Tag: "char", value: message },
+    cause: emptyCell,
+    stack: emptyCell,
+  } as unknown as RuntimeValue;
 }
 
 /** Expand `[out{1:nout}]` / `[out{start:end}]` style multi-assign

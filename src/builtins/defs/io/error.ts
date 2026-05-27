@@ -7,7 +7,10 @@ import {
   emitTextView,
   validateFormatArgs,
 } from "./_format_args.js";
-import { mtoc2_error_fmt as jsErrorFmt } from "../../runtime/snippets.gen.js";
+import {
+  mtoc2_error_fmt as jsErrorFmt,
+  mtoc2_error_fmt_id as jsErrorFmtId,
+} from "../../runtime/snippets.gen.js";
 
 const MATLAB_ID_REGEX = /^[A-Za-z]\w*(:[A-Za-z]\w*)+$/;
 
@@ -74,7 +77,6 @@ export const errorBuiltin: Builtin = {
     return `mtoc2_error_fmt(${fmtView}, ${slots.length}, ${emitFormatSlotArray(slots)})`;
   },
   emitJs({ argsJs, argTypes, useRuntime }) {
-    useRuntime("mtoc2_error_fmt");
     const first = argTypes[0];
     const firstExact =
       first.kind === "Char" || first.kind === "String"
@@ -88,6 +90,11 @@ export const errorBuiltin: Builtin = {
     ) {
       fmtIdx = 1;
     }
+    if (fmtIdx === 1 && firstExact !== undefined) {
+      useRuntime("mtoc2_error_fmt_id");
+      return `mtoc2_error_fmt_id(${JSON.stringify(firstExact)}, ${argsJs.slice(fmtIdx).join(", ")})`;
+    }
+    useRuntime("mtoc2_error_fmt");
     return `mtoc2_error_fmt(${argsJs.slice(fmtIdx).join(", ")})`;
   },
   call({ args, argTypes }) {
@@ -106,7 +113,14 @@ export const errorBuiltin: Builtin = {
     }
     const unwrapped = args.slice(fmtIdx).map(unwrapFmtArg);
     const fmt = unwrapped[0] as string;
-    jsErrorFmt(fmt, ...unwrapped.slice(1));
+    if (fmtIdx === 1 && firstExact !== undefined) {
+      // Identifier-bearing form `error('id:bad', fmt, args...)` —
+      // thread the identifier so a downstream `try/catch ME` arm
+      // sees it on `ME.identifier`.
+      jsErrorFmtId(firstExact, fmt, ...unwrapped.slice(1));
+    } else {
+      jsErrorFmt(fmt, ...unwrapped.slice(1));
+    }
     return [];
   },
 };

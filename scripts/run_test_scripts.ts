@@ -242,15 +242,17 @@ interface Result {
 function parseMasks(scriptPath: string): {
   masks: RegExp[];
   drops: RegExp[];
+  skipCaot: string | null;
 } {
   let src: string;
   try {
     src = readFileSync(scriptPath, "utf8");
   } catch {
-    return { masks: [], drops: [] };
+    return { masks: [], drops: [], skipCaot: null };
   }
   const masks: RegExp[] = [];
   const drops: RegExp[] = [];
+  let skipCaot: string | null = null;
   // Scan only the leading comment block — first code/keyword line ends
   // directive parsing. Avoids the silent-drop failure mode where a
   // long preamble pushes directives below an arbitrary line cap.
@@ -270,8 +272,18 @@ function parseMasks(scriptPath: string): {
       if (pattern !== "") drops.push(new RegExp(pattern + "\\n?", "gm"));
       continue;
     }
+    // The c-aot runner only tests c-aot vs numbl. A `xfail-c-aot`
+    // directive means "this script's feature isn't supported by
+    // c-aot yet"; skip the script entirely. (The all-modes runner
+    // handles the same directive by dropping just the c-aot
+    // comparison while still testing interpreter / js-aot.)
+    const xfailMatch = line.match(/^\s*%\s*mtoc2-test-xfail-c-aot:\s*(.*)$/);
+    if (xfailMatch) {
+      skipCaot = xfailMatch[1].trim();
+      continue;
+    }
   }
-  return { masks, drops };
+  return { masks, drops, skipCaot };
 }
 
 /** Apply masks then drops to `stdout` and return the normalized text
@@ -325,7 +337,20 @@ async function runOne(scriptPath: string): Promise<Result> {
     ? scriptPath.slice(repoRoot.length + 1)
     : scriptPath;
 
-  const { masks, drops } = parseMasks(scriptPath);
+  const { masks, drops, skipCaot } = parseMasks(scriptPath);
+
+  // `% mtoc2-test-xfail-c-aot: <reason>` skips the script in the
+  // c-aot cross-runner entirely — the feature isn't supported by
+  // c-aot yet and there's nothing to compare. The all-modes runner
+  // still exercises the interpreter / js-aot side.
+  if (skipCaot !== null) {
+    return {
+      name,
+      status: "PASS",
+      detail: null,
+      maskNotes: [`  -> skipped c-aot via xfail directive: ${skipCaot}`],
+    };
+  }
 
   let expectedRaw: string;
   try {

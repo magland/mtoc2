@@ -231,6 +231,11 @@ const REGISTRY: ReadonlyMap<string, RuntimeSnippet> = new Map<
   ],
   ["mtoc2_fprintf", loadSnippet("fprintf.h", ["mtoc2_format_engine"])],
   ["mtoc2_error_fmt", loadSnippet("error_fmt.h", ["mtoc2_format_engine"])],
+  // JS-aot identifier-bearing variant. The C side reuses
+  // `mtoc2_error_fmt` (no identifier in the c-aot path) and ignores
+  // this entry; the JS sibling is what threads the identifier
+  // through to the interpreter's TryCatch handler.
+  ["mtoc2_error_fmt_id", loadSnippet("error_fmt.h", ["mtoc2_format_engine"])],
   [
     "mtoc2_assert_scalar_fmt",
     loadSnippet("assert_fmt.h", ["mtoc2_format_engine"]),
