@@ -173,14 +173,11 @@ export function lowerMethodCall(
       e.span
     );
   }
-  if (method.outputs.length >= 2) {
-    throw new UnsupportedConstruct(
-      `class method '${target.className}.${target.methodName}' has ` +
-        `${method.outputs.length} outputs; multi-output methods are not ` +
-        `supported yet`,
-      e.span
-    );
-  }
+  // Multi-output methods are accepted: single-output dispatch
+  // (`x = obj.method(...)`) specializes the method at nargout=1
+  // through `buildUserFunctionCall`, truncating the body's extra
+  // outputs. `[a, b] = obj.method(...)` (multi-output instance
+  // dispatch) remains rejected at `lowerMultiAssign`.
   const allArgs: IRExpr[] = target.stripInstance ? args : [base, ...args];
   return buildUserFunctionCall.call(
     this,

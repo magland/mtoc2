@@ -35,6 +35,7 @@ import {
   type ClassType,
   classType,
   scalarDouble,
+  scalarLogical,
   signFromNumber,
   tensorDouble,
 } from "./types.js";
@@ -137,6 +138,13 @@ export function registerClassDef(
   const dependentProperties = new Set<string>();
   const getters = new Map<string, FuncStmt>();
   const setters = new Map<string, FuncStmt>();
+  // Method names that appear as `name(args)` rows inside a
+  // `methods (Static)` block — i.e. signature-only declarations
+  // (no `function` keyword, body lives in `@<Cls>/<name>.m`).
+  // When `collectExternalMethods` later hands us the external file's
+  // FuncStmt, presence of the name in this set routes it to
+  // `staticMethods` rather than to `methods`.
+  const staticSignatureNames = new Set<string>();
   let constructor: FuncStmt | null = null;
 
   for (const m of s.members) {
@@ -238,11 +246,23 @@ export function registerClassDef(
             s.span
           );
         }
-        if (m.signatures && m.signatures.length > 0) {
-          throw new UnsupportedConstruct(
-            `external method declarations are not supported in v1`,
-            s.span
-          );
+        // Method signatures — prototype rows like
+        // `[a, b] = foo(obj, x)` without a `function` keyword. The
+        // body lives in an `@<Cls>/<name>.m` external file (or, for
+        // some chunkie-style classes, in a workspace-level `<name>.m`
+        // that the class signature is declaring for documentation
+        // only). Numbl mirrors this in `extractClassInfo`: signatures
+        // populate `methodNames` / `staticMethodNames` but don't carry
+        // a body themselves. We use them for one thing only — knowing
+        // whether an external method file should be registered as
+        // `staticMethods` vs `methods`. Output-arity, input-arity, and
+        // declared-but-unimplemented signatures are accepted silently
+        // (matches numbl); the call site is what surfaces a missing
+        // implementation.
+        for (const sig of m.signatures ?? []) {
+          if (isStatic) {
+            staticSignatureNames.add(sig.name);
+          }
         }
         for (const stmt of m.body) {
           if (stmt.type !== "Function") {
@@ -275,13 +295,18 @@ export function registerClassDef(
                 stmt.span
               );
             }
-            if (!dependentProperties.has(propName)) {
-              throw new UnsupportedConstruct(
-                `${kind} '${stmt.name}' on class '${s.name}': ` +
-                  `accessors on non-Dependent properties are not supported in v1`,
-                stmt.span
-              );
-            }
+            // Storage-backed properties with paired accessors (the
+            // chunkgraph pattern: the property carries real storage
+            // but reads/writes are intercepted by `get.X` / `set.X`)
+            // are accepted. The storage stays — matching numbl, which
+            // always routes through the accessor when one exists and
+            // ignores the field even if present. mtoc2's lowerer /
+            // interpreter already do this dispatch.
+            //
+            // No recursion guard in v1: a getter that reads its own
+            // property (`get.X` body containing `obj.X`) would
+            // infinite-loop. Real codebases use the accessor to
+            // compute from OTHER fields, so this hasn't surfaced.
             if (stmt.outputs.length !== 1) {
               throw new UnsupportedConstruct(
                 `${kind} '${stmt.name}' must declare exactly one output`,
@@ -306,12 +331,6 @@ export function registerClassDef(
             }
             target.set(propName, stmt);
             continue;
-          }
-          if (stmt.outputs.length > 1) {
-            throw new UnsupportedConstruct(
-              `method '${stmt.name}': only 0 or 1 outputs supported`,
-              stmt.span
-            );
           }
           if (isStatic) {
             // Static methods can't double as the constructor.
@@ -383,12 +402,6 @@ export function registerClassDef(
           stmt.span
         );
       }
-      if (stmt.outputs.length > 1) {
-        throw new UnsupportedConstruct(
-          `method '${methodName}': only 0 or 1 outputs supported`,
-          stmt.span
-        );
-      }
       if (methodName === s.name) {
         // MATLAB allows a constructor in an external file; mtoc2's
         // type-inference path keys off the classdef-file constructor,
@@ -406,7 +419,16 @@ export function registerClassDef(
           stmt.span
         );
       }
-      methods.set(methodName, stmt);
+      // A signature inside a `methods (Static)` block routes the
+      // external file to `staticMethods` instead of `methods` — the
+      // class-side declaration is the only thing that distinguishes
+      // an external file's static-vs-instance status (the file
+      // itself just contains a plain `function`).
+      if (staticSignatureNames.has(methodName)) {
+        staticMethods.set(methodName, stmt);
+      } else {
+        methods.set(methodName, stmt);
+      }
     }
   }
 
@@ -472,6 +494,21 @@ function inferDefaultType(e: Expr, propName: string): Type {
         );
       }
       return scalarDouble(signFromNumber(v), v);
+    }
+    case "Ident": {
+      // The boolean constants `true` / `false` parse as Idents
+      // (they're not literal tokens in the grammar — they're nullary
+      // builtin functions). Recognize them by name so property
+      // defaults like `isnan = false` get a scalar logical type at
+      // registration time. Matches numbl, which lazily evaluates
+      // `true` / `false` to scalar logical at construction.
+      if (e.name === "true") return scalarLogical(true);
+      if (e.name === "false") return scalarLogical(false);
+      throw new UnsupportedConstruct(
+        `property '${propName}': default must be a literal numeric, ` +
+          `tensor, or 'true'/'false' (got identifier '${e.name}')`,
+        span
+      );
     }
     case "Unary": {
       // Accept unary +/- on a numeric literal.
