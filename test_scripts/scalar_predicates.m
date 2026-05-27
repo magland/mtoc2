@@ -7,6 +7,11 @@ test_isscalar_numeric();
 test_isscalar_complex();
 test_isscalar_text();
 test_isscalar_struct_class_handle();
+test_isequal_scalar();
+test_isequal_tensor();
+test_isequal_scalar_tensor();
+test_isequal_complex();
+test_isequal_nargs();
 
 function test_isfield_struct()
   s = struct('alpha', 1, 'beta', 2);
@@ -104,4 +109,39 @@ classdef SPPoint
       obj.y = y;
     end
   end
+end
+
+function test_isequal_scalar()
+  disp(isequal(5, 5));
+  disp(isequal(5, 6));
+  % runtime (non-exact) operands
+  x = numel([1 2 3 4]);
+  disp(isequal(x, 4));
+end
+
+function test_isequal_tensor()
+  a = [1 2 3] + 0;   % force a runtime tensor
+  disp(isequal(a, [1 2 3]));
+  disp(isequal(a, [1 2 4]));
+  disp(isequal(a, [1 2]));
+  disp(isequal([1 2; 3 4], [1 2 3 4]));   % shape mismatch
+  disp(isequal(size([1 2 3]), [1 3]));
+end
+
+function test_isequal_scalar_tensor()
+  v = [7] + 0;
+  disp(isequal(7, v));      % scalar vs 1x1 tensor
+  disp(isequal([1 2 3], 1)); % tensor vs scalar (numel > 1)
+end
+
+function test_isequal_complex()
+  z = (2 + 3i) + 0;
+  disp(isequal(z, 2 + 3i));
+  disp(isequal(z, 2 + 4i));
+  disp(isequal(2 + 0i, 2));  % complex with zero imag equals real
+end
+
+function test_isequal_nargs()
+  disp(isequal(3, 3, 3));
+  disp(isequal(3, 3, 4));
 end
