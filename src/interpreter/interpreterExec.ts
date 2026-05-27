@@ -657,6 +657,40 @@ export function assignLValue(
       );
     }
     const { rootName, fields } = path;
+    // Dependent-property routing: single-level `obj.X = rhs` on a
+    // class with a `set.X` accessor rewrites to
+    // `obj = set.X(obj, rhs)`. Mirrors numbl's `setMemberReturn` in
+    // `runtimeMemberAccess.ts` and the lowerer's setter dispatch.
+    if (fields.length === 1 && this.workspace !== undefined) {
+      const existing = this.env.get(rootName);
+      const tag =
+        existing && typeof existing === "object" && existing !== null
+          ? (existing as { mtoc2Class?: string }).mtoc2Class
+          : undefined;
+      if (tag !== undefined) {
+        const reg = this.workspace.classes.get(tag);
+        const propName = fields[0];
+        const setter = reg?.setters.get(propName);
+        if (setter !== undefined) {
+          const newObj = this.callUserFunction(
+            setter,
+            [existing as RuntimeValue, v],
+            1,
+            setter.span,
+            setter.span.file
+          )[0];
+          this.env.set(rootName, newObj);
+          if (!suppressed) this.autoDisp(rootName, newObj);
+          return;
+        }
+        if (reg?.dependentProperties.has(propName)) {
+          throw new UnsupportedConstruct(
+            `interpreter: dependent property '${tag}.${propName}' ` +
+              `has no setter; cannot assign`
+          );
+        }
+      }
+    }
     // `cloneStructLocal` preserves non-enumerable tags (e.g.
     // `mtoc2Class` on class instances) — a constructor's `obj.x = a`
     // would otherwise silently strip the class tag and break dispatch.

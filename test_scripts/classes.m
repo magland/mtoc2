@@ -14,6 +14,11 @@ test_member_rooted_index_write();
 test_member_rooted_slice_write();
 test_class_alias_isolation();
 test_class_attr_passthrough();
+test_dependent_property_getter();
+test_dependent_property_setter();
+test_dependent_property_multiple();
+test_dependent_getter_calling_method();
+test_dependent_property_read_only();
 
 function test_class_construct_basic()
   p = Point(3, 4);
@@ -128,6 +133,51 @@ function test_class_alias_isolation()
   b.data(1) = 99;
   disp(a.data);
   disp(b.data);
+end
+
+function test_dependent_property_getter()
+  % Read of a Dependent property routes through the `get.<prop>`
+  % accessor. The getter reads the backing storage field.
+  d = Doubler(7);
+  disp(d.raw);
+  disp(d.doubled);
+end
+
+function test_dependent_property_setter()
+  % Write to a Dependent property with a setter routes through
+  % `set.<prop>`. The setter mutates the backing storage; subsequent
+  % reads of the dependent property observe the new value.
+  d = Doubler(7);
+  d.doubled = 100;
+  disp(d.raw);
+  disp(d.doubled);
+end
+
+function test_dependent_property_multiple()
+  % A class can declare multiple Dependent properties in one block
+  % (and across blocks). Each one routes through its own accessor.
+  b = BoxStats(3, 4, 5);
+  disp(b.volume);
+  disp(b.surface);
+  disp(b.diag2);
+end
+
+function test_dependent_getter_calling_method()
+  % A getter body can call another instance method on the receiver.
+  % The interpreter and AOT backends both dispatch the inner call.
+  s = SumDep(2, 3);
+  disp(s.total);
+end
+
+function test_dependent_property_read_only()
+  % A Dependent property without a `set.<prop>` is read-only — the
+  % only operation the program does on it is a read. Verifies that
+  % getter routing works on a class that also has storage-backed
+  % writable properties.
+  r = ReadOnlyDep(9);
+  disp(r.square);
+  r.raw = 11;
+  disp(r.square);
 end
 
 function test_class_attr_passthrough()
@@ -251,6 +301,104 @@ classdef Vault
       obj.priv = b;
       obj.hid = c;
       obj.setpriv = a + b + c;
+    end
+  end
+end
+
+classdef Doubler
+  % Single Dependent property `doubled` backed by `raw`. The setter
+  % maintains the invariant `doubled == 2*raw` by writing `raw`.
+  properties (Hidden)
+    raw
+  end
+  properties (Dependent)
+    doubled
+  end
+  methods
+    function obj = Doubler(x)
+      obj.raw = x;
+    end
+    function y = get.doubled(obj)
+      y = obj.raw * 2;
+    end
+    function obj = set.doubled(obj, val)
+      obj.raw = val / 2;
+    end
+  end
+end
+
+classdef BoxStats
+  % Multiple Dependent properties in one block, plus another block.
+  % Getters each read different combinations of the backing fields.
+  properties
+    w
+    h
+    d
+  end
+  properties (Dependent)
+    volume
+    surface
+  end
+  properties (Dependent, Access = public)
+    diag2
+  end
+  methods
+    function obj = BoxStats(w, h, d)
+      obj.w = w;
+      obj.h = h;
+      obj.d = d;
+    end
+    function v = get.volume(obj)
+      v = obj.w * obj.h * obj.d;
+    end
+    function s = get.surface(obj)
+      s = 2 * (obj.w*obj.h + obj.w*obj.d + obj.h*obj.d);
+    end
+    function s = get.diag2(obj)
+      s = obj.w*obj.w + obj.h*obj.h + obj.d*obj.d;
+    end
+  end
+end
+
+classdef SumDep
+  % A getter that calls another instance method on `obj`.
+  properties
+    a
+    b
+  end
+  properties (Dependent)
+    total
+  end
+  methods
+    function obj = SumDep(a, b)
+      obj.a = a;
+      obj.b = b;
+    end
+    function s = computeSum(obj)
+      s = obj.a + obj.b;
+    end
+    function s = get.total(obj)
+      s = obj.computeSum();
+    end
+  end
+end
+
+classdef ReadOnlyDep
+  % A Dependent property without a setter. Reads route through the
+  % getter; writes to it would error (not exercised here — the test
+  % only writes to the underlying storage field).
+  properties
+    raw
+  end
+  properties (Dependent, SetAccess = private)
+    square
+  end
+  methods
+    function obj = ReadOnlyDep(x)
+      obj.raw = x;
+    end
+    function y = get.square(obj)
+      y = obj.raw * obj.raw;
     end
   end
 end

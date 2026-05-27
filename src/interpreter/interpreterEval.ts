@@ -338,7 +338,10 @@ export function evalExpr(this: Interpreter, e: Expr): RuntimeValue {
 
     case "Member": {
       // `s.f` — struct / class field read. Walks the runtime object
-      // via the field name. Errors out for non-object bases.
+      // via the field name. Errors out for non-object bases. When the
+      // base is a class instance and the class declares a `get.<f>`
+      // accessor, route the read through it (matches numbl's
+      // `getMember` in `runtimeMemberAccess.ts`).
       const base = this.evalExpr(e.base);
       if (
         typeof base !== "object" ||
@@ -352,6 +355,20 @@ export function evalExpr(this: Interpreter, e: Expr): RuntimeValue {
         );
       }
       const o = base as Record<string, RuntimeValue>;
+      const tag = (base as { mtoc2Class?: string }).mtoc2Class;
+      if (tag !== undefined && this.workspace !== undefined) {
+        const reg = this.workspace.classes.get(tag);
+        const getter = reg?.getters.get(e.name);
+        if (getter !== undefined) {
+          return this.callUserFunction(
+            getter,
+            [base],
+            1,
+            e.span,
+            getter.span.file
+          )[0];
+        }
+      }
       if (!(e.name in o)) {
         throw new UnsupportedConstruct(
           `interpreter: struct has no field '${e.name}'`,

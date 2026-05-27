@@ -74,11 +74,26 @@ export interface ClassRegistration {
    *  `pendingProperties` is non-empty. */
   constructor: FuncStmt | null;
   /** Instance methods, keyed by source name. The constructor is NOT
-   *  included here. */
+   *  included here. Accessors (`get.X` / `set.X`) live in `getters`
+   *  / `setters` and are NOT in this map. */
   methods: Map<string, FuncStmt>;
   /** Static methods, keyed by source name. Called as
    *  `ClassName.method(args)` — the receiver is not passed. */
   staticMethods: Map<string, FuncStmt>;
+  /** `Dependent` properties — no per-instance storage. Reads route
+   *  through `getters.get(name)`; writes route through
+   *  `setters.get(name)` if a setter exists. Disjoint from
+   *  `pendingProperties` and `defaults`; included in `propertyNames`
+   *  for name-collision checks. */
+  dependentProperties: Set<string>;
+  /** Property getters declared as `function val = get.X(obj)`.
+   *  Keyed by the property name (without the `get.` prefix). v1
+   *  requires the property to be `Dependent`. */
+  getters: Map<string, FuncStmt>;
+  /** Property setters declared as `function obj = set.X(obj, val)`.
+   *  Keyed by the property name (without the `set.` prefix). v1
+   *  requires the property to be `Dependent`. */
+  setters: Map<string, FuncStmt>;
 }
 
 /** Validate one `classdef` AST and infer its property types. Throws
@@ -119,6 +134,9 @@ export function registerClassDef(
   const pendingProperties = new Set<string>();
   const methods = new Map<string, FuncStmt>();
   const staticMethods = new Map<string, FuncStmt>();
+  const dependentProperties = new Set<string>();
+  const getters = new Map<string, FuncStmt>();
+  const setters = new Map<string, FuncStmt>();
   let constructor: FuncStmt | null = null;
 
   for (const m of s.members) {
@@ -127,10 +145,10 @@ export function registerClassDef(
         // Property-block attributes. mtoc2 doesn't enforce visibility,
         // so `Access` / `GetAccess` / `SetAccess` / `Hidden` are
         // accepted silently — matches numbl, which ignores them in
-        // `extractClassInfo`. `Dependent` is a real semantic feature
-        // (no storage; reads/writes route through `get.X` / `set.X`)
-        // and lands in phase B; reject explicitly until then with a
-        // pointer to the plan. Everything else is rejected by name.
+        // `extractClassInfo`. `Dependent` strips per-instance storage
+        // and routes reads/writes through `get.X` / `set.X` accessor
+        // methods. Everything else is rejected by name.
+        let isDependent = false;
         for (const attr of m.attributes) {
           const lower = attr.name.toLowerCase();
           if (
@@ -142,11 +160,14 @@ export function registerClassDef(
             continue;
           }
           if (lower === "dependent") {
-            throw new UnsupportedConstruct(
-              `'properties(Dependent, ...)' is not yet supported ` +
-                `(planned in docs/property_attributes_plan.md phase B)`,
-              s.span
-            );
+            if (attr.value === null || attr.value === "true") {
+              isDependent = true;
+              continue;
+            }
+            // `Dependent = false` is legal but does nothing.
+            if (attr.value === "false") {
+              continue;
+            }
           }
           throw new UnsupportedConstruct(
             `'properties' block attribute '${attr.name}' is not supported in v1`,
@@ -167,6 +188,20 @@ export function registerClassDef(
             );
           }
           propertyNames.push(name);
+          if (isDependent) {
+            // Dependent properties have no per-instance storage. A
+            // default value would be meaningless (the getter computes
+            // the value); reject so the user can fix the source.
+            if (def !== null) {
+              throw new UnsupportedConstruct(
+                `dependent property '${name}' on class '${s.name}' ` +
+                  `cannot have a default value`,
+                s.span
+              );
+            }
+            dependentProperties.add(name);
+            continue;
+          }
           if (def === null) {
             // No default. Type will be inferred at first constructor
             // specialization from the first `obj.<name> = <rhs>` write
@@ -216,11 +251,61 @@ export function registerClassDef(
               stmt.span
             );
           }
+          // Property accessor methods (`get.X` / `set.X`). Validated
+          // here so a bad accessor surfaces at classdef-registration
+          // time rather than at the first call site. The property X
+          // must be declared in some `properties(...)` block of this
+          // class. v1 only routes through accessors when the property
+          // is `Dependent` — accessors on storage-backed properties
+          // are rejected (deferred until a real use case surfaces).
           if (stmt.name.startsWith("get.") || stmt.name.startsWith("set.")) {
-            throw new UnsupportedConstruct(
-              `get/set accessor methods are not supported in v1`,
-              stmt.span
-            );
+            if (isStatic) {
+              throw new UnsupportedConstruct(
+                `accessor '${stmt.name}' cannot be declared in a 'methods (Static)' block`,
+                stmt.span
+              );
+            }
+            const isGet = stmt.name.startsWith("get.");
+            const propName = stmt.name.slice(4);
+            const kind = isGet ? "getter" : "setter";
+            if (!propertyNames.includes(propName)) {
+              throw new UnsupportedConstruct(
+                `${kind} '${stmt.name}' on class '${s.name}': ` +
+                  `'${propName}' is not a declared property`,
+                stmt.span
+              );
+            }
+            if (!dependentProperties.has(propName)) {
+              throw new UnsupportedConstruct(
+                `${kind} '${stmt.name}' on class '${s.name}': ` +
+                  `accessors on non-Dependent properties are not supported in v1`,
+                stmt.span
+              );
+            }
+            if (stmt.outputs.length !== 1) {
+              throw new UnsupportedConstruct(
+                `${kind} '${stmt.name}' must declare exactly one output`,
+                stmt.span
+              );
+            }
+            const expectedParams = isGet ? 1 : 2;
+            if (stmt.params.length !== expectedParams) {
+              throw new UnsupportedConstruct(
+                `${kind} '${stmt.name}' must take ${expectedParams} ` +
+                  `parameter${expectedParams === 1 ? "" : "s"} ` +
+                  `(${isGet ? "obj" : "obj, val"}), got ${stmt.params.length}`,
+                stmt.span
+              );
+            }
+            const target = isGet ? getters : setters;
+            if (target.has(propName)) {
+              throw new UnsupportedConstruct(
+                `duplicate ${kind} for property '${propName}' on class '${s.name}'`,
+                stmt.span
+              );
+            }
+            target.set(propName, stmt);
+            continue;
           }
           if (stmt.outputs.length > 1) {
             throw new UnsupportedConstruct(
@@ -287,12 +372,14 @@ export function registerClassDef(
 
   // External method files (`@ClassName/<methodName>.m`). Same validation
   // as in-body instance methods — the source location just lives in a
-  // different file.
+  // different file. Accessor methods (`get.X` / `set.X`) are not
+  // permitted in external method files (MATLAB itself disallows this).
   if (externalMethods) {
     for (const [methodName, stmt] of externalMethods) {
       if (stmt.name.startsWith("get.") || stmt.name.startsWith("set.")) {
         throw new UnsupportedConstruct(
-          `get/set accessor methods are not supported in v1`,
+          `accessor method '${stmt.name}' cannot be declared in an external method file; ` +
+            `accessors must live in the classdef`,
           stmt.span
         );
       }
@@ -340,6 +427,18 @@ export function registerClassDef(
       s.span
     );
   }
+  // Every dependent property must have a getter — without one it is
+  // unreadable. (`set.X` remains optional; write-only is uncommon and
+  // chunker has read-only dependents like `k` / `dim`.)
+  for (const name of dependentProperties) {
+    if (!getters.has(name)) {
+      throw new UnsupportedConstruct(
+        `dependent property '${name}' on class '${s.name}' has no getter; ` +
+          `declare a 'function val = get.${name}(obj)' method`,
+        s.span
+      );
+    }
+  }
   return {
     className: s.name,
     file,
@@ -350,6 +449,9 @@ export function registerClassDef(
     constructor,
     methods,
     staticMethods,
+    dependentProperties,
+    getters,
+    setters,
   };
 }
 

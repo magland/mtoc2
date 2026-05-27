@@ -62,6 +62,7 @@ import {
   isVoid,
   isOwned,
   fieldType,
+  classMethodSpecSource,
   shapeNumel,
   typeToString,
   VOID,
@@ -111,6 +112,7 @@ import { lowerCellIndexLoad, lowerCellIndexStore } from "./lowerCellIndex.js";
 import { lowerMultiAssign } from "./lowerMultiAssign.js";
 import { lowerAnonFunc, lowerFuncHandle } from "./lowerHandle.js";
 import { lowerMethodCall } from "./lowerMethodCall.js";
+import { buildUserFunctionCall } from "./specialize.js";
 import { lowerFuncCall } from "./lowerFuncCall.js";
 import { lowerIndexStore } from "./lowerIndexStore.js";
 import { lowerIndexSliceStore } from "./lowerIndexSliceStore.js";
@@ -892,6 +894,67 @@ export class Lowerer {
       );
     }
 
+    // Dependent-property routing: single-level `obj.X = rhs` where the
+    // class declares a `set.X` setter rewrites to
+    // `obj = set.X(obj, rhs)` — a method call returning self. The
+    // existing call machinery handles ANF, env update, and ownership
+    // bookkeeping (same shape as `obj = obj.method(args)`).
+    if (fieldPath.length === 1 && rootEntry.ty.kind === "Class") {
+      const reg = this.classReg(rootEntry.ty.className);
+      const propName = fieldPath[0];
+      const setter = reg?.setters.get(propName);
+      if (setter !== undefined && reg !== undefined) {
+        const rhsRaw = this.lowerExpr(s.expr);
+        this.requireValueType(
+          rhsRaw,
+          `assignment to '${rootName}.${propName}'`
+        );
+        const baseVar: IRExpr = {
+          kind: "Var",
+          name: rootName,
+          cName: rootEntry.cName,
+          ty: rootEntry.ty,
+          span: s.span,
+        };
+        const callExpr = buildUserFunctionCall.call(
+          this,
+          setter,
+          [baseVar, rhsRaw],
+          `${rootEntry.ty.className}.set.${propName}`,
+          s.span,
+          {
+            specSource: classMethodSpecSource(
+              rootEntry.ty.className,
+              `set.${propName}`
+            ),
+            definingFile: setter.span.file ?? reg.file,
+          }
+        );
+        // ANF the call's children the same way `lowerAssign` does — the
+        // call is owned-producing and lands at a direct consume site
+        // (the receiver assignment), so we recurse through children
+        // only.
+        const hoists: IRStmt[] = [];
+        const lhsOwned = isOwned(callExpr.ty);
+        const rhsOwnedDirectProducer = lhsOwned && callExpr.kind !== "Var";
+        const newExpr = rhsOwnedDirectProducer
+          ? this.anfChildren(callExpr, hoists)
+          : this.anfRequireScalarOrVar(callExpr, hoists);
+        const main = this.recordAssignment(rootName, newExpr, s.span);
+        return hoists.length === 0 ? main : [...hoists, main];
+      }
+      // Dependent property with no setter is read-only at the language
+      // level. Flag it early — otherwise `fieldType` returns undefined
+      // and the user sees the generic "no such field" message.
+      if (reg?.dependentProperties.has(propName)) {
+        throw new UnsupportedConstruct(
+          `dependent property '${rootEntry.ty.className}.${propName}' ` +
+            `has no setter; cannot assign`,
+          s.span
+        );
+      }
+    }
+
     // Walk the field path, checking that each step exists. Track the
     // leaf type the rhs is going to overwrite.
     let stepTy: Type = rootEntry.ty;
@@ -1473,10 +1536,36 @@ export class Lowerer {
 
   /** `s.f` or chained `s.inner.f`. Lowers each nesting level into a
    *  fresh `MemberLoad` whose `base` is the inner load. The leaf
-   *  type is the field's static type on the immediate container. */
+   *  type is the field's static type on the immediate container.
+   *
+   *  Dependent-property routing: when `base` is a class instance and
+   *  the class declares a `get.<name>` accessor, the read is replaced
+   *  by a single-output method call. The result is an owned `Call`
+   *  IRExpr; ANF in the surrounding context hoists it like any other
+   *  owned producer. */
   private lowerMember(e: Extract<Expr, { type: "Member" }>): IRExpr {
     const base = this.lowerExpr(e.base);
     this.requireValueType(base, `field access '.${e.name}'`);
+    if (base.ty.kind === "Class") {
+      const reg = this.classReg(base.ty.className);
+      const getter = reg?.getters.get(e.name);
+      if (getter !== undefined && reg !== undefined) {
+        return buildUserFunctionCall.call(
+          this,
+          getter,
+          [base],
+          `${base.ty.className}.get.${e.name}`,
+          e.span,
+          {
+            specSource: classMethodSpecSource(
+              base.ty.className,
+              `get.${e.name}`
+            ),
+            definingFile: getter.span.file ?? reg.file,
+          }
+        );
+      }
+    }
     const ft = fieldType(base.ty, e.name);
     if (ft === undefined) {
       throw new TypeError(

@@ -155,6 +155,13 @@ export function resolveClassType(
   const props: { name: string; ty: Type }[] = [];
   try {
     for (const propName of reg.propertyNames) {
+      // Dependent properties have no storage — they are not
+      // materialized as ClassType fields. Reads route through
+      // `get.<prop>`, writes through `set.<prop>`. Skip the
+      // default/first-write inference path for them entirely.
+      if (reg.dependentProperties.has(propName)) {
+        continue;
+      }
       const def = reg.defaults.get(propName);
       if (def !== undefined) {
         // Default-having property: use the type already inferred at
