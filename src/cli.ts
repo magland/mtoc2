@@ -625,7 +625,13 @@ async function runInterpreter(
     }).runProgram(remainingBody);
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
-    console.error(`interpreter: ${msg}`);
+    if (e instanceof UnsupportedConstruct && e.span) {
+      const where =
+        e.span.start !== undefined ? ` (offset ${e.span.start})` : "";
+      console.error(`${e.span.file ?? "interpreter"}: ${msg}${where}`);
+    } else {
+      console.error(`interpreter: ${msg}`);
+    }
     process.exit(1);
   }
 }

@@ -397,7 +397,31 @@ export function assignLValue(
     if (lv.base.type === "Ident") {
       baseName = lv.base.name;
       const existing = this.env.get(baseName);
-      if (existing === undefined || !isTensor(existing)) {
+      if (existing === undefined) {
+        throw new UnsupportedConstruct(
+          `interpreter: indexed assignment requires '${baseName}' to be ` +
+            `an already-bound tensor`
+        );
+      }
+      let tensorBase: RuntimeTensor;
+      if (isTensor(existing)) {
+        tensorBase = existing;
+      } else if (
+        typeof existing === "number" ||
+        typeof existing === "boolean"
+      ) {
+        // Scalar-stored value (mtoc2 collapses 1×1 results from
+        // `zeros(1,1)`, arithmetic, etc. to bare numbers at runtime).
+        // Promote to a 1×1 tensor before the indexed write; numbl's
+        // value-tagging never collapses scalars so an indexed write
+        // like `a(1) = 5` works uniformly there.
+        tensorBase = makeTensor(
+          [1, 1],
+          new Float64Array([
+            typeof existing === "number" ? existing : existing ? 1 : 0,
+          ])
+        );
+      } else {
         throw new UnsupportedConstruct(
           `interpreter: indexed assignment requires '${baseName}' to be ` +
             `an already-bound tensor`
@@ -405,7 +429,7 @@ export function assignLValue(
       }
       // MATLAB pass-by-value: clone unconditionally before writing
       // (numbl's COW-on-shared behavior, worst case).
-      baseVal = cloneTensorForWrite(existing);
+      baseVal = cloneTensorForWrite(tensorBase);
       this.env.set(baseName, baseVal);
       writeBack = (): void => {
         /* nothing extra — env already updated */
@@ -928,6 +952,41 @@ export function expandRangeCellLvaluesInterpreter(
   if (lv.type !== "IndexCell") return lvalues.slice();
   if (lv.indices.length !== 1) return lvalues.slice();
   const idx = lv.indices[0];
+  // `[out{:}] = call(...)` — colon on a cell means "all slots,
+  // column-major". The cell must already exist in env so we can
+  // read its shape and emit one IndexCell lvalue per slot.
+  if (idx.type === "Colon") {
+    if (lv.base.type !== "Ident") {
+      throw new UnsupportedConstruct(
+        `interpreter: multi-assign LHS '[<cell>{:}]' requires a ` +
+          `bare-Ident cell base (got '${lv.base.type}')`,
+        idx.span
+      );
+    }
+    const cellVal = this.env.get(lv.base.name);
+    if (
+      !cellVal ||
+      typeof cellVal !== "object" ||
+      (cellVal as { mtoc2Tag?: string }).mtoc2Tag !== "cell"
+    ) {
+      throw new UnsupportedConstruct(
+        `interpreter: multi-assign LHS '[${lv.base.name}{:}]': ` +
+          `'${lv.base.name}' is not a cell in scope`,
+        idx.span
+      );
+    }
+    const shape = (cellVal as { shape: number[] }).shape;
+    const total = shape.reduce((a, b) => a * b, 1);
+    const out: LValue[] = [];
+    for (let k = 1; k <= total; k++) {
+      out.push({
+        type: "IndexCell",
+        base: lv.base,
+        indices: [{ type: "Number", value: String(k), span: idx.span }],
+      });
+    }
+    return out;
+  }
   if (idx.type !== "Range") return lvalues.slice();
   const start = Math.floor(Number(this.evalExpr(idx.start) as number));
   const end = Math.floor(Number(this.evalExpr(idx.end) as number));

@@ -41,6 +41,12 @@ export function mtoc2_disp_tensor(t) {
   let total = 1;
   for (const s of t.shape) total *= s;
   if (total <= 0) return;
+  // 1-element tensors print as bare scalars (no column-aligned
+  // indent) — matches numbl's `runtime/display.ts:128` special case.
+  if (total === 1) {
+    $write(mtoc2_format_double(t.data[0]) + "\n");
+    return;
+  }
 
   const pageSize = rows * cols;
   let numPages = 1;

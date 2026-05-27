@@ -963,7 +963,25 @@ export function reductionCall(spec: {
         }
         return [cx];
       }
-      const v = typeof args[0] === "number" ? args[0] : Number(args[0]);
+      // Scalar-typed input may arrive as a plain number, a boolean,
+      // or a 1×1 RuntimeTensor (the interpreter doesn't strip the
+      // tensor wrapper just because the static type is scalar — a
+      // value like `c = b(2:end)` keeps its 1×1 tensor shape at
+      // runtime). Unwrap each shape carefully; `Number(tensor)`
+      // would yield NaN.
+      const raw = args[0];
+      let v: number;
+      if (typeof raw === "number") v = raw;
+      else if (typeof raw === "boolean") v = raw ? 1 : 0;
+      else if (
+        raw !== null &&
+        typeof raw === "object" &&
+        (raw as { mtoc2Tag?: string }).mtoc2Tag === "tensor"
+      ) {
+        v = (raw as { data: { [k: number]: number } }).data[0];
+      } else {
+        v = Number(raw);
+      }
       if (spec.outputElem === "logical") return [v !== 0 ? 1 : 0];
       return [v];
     }

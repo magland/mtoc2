@@ -84,6 +84,16 @@ static void mtoc2_disp_tensor(mtoc2_tensor_t t) {
      * surface forms (string cast, struct field display). */
     return;
   }
+  /* 1-element tensor prints as a bare scalar (no column-aligned
+   * indent) — matches numbl's `display.ts:128` special case and the
+   * JS sibling's `disp_tensor.js`. */
+  if (total == 1) {
+    char buf[32];
+    mtoc2_format_double(buf, sizeof(buf), t.real[0]);
+    fputs(buf, stdout);
+    putchar('\n');
+    return;
+  }
   long page_size = rows * cols;
   long num_pages = 1;
   for (int i = 2; i < t.ndim; i++) num_pages *= t.dims[i];

@@ -278,16 +278,20 @@ export function callHandle(
     return this.callByName(h.name, args, nargout, span);
   }
   // Anonymous: bind params + captures in a child env. The body is a
-  // single expression, so any multi-output request beyond 1 truncates
-  // to a single value (matches numbl: `[a,b] = (@(x) x+1)(3)` would
-  // assign `4` to `a` and leave `b` unset/unused; mtoc2 simply
-  // returns the single value).
+  // single expression, so the function can produce exactly one
+  // output. A multi-output request (`[a, b] = (@(x) x+1)(3)`)
+  // throws a `RuntimeError` matching numbl's
+  // `runtime/runtimeAnonymous.ts` — chunkie's `try [r,d,d2] = fcurve(ta)`
+  // pattern relies on this throw landing in the surrounding catch.
   if (args.length !== h.params.length) {
     throw new UnsupportedConstruct(
       `interpreter: anonymous handle expects ${h.params.length} arg(s) ` +
         `(got ${args.length})`,
       span
     );
+  }
+  if (nargout > 1) {
+    throw new RuntimeError("Too many output arguments.", span);
   }
   const child = new Environment();
   for (const [k, v] of Object.entries(h.captures)) child.set(k, v);

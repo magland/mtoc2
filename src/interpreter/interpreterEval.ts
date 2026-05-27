@@ -180,6 +180,28 @@ export function evalExpr(this: Interpreter, e: Expr): RuntimeValue {
       if (envVal !== undefined && isTensor(envVal)) {
         return this.indexTensor(envVal, e.args, e.span);
       }
+      if (
+        envVal !== undefined &&
+        (typeof envVal === "number" || typeof envVal === "boolean")
+      ) {
+        // Scalar variable being indexed: `s(:)`, `s(1)`, `s(1:1)` etc.
+        // Numbl returns the scalar value back (a 1×1 array is a
+        // scalar in MATLAB). Wrap as a 1×1 tensor, route through the
+        // unified tensor-indexing path, then collapse a 1-element
+        // tensor result back to a plain number so disp / downstream
+        // arithmetic prints byte-for-byte the same as numbl.
+        const wrapped = makeTensor(
+          [1, 1],
+          new Float64Array([
+            typeof envVal === "number" ? envVal : envVal ? 1 : 0,
+          ])
+        );
+        const result = this.indexTensor(wrapped, e.args, e.span);
+        if (isTensor(result) && result.data.length === 1) {
+          return result.data[0];
+        }
+        return result;
+      }
       if (envVal !== undefined && isHandleValue(envVal)) {
         const argVals = e.args.map(a => this.evalExpr(a));
         const out = this.callHandle(envVal, argVals, 1, e.span);
