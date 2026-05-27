@@ -10,8 +10,12 @@ import {
   cellTypedefName,
   classTypedefName,
   handleTypedefName,
+  isCell,
   isHandle,
   isMultiElement,
+  isNumeric,
+  isScalar,
+  isScalarRealNumeric,
   structTypedefName,
   type Type,
 } from "../lowering/types.js";
@@ -134,6 +138,56 @@ export function requireOwnedHelpers(t: Type): OwnedHelpers {
     throw new Error(`requireOwnedHelpers: non-owned type ${t.kind}`);
   }
   return h;
+}
+
+/** C expression that disps one value of type `t`, including the
+ *  trailing newline that matches numbl's `disp` contract. Activates
+ *  any runtime snippets the chosen helper needs via `useRuntime`.
+ *  Returns `null` when no disp helper exists for the type (Class /
+ *  Handle / Void / Unknown — call sites decide whether to skip or
+ *  raise). Single dispatch shared by the `disp` builtin's `emitC`
+ *  and the per-field disp inside struct typedefs, so the two can't
+ *  drift apart when a new value kind becomes a valid struct field. */
+export function emitDispCallC(
+  t: Type,
+  valueC: string,
+  useRuntime: (name: string) => void
+): string | null {
+  if (t.kind === "Struct") {
+    return `${structTypedefName(t)}_disp(${valueC})`;
+  }
+  if (isCell(t)) {
+    // The cell typedef's `_disp` renders `{e1, e2, ...}` without a
+    // trailing newline; pair it with an explicit `printf("\n")` via
+    // a comma expression so the value form has the same statement
+    // shape as the other helpers (one expression, prints + newline).
+    return `(${cellTypedefName(t)}_disp(${valueC}), printf("\\n"))`;
+  }
+  if (t.kind === "String") {
+    useRuntime("mtoc2_disp_text");
+    return `mtoc2_disp_text(mtoc2_text_from_string(${valueC}))`;
+  }
+  if (t.kind === "Char") {
+    useRuntime("mtoc2_disp_text");
+    return `mtoc2_disp_text(mtoc2_text_from_char_tensor(${valueC}))`;
+  }
+  if (isNumeric(t) && t.isComplex && isScalar(t)) {
+    useRuntime("mtoc2_disp_complex");
+    return `mtoc2_disp_complex(${valueC})`;
+  }
+  if (isNumeric(t) && t.isComplex && !isScalar(t)) {
+    useRuntime("mtoc2_disp_tensor_complex");
+    return `mtoc2_disp_tensor_complex(${valueC})`;
+  }
+  if (isNumeric(t) && !isScalarRealNumeric(t)) {
+    useRuntime("mtoc2_disp_tensor");
+    return `mtoc2_disp_tensor(${valueC})`;
+  }
+  if (isScalarRealNumeric(t)) {
+    useRuntime("mtoc2_disp_double");
+    return `mtoc2_disp_double(${valueC})`;
+  }
+  return null;
 }
 
 /** Format a JS number as a C double literal that round-trips. Single

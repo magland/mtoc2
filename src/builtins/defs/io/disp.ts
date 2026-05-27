@@ -1,12 +1,11 @@
 import { TypeError, UnsupportedConstruct } from "../../../lowering/errors.js";
+import { emitDispCallC } from "../../../codegen/cHelpers.js";
 import {
-  cellTypedefName,
   isCell,
   isScalarRealNumeric,
   isNumeric,
   isScalar,
   isText,
-  structTypedefName,
 } from "../../../lowering/types.js";
 import type { Builtin } from "../../registry.js";
 import { isChar, isComplexValue, isTensor } from "../../../runtime/value.js";
@@ -62,38 +61,18 @@ export const disp: Builtin = {
     );
   },
   emitC({ argsC, argTypes, useRuntime }) {
-    useRuntime("mtoc2_disp_double");
-    useRuntime("mtoc2_disp_tensor");
-    useRuntime("mtoc2_disp_text");
-    useRuntime("mtoc2_disp_complex");
-    useRuntime("mtoc2_disp_tensor_complex");
     const t = argTypes[0];
-    if (t.kind === "Struct") {
-      return `${structTypedefName(t)}_disp(${argsC[0]})`;
+    const call = emitDispCallC(t, argsC[0], useRuntime);
+    if (call === null) {
+      // `transfer` already vetted the kinds disp accepts, so a null
+      // here means a new accepted kind was added to `transfer`
+      // without a paired emit dispatch — fail loud rather than
+      // emitting a stray `0` and confusing the C compiler.
+      throw new UnsupportedConstruct(
+        `internal: 'disp' has no c-aot emit for type '${t.kind}'`
+      );
     }
-    if (isCell(t)) {
-      // The per-shape cell typedef's `_disp` helper renders the
-      // numbl-format `{e1, e2, ...}`. Numbl's `disp` appends a
-      // trailing newline; we add it explicitly here so the helper
-      // stays inline-renderable from nested contexts (cell-of-cell).
-      return `(${cellTypedefName(t)}_disp(${argsC[0]}), printf("\\n"))`;
-    }
-    if (t.kind === "String") {
-      return `mtoc2_disp_text(mtoc2_text_from_string(${argsC[0]}))`;
-    }
-    if (t.kind === "Char") {
-      return `mtoc2_disp_text(mtoc2_text_from_char_tensor(${argsC[0]}))`;
-    }
-    if (isNumeric(t) && t.isComplex && isScalar(t)) {
-      return `mtoc2_disp_complex(${argsC[0]})`;
-    }
-    if (isNumeric(t) && t.isComplex && !isScalar(t)) {
-      return `mtoc2_disp_tensor_complex(${argsC[0]})`;
-    }
-    if (isNumeric(t) && !isScalarRealNumeric(t)) {
-      return `mtoc2_disp_tensor(${argsC[0]})`;
-    }
-    return `mtoc2_disp_double(${argsC[0]})`;
+    return call;
   },
   emitJs({ argsJs, argTypes, useRuntime }) {
     const t = argTypes[0];

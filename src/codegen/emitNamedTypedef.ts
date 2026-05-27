@@ -27,14 +27,13 @@
 import {
   classTypedefName,
   handleTypedefName,
-  isMultiElement,
   structTypedefName,
   type ClassType,
   type HandleType,
   type StructType,
   type Type,
 } from "../lowering/types.js";
-import { cTypeFor, ownedHelpersFor } from "./cHelpers.js";
+import { cTypeFor, emitDispCallC, ownedHelpersFor } from "./cHelpers.js";
 import { useRuntimeByName, type RuntimeState } from "./runtime.js";
 
 export interface NamedTypedefSpec {
@@ -188,41 +187,45 @@ function emitStructDisp(spec: NamedTypedefSpec, state: RuntimeState): string[] {
   // where the value is rendered the same way `disp(value)` would on
   // its own — so for a tensor the row data follows the colon on the
   // same line (with the tensor's leading whitespace intact) and
-  // subsequent rows wrap to their own lines.
+  // subsequent rows wrap to their own lines. We share the per-value
+  // dispatch with the `disp` builtin via `emitDispCallC` so a new
+  // field kind only has to land in one place.
+  const useRt = (name: string) => useRuntimeByName(state, name);
   for (const f of spec.fields) {
+    if (f.ty.kind === "Class") {
+      // Class / handle disp not supported in v1; emit nothing rather
+      // than failing — lowering rejects `disp(class_instance)` /
+      // `disp(handle)` up front so this path is unreachable for
+      // well-formed input.
+      lines.push(`  /* skipping class-typed field '${f.name}' in disp */`);
+      continue;
+    }
+    if (f.ty.kind === "Handle") {
+      lines.push(`  /* skipping handle-typed field '${f.name}' in disp */`);
+      continue;
+    }
     lines.push(`  printf("    ${f.name}: ");`);
-    if (isMultiElement(f.ty)) {
-      useRuntimeByName(state, "mtoc2_disp_tensor");
-      lines.push(`  mtoc2_disp_tensor(v.${f.name});`);
-    } else if (f.ty.kind === "Struct") {
-      const inner = structTypedefName(f.ty);
+    if (f.ty.kind === "Struct") {
       // A nested struct's own _disp emits its own header/leading
       // newline; numbl prints a blank then the nested fields.
       lines.push(`  printf("\\n");`);
-      lines.push(`  ${inner}_disp(v.${f.name});`);
-    } else if (f.ty.kind === "Class") {
-      // Class field disp not supported in v1; emit nothing rather
-      // than failing — lowering rejects disp(class_instance) up
-      // front, so this path is unreachable for well-formed input.
-      lines.push(`  /* skipping class-typed field '${f.name}' in disp */`);
-    } else if (f.ty.kind === "Handle") {
-      // Handle-field disp not supported; lowering rejects
-      // disp(handle) up front so this path is unreachable for
-      // well-formed input.
-      lines.push(`  /* skipping handle-typed field '${f.name}' in disp */`);
-    } else if (f.ty.kind === "String") {
-      useRuntimeByName(state, "mtoc2_disp_text");
-      lines.push(`  mtoc2_disp_text(mtoc2_text_from_string(v.${f.name}));`);
-    } else if (f.ty.kind === "Char") {
-      useRuntimeByName(state, "mtoc2_disp_text");
-      lines.push(
-        `  mtoc2_disp_text(mtoc2_text_from_char_tensor(v.${f.name}));`
-      );
-    } else {
-      // Scalar real numeric. Use the existing scalar disp helper.
-      useRuntimeByName(state, "mtoc2_disp_double");
-      lines.push(`  mtoc2_disp_double(v.${f.name});`);
+      lines.push(`  ${structTypedefName(f.ty)}_disp(v.${f.name});`);
+      continue;
     }
+    const call = emitDispCallC(f.ty, `v.${f.name}`, useRt);
+    if (call === null) {
+      // Defensive: lowering accepts any non-Void / non-Unknown
+      // value as a struct field, so a null here means a new owned
+      // kind was added to the type lattice without a paired disp
+      // dispatch. Emit a placeholder comment to keep the C valid;
+      // user-visible disp output is a separate concern from the
+      // typedef compiling.
+      lines.push(
+        `  /* skipping ${f.ty.kind}-typed field '${f.name}' in disp */`
+      );
+      continue;
+    }
+    lines.push(`  ${call};`);
   }
   lines.push(`}`);
   lines.push("");
