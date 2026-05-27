@@ -287,6 +287,63 @@ export function assignLValue(
     return;
   }
   if (lv.type === "Ignore") return;
+  if (lv.type === "IndexCell") {
+    // `c{i} = rhs` / `c{i, j} = rhs` — brace write into a cell.
+    // Bare-Ident base only (member-rooted is rejected at lowering
+    // and we mirror that here).
+    if (lv.base.type !== "Ident") {
+      throw new UnsupportedConstruct(
+        `interpreter: cell brace assignment supports a bare cell variable ` +
+          `as the base; member-rooted forms are not yet supported`,
+        lv.base.span
+      );
+    }
+    const cellVal = this.env.get(lv.base.name);
+    if (
+      cellVal === undefined ||
+      cellVal === null ||
+      typeof cellVal !== "object" ||
+      (cellVal as { mtoc2Tag?: string }).mtoc2Tag !== "cell"
+    ) {
+      throw new UnsupportedConstruct(
+        `interpreter: '${lv.base.name}' is not a cell; brace assignment ` +
+          `'c{...} = rhs' requires a cell value`,
+        lv.base.span
+      );
+    }
+    const cell = cellVal as unknown as {
+      mtoc2Tag: "cell";
+      shape: number[];
+      data: RuntimeValue[];
+    };
+    const idxs = lv.indices.map(ix => {
+      const idxV = this.evalExpr(ix);
+      return Math.floor(Number(idxV as number));
+    });
+    let off: number;
+    if (idxs.length === 1) {
+      off = idxs[0] - 1;
+    } else if (idxs.length === 2) {
+      const rows = cell.shape[0] ?? 1;
+      off = (idxs[1] - 1) * rows + (idxs[0] - 1);
+    } else {
+      throw new UnsupportedConstruct(
+        `interpreter: cell brace assignment supports 1 or 2 indices ` +
+          `(got ${idxs.length})`,
+        lv.base.span
+      );
+    }
+    if (off < 0 || off >= cell.data.length) {
+      throw new UnsupportedConstruct(
+        `interpreter: cell brace index out of bounds`,
+        lv.base.span
+      );
+    }
+    cell.data[off] = v;
+    if (!suppressed)
+      this.autoDisp(lv.base.name, cell as unknown as RuntimeValue);
+    return;
+  }
   if (lv.type === "Index") {
     // Indexed-write paths supported:
     //   - all-scalar slots: `v(i) = x`, `M(i,j) = x` — scalar RHS,

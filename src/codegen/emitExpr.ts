@@ -27,6 +27,7 @@ import { requireEmitC } from "../builtins/registry.js";
 import { cStringLiteral, dimsProductExpr } from "./cFormat.js";
 import { emitTensorConcat } from "./emitTensorConcat.js";
 import { emitIndexSliceProducer, emitNdScalarOffset } from "./emitIndex.js";
+import { cellLinearOffsetExpr, tryStaticCellOffset } from "./emitStmt.js";
 import { activateOwnedRuntime, activatedOwnedHelpers } from "./emit.js";
 
 /** Owned-typed RHS for an Assign or MemberStore (or a Call arg that
@@ -58,6 +59,13 @@ export function emitOwnedRhs(e: IRExpr, state: RuntimeState): string {
   if (e.kind === "HandleCaptureLoad" && isOwned(e.ty)) {
     const h = activatedOwnedHelpers(e.ty, state);
     return `${h.copy}(${e.base.cName}.cap_${e.captureName})`;
+  }
+  if (e.kind === "CellIndexLoad" && isOwned(e.ty)) {
+    // Alias read of an existing slot — wrap in the slot type's
+    // `_copy` so the consumer gets a freshly-owned value (same
+    // protocol as MemberLoad).
+    const h = activatedOwnedHelpers(e.ty, state);
+    return `${h.copy}(${emitExpr(e, state)})`;
   }
   return emitExpr(e, state);
 }
@@ -168,6 +176,8 @@ export function emitExpr(e: IRExpr, state: RuntimeState): string {
       return emitCellLitC(e, state);
     case "CellEmpty":
       return emitCellEmptyC(e, state);
+    case "CellIndexLoad":
+      return emitCellIndexLoadC(e, state);
     case "Var":
       // Tensor Var reads pass the struct by value; downstream context
       // (Assign RHS, user-function call) wraps in copy where needed.
@@ -405,5 +415,72 @@ function emitCellEmptyC(
     `for (size_t _i = 0; _i < _v.nslots; _i++) _v.slots[_i] = ${elemEmpty}; ` +
     `} ` +
     `_v; })`
+  );
+}
+
+/** Emit a `CellIndexLoad` expression — `c{i}` / `c{i, j}` read.
+ *
+ *  Tuple mode + every index a NumLit (static fast path): direct
+ *  field access on `slot_<offset>`.
+ *  Tuple mode + non-exact index: GCC statement-expression with a
+ *  switch over the slot index. Requires all slot types to share a
+ *  C-level representation (the lowerer enforces this at lowering).
+ *  Uniform mode: `base.slots[<offset>]` with a runtime bounds check.
+ *
+ *  The result is the slot value by value — the caller wraps in
+ *  `_copy` (via `emitOwnedRhs`) when consuming into an owned slot. */
+function emitCellIndexLoadC(
+  e: Extract<IRExpr, { kind: "CellIndexLoad" }>,
+  state: RuntimeState
+): string {
+  if (e.base.kind !== "Var") {
+    throw new Error(
+      `emit internal: CellIndexLoad base must be a Var after ANF (got ${e.base.kind})`
+    );
+  }
+  if (e.base.ty.kind !== "Cell") {
+    throw new Error(
+      `emit: CellIndexLoad base ty is ${e.base.ty.kind}, expected Cell`
+    );
+  }
+  const baseTy = e.base.ty;
+  const baseCName = e.base.cName;
+
+  if (baseTy.mode === "uniform") {
+    const offsetExpr = cellLinearOffsetExpr(
+      e.indices,
+      baseTy,
+      baseCName,
+      state
+    );
+    return (
+      `({ size_t _mtoc2_off = ${offsetExpr}; ` +
+      `if (_mtoc2_off >= ${baseCName}.nslots) { ` +
+      `fprintf(stderr, "mtoc2: cell index out of bounds\\n"); exit(1); } ` +
+      `${baseCName}.slots[_mtoc2_off]; })`
+    );
+  }
+
+  const staticOff = tryStaticCellOffset(e.indices, baseTy);
+  if (staticOff !== null) {
+    return `${baseCName}.slot_${staticOff}`;
+  }
+
+  // Dynamic-index path on a tuple. All slot types share the same C
+  // representation. Emit a switch over slot index.
+  const elements = baseTy.elements!;
+  const offsetExpr = cellLinearOffsetExpr(e.indices, baseTy, baseCName, state);
+  const slotCType = cTypeFor(e.ty);
+  const branches: string[] = [];
+  for (let i = 0; i < elements.length; i++) {
+    branches.push(`case ${i}: _mtoc2_v = ${baseCName}.slot_${i}; break;`);
+  }
+  return (
+    `({ size_t _mtoc2_off = ${offsetExpr}; ` +
+    `${slotCType} _mtoc2_v; ` +
+    `switch (_mtoc2_off) { ` +
+    branches.join(" ") +
+    ` default: fprintf(stderr, "mtoc2: cell index out of bounds\\n"); exit(1); } ` +
+    `_mtoc2_v; })`
   );
 }

@@ -383,6 +383,26 @@ function emitStmt(s: IRStmt, indent: string, state: RuntimeState): string {
 
     case "IndexSliceStore":
       return emitIndexSliceStoreJs(s, indent, state);
+
+    case "CellIndexStore": {
+      // `c{i} = rhs` / `c{i, j} = rhs`. The cell's `data` is a JS
+      // array; we compute the column-major linear offset (1-based →
+      // 0-based) and store the rhs. Owned aliases are deep-cloned
+      // by `emitOwnedRhsJs` so the cell owns its copy.
+      const baseName = s.base.cName;
+      const idxs = s.indices.map(ix => emitExpr(ix, state));
+      let offset: string;
+      if (idxs.length === 1) {
+        offset = `(${idxs[0]} - 1)`;
+      } else {
+        const rowsExpr = `${baseName}.shape[0]`;
+        offset = `((${idxs[1]} - 1) * ${rowsExpr} + (${idxs[0]} - 1))`;
+      }
+      const rhs = isOwned(s.rhs.ty)
+        ? emitOwnedRhsJs(s.rhs, state)
+        : emitExpr(s.rhs, state);
+      return `${indent}${baseName}.data[${offset}] = ${rhs};`;
+    }
   }
 }
 
@@ -851,6 +871,22 @@ function emitExpr(e: IRExpr, state: RuntimeState): string {
       useRuntimeByName(state, "mtoc2_cell_empty");
       const dimsJs = e.dims.map(d => emitExpr(d, state)).join(", ");
       return `mtoc2_cell_empty([${dimsJs}])`;
+    }
+
+    case "CellIndexLoad": {
+      // `c{i}` / `c{i, j}` — column-major linear offset into
+      // `base.data`. Indices are 1-based in source; offset by -1.
+      if (e.base.kind !== "Var") {
+        throw new Error(
+          `emitJs internal: CellIndexLoad base must be a Var (got ${e.base.kind})`
+        );
+      }
+      const baseName = e.base.cName;
+      const idxs = e.indices.map(ix => emitExpr(ix, state));
+      if (idxs.length === 1) {
+        return `${baseName}.data[(${idxs[0]}) - 1]`;
+      }
+      return `${baseName}.data[((${idxs[1]}) - 1) * ${baseName}.shape[0] + ((${idxs[0]}) - 1)]`;
     }
 
     case "IndexSlice":

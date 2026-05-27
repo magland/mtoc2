@@ -422,6 +422,8 @@ function emitStmt(
     }
     case "IndexSliceStore":
       return emitIndexSliceStore(s, indent, state);
+    case "CellIndexStore":
+      return emitCellIndexStore(s, indent, state);
     case "If": {
       const lines: string[] = [];
       lines.push(`${indent}if (${emitCondToBoolExpr(s.cond, state)}) {`);
@@ -612,4 +614,161 @@ function emitStmt(
       return out.join("\n");
     }
   }
+}
+
+/** Emit a `CellIndexStore` — `c{i} = rhs` or `c{i, j} = rhs`.
+ *
+ *  Tuple mode with every index exact: target the specific
+ *  `slot_<i>` field directly. The slot's static type matches the
+ *  rhs's type (the lowerer enforced this), so we use the slot's
+ *  owned helpers if the rhs is owned.
+ *
+ *  Tuple mode with a non-exact index: emit a `switch (offset)` over
+ *  every slot. Each branch uses its own owned helpers; the lowerer
+ *  has already validated that every slot type unifies with the rhs
+ *  type (otherwise the cell would have demoted to uniform).
+ *
+ *  Uniform mode: target `base.slots[<offset>]` with a runtime
+ *  bounds check. The slot type is the cell's `elem` type. */
+function emitCellIndexStore(
+  s: Extract<IRStmt, { kind: "CellIndexStore" }>,
+  indent: string,
+  state: RuntimeState
+): string {
+  if (s.base.ty.kind !== "Cell") {
+    throw new Error(
+      `emit: CellIndexStore base ty is ${s.base.ty.kind}, expected Cell`
+    );
+  }
+  const baseTy = s.base.ty;
+  const baseCName = s.base.cName;
+  // Resolve a linear offset from `indices`. For a 1-arg index it's
+  // just the value (1-based, converted to 0-based). For 2-arg the
+  // column-major formula `(j-1)*rows + (i-1)`. The lowerer has
+  // already validated index arity.
+  const offsetExpr = cellLinearOffsetExpr(s.indices, baseTy, baseCName, state);
+
+  if (baseTy.mode === "uniform") {
+    const elem = baseTy.elem!;
+    const lines: string[] = [];
+    lines.push(`${indent}{`);
+    lines.push(`${indent}  size_t _mtoc2_off = ${offsetExpr};`);
+    lines.push(`${indent}  if (_mtoc2_off >= ${baseCName}.nslots) {`);
+    lines.push(
+      `${indent}    fprintf(stderr, "mtoc2: cell index out of bounds\\n");`
+    );
+    lines.push(`${indent}    exit(1);`);
+    lines.push(`${indent}  }`);
+    if (isOwned(elem)) {
+      const h = activatedOwnedHelpers(elem, state);
+      const rhs = emitOwnedRhs(s.rhs, state);
+      lines.push(
+        `${indent}  ${h.assign}(&${baseCName}.slots[_mtoc2_off], ${rhs});`
+      );
+    } else {
+      const rhs = emitExpr(s.rhs, state);
+      lines.push(`${indent}  ${baseCName}.slots[_mtoc2_off] = ${rhs};`);
+    }
+    lines.push(`${indent}}`);
+    return lines.join("\n");
+  }
+
+  // Tuple mode.
+  const elements = baseTy.elements!;
+  // Try the static-index fast path: every index is a NumLit.
+  const staticOff = tryStaticCellOffset(s.indices, baseTy);
+  if (staticOff !== null) {
+    const slotTy = elements[staticOff];
+    const slotName = `${baseCName}.slot_${staticOff}`;
+    if (isOwned(slotTy)) {
+      const h = activatedOwnedHelpers(slotTy, state);
+      const rhs = emitOwnedRhs(s.rhs, state);
+      return `${indent}${h.assign}(&${slotName}, ${rhs});`;
+    }
+    const rhs = emitExpr(s.rhs, state);
+    return `${indent}${slotName} = ${rhs};`;
+  }
+
+  // Dynamic-index path: switch over slot index. Requires all slot
+  // types unify (lowerer already enforced).
+  const lines: string[] = [];
+  lines.push(`${indent}{`);
+  lines.push(`${indent}  size_t _mtoc2_off = ${offsetExpr};`);
+  lines.push(`${indent}  switch (_mtoc2_off) {`);
+  for (let i = 0; i < elements.length; i++) {
+    lines.push(`${indent}    case ${i}: {`);
+    if (isOwned(elements[i])) {
+      const h = activatedOwnedHelpers(elements[i], state);
+      const rhs = emitOwnedRhs(s.rhs, state);
+      lines.push(
+        `${indent}      ${h.assign}(&${baseCName}.slot_${i}, ${rhs});`
+      );
+    } else {
+      const rhs = emitExpr(s.rhs, state);
+      lines.push(`${indent}      ${baseCName}.slot_${i} = ${rhs};`);
+    }
+    lines.push(`${indent}      break;`);
+    lines.push(`${indent}    }`);
+  }
+  lines.push(
+    `${indent}    default: fprintf(stderr, "mtoc2: cell index out of bounds\\n"); exit(1);`
+  );
+  lines.push(`${indent}  }`);
+  lines.push(`${indent}}`);
+  return lines.join("\n");
+}
+
+/** Compute a column-major linear offset expression from cell-brace
+ *  indices. The base's shape supplies the row count for the 2-D
+ *  formula. Indices are 1-based in source; we subtract 1 to land
+ *  in C's 0-based slot/buffer array. */
+export function cellLinearOffsetExpr(
+  indices: ReadonlyArray<IRExpr>,
+  baseTy: Extract<Type, { kind: "Cell" }>,
+  baseCName: string,
+  state: RuntimeState
+): string {
+  if (indices.length === 1) {
+    return `(size_t)((long)(${emitExpr(indices[0], state)}) - 1)`;
+  }
+  // For 2-D, need the row count. Tuple cells know it statically;
+  // uniform cells read `base.dims[0]` at runtime.
+  const rowsExpr =
+    baseTy.shape !== undefined
+      ? String(baseTy.shape[0])
+      : `(long)${baseCName}.dims[0]`;
+  const i0 = emitExpr(indices[0], state);
+  const i1 = emitExpr(indices[1], state);
+  return `(size_t)(((long)(${i1}) - 1) * ${rowsExpr} + ((long)(${i0}) - 1))`;
+}
+
+/** Try to compute a static slot offset from a tuple cell's indices.
+ *  Returns `null` if any index isn't a NumLit. */
+export function tryStaticCellOffset(
+  indices: ReadonlyArray<IRExpr>,
+  baseTy: Extract<Type, { kind: "Cell" }>
+): number | null {
+  if (baseTy.mode !== "tuple") return null;
+  const shape = baseTy.shape;
+  if (shape === undefined) return null;
+  if (indices.length === 1) {
+    if (indices[0].kind !== "NumLit") return null;
+    const v = indices[0].value;
+    if (!Number.isInteger(v) || v < 1) return null;
+    const off = v - 1;
+    if (off >= (baseTy.elements ?? []).length) return null;
+    return off;
+  }
+  if (indices.length === 2) {
+    if (indices[0].kind !== "NumLit") return null;
+    if (indices[1].kind !== "NumLit") return null;
+    const i = indices[0].value - 1;
+    const j = indices[1].value - 1;
+    if (i < 0 || j < 0) return null;
+    const rows = shape[0];
+    const cols = shape[1] ?? 1;
+    if (i >= rows || j >= cols) return null;
+    return j * rows + i;
+  }
+  return null;
 }

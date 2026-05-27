@@ -107,6 +107,7 @@ import { exactComplex } from "../builtins/defs/_shared.js";
 import { isSliceArg } from "./indexResolve.js";
 import { lowerTensorLit } from "./lowerTensorLit.js";
 import { lowerCellLit } from "./lowerCellLit.js";
+import { lowerCellIndexLoad, lowerCellIndexStore } from "./lowerCellIndex.js";
 import { lowerMultiAssign } from "./lowerMultiAssign.js";
 import { lowerAnonFunc, lowerFuncHandle } from "./lowerHandle.js";
 import { lowerMethodCall } from "./lowerMethodCall.js";
@@ -598,6 +599,12 @@ export class Lowerer {
           ...e,
           dims: e.dims.map(d => this.anfRequireScalarOrVar(d, hoists)),
         };
+      case "CellIndexLoad":
+        return {
+          ...e,
+          base: this.anfRequireScalarOrVar(e.base, hoists),
+          indices: e.indices.map(i => this.anfRequireScalarOrVar(i, hoists)),
+        };
       case "Binary":
         return {
           ...e,
@@ -781,6 +788,9 @@ export class Lowerer {
     s: Extract<Stmt, { type: "AssignLValue" }>
   ): IRStmt | IRStmt[] {
     const lv = s.lvalue;
+    if (lv.type === "IndexCell") {
+      return lowerCellIndexStore.call(this, lv, s.expr, s.span);
+    }
     if (lv.type === "Index") {
       const result = lv.indices.some(isSliceArg)
         ? lowerIndexSliceStore.call(this, lv, s.expr, s.span)
@@ -1223,12 +1233,7 @@ export class Lowerer {
       case "Cell":
         return lowerCellLit.call(this, e);
       case "IndexCell":
-        // Phase A: lifecycle + literals only. Brace read/write lands
-        // in phase B.
-        throw new UnsupportedConstruct(
-          `cell indexing 'c{...}' not yet supported`,
-          e.span
-        );
+        return lowerCellIndexLoad.call(this, e);
       case "FuncHandle":
         return lowerFuncHandle.call(this, e);
       case "AnonFunc":

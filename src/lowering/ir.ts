@@ -332,6 +332,23 @@ export interface CellEmpty {
   span: Span;
 }
 
+/** Brace-indexed cell read: `c{i}`, `c{i, j}`, `c{linear}`. Yields
+ *  the slot's value (no cell-wrapping). `base` is always a `Var`
+ *  after ANF; `indices` is one expr per source-level subscript
+ *  (1-D linear access or per-axis). `ty` is the static slot type:
+ *  - Tuple mode + every index exact → the specific slot's `Type`.
+ *  - Tuple mode + at least one non-exact → the unified slot type
+ *    (the lowerer rejects with `UnsupportedConstruct` if not all
+ *    slots unify).
+ *  - Uniform mode → the cell's `elem` type. */
+export interface CellIndexLoad {
+  kind: "CellIndexLoad";
+  base: IRExpr;
+  indices: IRExpr[];
+  ty: Type;
+  span: Span;
+}
+
 /** Range used as a value (outside index slots and for-loop bounds).
  *  Emits a freshly-allocated `1×N` row tensor at runtime via
  *  `mtoc2_tensor_make_range`. Owned producer; ANFs. The `step` may
@@ -355,6 +372,7 @@ export type IRExpr =
   | TensorConcat
   | CellLit
   | CellEmpty
+  | CellIndexLoad
   | Var
   | Binary
   | Unary
@@ -532,6 +550,25 @@ export interface IndexStore {
   span: Span;
 }
 
+/** Brace-indexed cell write: `c{i} = rhs`, `c{i, j} = rhs`. The
+ *  cell takes ownership of `rhs`; codegen wraps owned aliases in
+ *  `_copy` per the standard owned-consume rule (ANF guarantees
+ *  fresh producers / Var reads for the rhs).
+ *
+ *  Tuple-mode + every index exact: codegen targets the specific
+ *  `slot_<i>` field directly. Tuple-mode + non-exact index falls
+ *  back to a runtime switch over the slot index. Uniform-mode
+ *  writes through `base.slots[<offset>]` with a runtime bounds
+ *  check (no auto-grow; mtoc2 rejects out-of-bounds writes —
+ *  see docs/cells_plan.md). */
+export interface CellIndexStore {
+  kind: "CellIndexStore";
+  base: Var;
+  indices: IRExpr[];
+  rhs: IRExpr;
+  span: Span;
+}
+
 /** Range / colon / scalar-mix slice write. Same arity rules as
  *  `IndexSlice`. RHS is either a scalar (broadcast into every slot)
  *  or a `Var` reading a named tensor (per-slot copy). Mutates the
@@ -562,7 +599,8 @@ export type IRStmt =
   | MemberStore
   | MultiAssignCall
   | IndexStore
-  | IndexSliceStore;
+  | IndexSliceStore
+  | CellIndexStore;
 
 // ── Functions ───────────────────────────────────────────────────────────
 

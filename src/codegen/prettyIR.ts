@@ -134,6 +134,8 @@ function irExprToString(e: IRExpr): string {
     }
     case "CellEmpty":
       return `cell(${e.dims.map(irExprToString).join(", ")})`;
+    case "CellIndexLoad":
+      return `${irExprToString(e.base)}{${e.indices.map(irExprToString).join(", ")}}`;
     case "HandleLit":
       if (e.ty.kind === "Handle") {
         if (e.captures.length === 0) return `@${e.ty.targetName}`;
@@ -226,6 +228,9 @@ export function irStmtHeader(s: IRStmt): string | null {
           ? [s.base.name, ...s.fieldPath].join(".")
           : s.base.name;
       return `${lhs}(${s.indices.map(irExprToString).join(", ")}) = ${irExprToString(s.rhs)}`;
+    }
+    case "CellIndexStore": {
+      return `${s.base.name}{${s.indices.map(irExprToString).join(", ")}} = ${irExprToString(s.rhs)}`;
     }
     case "IndexSliceStore": {
       const lhs =

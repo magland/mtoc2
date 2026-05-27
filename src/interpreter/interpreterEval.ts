@@ -511,7 +511,51 @@ export function evalExpr(this: Interpreter, e: Expr): RuntimeValue {
       } as unknown as RuntimeValue;
     }
 
-    case "IndexCell":
+    case "IndexCell": {
+      // `c{i}` / `c{i, j}` — brace read. Mirrors numbl's `indexCell`
+      // (runtime/runtimeIndexing.ts:388): 1-based scalar indices,
+      // column-major flat addressing into the cell's `data` array.
+      const baseV = this.evalExpr(e.base);
+      if (
+        !baseV ||
+        typeof baseV !== "object" ||
+        (baseV as { mtoc2Tag?: string }).mtoc2Tag !== "cell"
+      ) {
+        throw new UnsupportedConstruct(
+          `interpreter: brace indexing 'c{...}' requires a cell value`,
+          e.span
+        );
+      }
+      const cell = baseV as unknown as {
+        mtoc2Tag: "cell";
+        shape: number[];
+        data: RuntimeValue[];
+      };
+      const idxs = e.indices.map(ix => {
+        const v = this.evalExpr(ix);
+        return Math.floor(Number(v as number));
+      });
+      let off: number;
+      if (idxs.length === 1) {
+        off = idxs[0] - 1;
+      } else if (idxs.length === 2) {
+        const rows = cell.shape[0] ?? 1;
+        off = (idxs[1] - 1) * rows + (idxs[0] - 1);
+      } else {
+        throw new UnsupportedConstruct(
+          `interpreter: cell brace indexing supports 1 or 2 indices ` +
+            `(got ${idxs.length})`,
+          e.span
+        );
+      }
+      if (off < 0 || off >= cell.data.length) {
+        throw new UnsupportedConstruct(
+          `interpreter: cell brace index out of bounds`,
+          e.span
+        );
+      }
+      return cell.data[off];
+    }
     case "MemberDynamic":
     case "SuperMethodCall":
     case "ClassInstantiation":

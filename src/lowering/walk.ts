@@ -33,6 +33,10 @@ export function forEachSubExpr(e: IRExpr, visit: (sub: IRExpr) => void): void {
     case "CellEmpty":
       for (const d of e.dims) forEachSubExpr(d, visit);
       return;
+    case "CellIndexLoad":
+      forEachSubExpr(e.base, visit);
+      for (const i of e.indices) forEachSubExpr(i, visit);
+      return;
     case "Binary":
       forEachSubExpr(e.left, visit);
       forEachSubExpr(e.right, visit);
@@ -126,6 +130,11 @@ export function forEachTopLevelExpr(
       for (const a of s.args) visit(a);
       return;
     case "IndexStore":
+      visit(s.base);
+      for (const i of s.indices) visit(i);
+      visit(s.rhs);
+      return;
+    case "CellIndexStore":
       visit(s.base);
       for (const i of s.indices) visit(i);
       visit(s.rhs);
