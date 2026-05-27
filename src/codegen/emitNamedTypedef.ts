@@ -58,16 +58,18 @@ export function emitNamedTypedef(
   spec: NamedTypedefSpec,
   state: RuntimeState
 ): string {
-  // Pull in field-level runtime helpers. Each owned tensor field
-  // pulls the four tensor helpers. Nested struct/class fields don't
-  // need runtime activation here — their helpers are program-emitted
-  // and ordered by the typedef topological sort.
+  // Pull in field-level runtime helpers. Owned fields whose helpers
+  // live in the runtime snippet registry (tensor / string / char)
+  // activate all four; nested struct/class/handle/cell fields don't
+  // need runtime activation — their helpers are program-emitted and
+  // ordered by the typedef topological sort.
   for (const f of spec.fields) {
-    if (isMultiElement(f.ty)) {
-      useRuntimeByName(state, "mtoc2_tensor_empty");
-      useRuntimeByName(state, "mtoc2_tensor_assign");
-      useRuntimeByName(state, "mtoc2_tensor_copy");
-      useRuntimeByName(state, "mtoc2_tensor_free");
+    const ops = ownedHelpersFor(f.ty);
+    if (ops !== null && ops.isRuntime) {
+      useRuntimeByName(state, ops.empty);
+      useRuntimeByName(state, ops.assign);
+      useRuntimeByName(state, ops.copy);
+      useRuntimeByName(state, ops.free);
     }
   }
 
@@ -208,6 +210,14 @@ function emitStructDisp(spec: NamedTypedefSpec, state: RuntimeState): string[] {
       // disp(handle) up front so this path is unreachable for
       // well-formed input.
       lines.push(`  /* skipping handle-typed field '${f.name}' in disp */`);
+    } else if (f.ty.kind === "String") {
+      useRuntimeByName(state, "mtoc2_disp_text");
+      lines.push(`  mtoc2_disp_text(mtoc2_text_from_string(v.${f.name}));`);
+    } else if (f.ty.kind === "Char") {
+      useRuntimeByName(state, "mtoc2_disp_text");
+      lines.push(
+        `  mtoc2_disp_text(mtoc2_text_from_char_tensor(v.${f.name}));`
+      );
     } else {
       // Scalar real numeric. Use the existing scalar disp helper.
       useRuntimeByName(state, "mtoc2_disp_double");
