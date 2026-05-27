@@ -466,6 +466,11 @@ const REGISTRY: ReadonlyMap<string, RuntimeSnippet> = new Map<
   // `isequal` over real numeric values. `_tt` (tensor vs tensor) and
   // `_st` (scalar vs tensor); scalar-vs-scalar is emitted inline.
   ["mtoc2_isequal", loadSnippet("isequal.h", ["mtoc2_tensor_t"])],
+  // Real-tensor → logical-tensor predicates (`isnan`, `logical`).
+  [
+    "mtoc2_tensor_predicate",
+    loadSnippet("tensor_predicate.h", ["mtoc2_tensor_t", "mtoc2_alloc"]),
+  ],
   // `besselh(nu, 1, x)` for nu in {0, 1} via POSIX `j0/j1/y0/y1`.
   // One snippet defines both scalar and tensor entry points; the
   // builtin dispatches via the exact value of `nu`.

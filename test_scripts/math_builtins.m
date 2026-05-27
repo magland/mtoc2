@@ -30,6 +30,10 @@ test_dot_vector();
 test_dot_scalar();
 test_dot_matrix();
 test_dot_runtime();
+test_isnan_scalar();
+test_isnan_tensor();
+test_logical_scalar();
+test_logical_tensor();
 
 function test_scalar_exact_unary()
   % Trig
@@ -530,4 +534,35 @@ function test_dot_runtime()
   b = [5 4 3 2 1];
   %!numbl:opaque a b
   disp(dot(a, b));
+end
+
+function test_isnan_scalar()
+  disp(isnan(0/0));
+  disp(isnan(5));
+  x = 0/0;
+  %!numbl:opaque x
+  disp(isnan(x));
+end
+
+function test_isnan_tensor()
+  v = [1, 0/0, 3, 0/0] + 0;
+  disp(isnan(v));
+  disp(~isnan(v));        % fused negation
+  disp(any(isnan(v)));
+  disp(all(isnan(v)));
+end
+
+function test_logical_scalar()
+  disp(logical(5));
+  disp(logical(0));
+  disp(logical(-3));
+  x = 7;
+  %!numbl:opaque x
+  disp(logical(x));
+end
+
+function test_logical_tensor()
+  a = [0, 2, 0, -3] + 0;
+  disp(logical(a));
+  disp(sum(logical(a)));
 end

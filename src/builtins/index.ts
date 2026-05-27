@@ -95,6 +95,8 @@ import { trueBuiltin, falseBuiltin } from "./defs/logical/boolconst.js";
 import { isequal } from "./defs/logical/isequal.js";
 import { isreal } from "./defs/logical/isreal.js";
 import { isempty } from "./defs/logical/isempty.js";
+import { isnan } from "./defs/logical/isnan.js";
+import { logical } from "./defs/logical/logical.js";
 import { strcmp, strcmpi } from "./defs/logical/strcmp.js";
 import { plotBuiltins } from "./defs/plot/dispatch.js";
 
@@ -191,6 +193,8 @@ for (const b of [
   isequal,
   isreal,
   isempty,
+  isnan,
+  logical,
   strcmp,
   strcmpi,
 ]) {
