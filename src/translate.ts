@@ -18,9 +18,12 @@ import { SyntaxError as ParseSyntaxError } from "./parser/index.js";
 import { UnsupportedConstruct, TypeError } from "./lowering/errors.js";
 import { Lowerer } from "./lowering/lower.js";
 import { emitProgram } from "./codegen/emit.js";
+import { emitJsProgram } from "./codegen/emitJs.js";
+import { prettyIRProgram } from "./codegen/prettyIR.js";
 import { inlinePass } from "./codegen/inlinePass.js";
 import { Workspace, parseFiles } from "./workspace/workspace.js";
 import { extractDriverPrologue } from "./workspace/driverPrologue.js";
+import type { IRProgram } from "./lowering/ir.js";
 
 export interface SourceFile {
   /** File name used in error attribution. */
@@ -94,9 +97,121 @@ export function translateProject(
   opts: TranslateOptions = {}
 ): TranslateResult {
   const includeRuntime = opts.includeRuntime ?? true;
+  const lowered = lowerProject(files, activeName, opts);
+  if (!lowered.ok) return { error: lowered.error };
+  const { prog, workspace } = lowered;
+  try {
+    return {
+      c: emitProgram(prog, {
+        includeRuntime,
+        threads: opts.threads,
+        workspace,
+      }),
+      extraCSources: workspace.getUserCSources(),
+    };
+  } catch (e) {
+    if (e instanceof UnsupportedConstruct || e instanceof TypeError) {
+      return { error: normalizeLoweringError(e, activeName) };
+    }
+    throw e;
+  }
+}
+
+/** Backend the Internals tab is rendering for. Picked by the current
+ *  execution mode in the IDE: `c-aot` shows generated C, `js-aot`
+ *  shows generated JS, `interpreter` shows lowered IR (since the
+ *  interpreter walks the AST and has no codegen artifact). */
+export type InternalsTarget = "c-aot" | "js-aot" | "interpreter";
+
+export interface InternalsTranslateResult {
+  source?: string;
+  /** Monaco language id for syntax highlighting. */
+  language: "c" | "javascript" | "plaintext";
+  /** Toolbar label shown in the Internals tab. */
+  label: string;
+  /** True when the active target has runtime helpers that the
+   *  Internals tab's "runtime helpers" toggle can hide. */
+  supportsRuntimeToggle: boolean;
+  error?: TranslateError;
+}
+
+export function translateForInternals(
+  files: SourceFile[],
+  activeName: string,
+  target: InternalsTarget,
+  opts: TranslateOptions = {}
+): InternalsTranslateResult {
+  const includeRuntime = opts.includeRuntime ?? true;
+  const meta = internalsMeta(target);
+  const lowered = lowerProject(files, activeName, opts);
+  if (!lowered.ok) return { ...meta, error: lowered.error };
+  const { prog, workspace } = lowered;
+  try {
+    if (target === "c-aot") {
+      return {
+        ...meta,
+        source: emitProgram(prog, {
+          includeRuntime,
+          threads: opts.threads,
+          workspace,
+        }),
+      };
+    }
+    if (target === "js-aot") {
+      return {
+        ...meta,
+        source: emitJsProgram(prog, { workspace, includeRuntime }).source,
+      };
+    }
+    return { ...meta, source: prettyIRProgram(prog) };
+  } catch (e) {
+    if (e instanceof UnsupportedConstruct || e instanceof TypeError) {
+      return { ...meta, error: normalizeLoweringError(e, activeName) };
+    }
+    throw e;
+  }
+}
+
+function internalsMeta(target: InternalsTarget): {
+  language: "c" | "javascript" | "plaintext";
+  label: string;
+  supportsRuntimeToggle: boolean;
+} {
+  switch (target) {
+    case "c-aot":
+      return {
+        language: "c",
+        label: "GENERATED C",
+        supportsRuntimeToggle: true,
+      };
+    case "js-aot":
+      return {
+        language: "javascript",
+        label: "GENERATED JS",
+        supportsRuntimeToggle: true,
+      };
+    case "interpreter":
+      return {
+        language: "plaintext",
+        label: "LOWERED IR",
+        supportsRuntimeToggle: false,
+      };
+  }
+}
+
+type LowerResult =
+  | { ok: true; prog: IRProgram; workspace: Workspace }
+  | { ok: false; error: TranslateError };
+
+function lowerProject(
+  files: SourceFile[],
+  activeName: string,
+  opts: TranslateOptions
+): LowerResult {
   const active = files.find(f => f.name === activeName);
   if (!active) {
     return {
+      ok: false,
       error: {
         kind: "UnsupportedConstruct",
         message: `active file '${activeName}' is not in the project`,
@@ -114,13 +229,14 @@ export function translateProject(
     workspaceFiles = parseFiles(files, activeName);
   } catch (e) {
     if (e instanceof ParseSyntaxError) {
-      return { error: normalizeSyntaxError(e, files) };
+      return { ok: false, error: normalizeSyntaxError(e, files) };
     }
     throw e;
   }
   const activeWsFile = workspaceFiles.find(f => f.name === activeName);
   if (!activeWsFile?.ast) {
     return {
+      ok: false,
       error: {
         kind: "UnsupportedConstruct",
         message: `active file '${activeName}' produced no AST`,
@@ -141,28 +257,26 @@ export function translateProject(
     const driverAst = { ...activeWsFile.ast, body: remainingBody };
     const prog = lowerer.lowerProgram(driverAst);
     if (opts.enableTempInlining) inlinePass(prog);
-    return {
-      c: emitProgram(prog, {
-        includeRuntime,
-        threads: opts.threads,
-        workspace,
-      }),
-      extraCSources: workspace.getUserCSources(),
-    };
+    return { ok: true, prog, workspace };
   } catch (e) {
     if (e instanceof UnsupportedConstruct || e instanceof TypeError) {
-      return {
-        error: {
-          kind: e.name as "UnsupportedConstruct" | "TypeError",
-          message: e.message,
-          fileName: e.span?.file ?? activeName,
-          startOffset: e.span?.start,
-          endOffset: e.span?.end,
-        },
-      };
+      return { ok: false, error: normalizeLoweringError(e, activeName) };
     }
     throw e;
   }
+}
+
+function normalizeLoweringError(
+  e: UnsupportedConstruct | TypeError,
+  activeName: string
+): TranslateError {
+  return {
+    kind: e.name as "UnsupportedConstruct" | "TypeError",
+    message: e.message,
+    fileName: e.span?.file ?? activeName,
+    startOffset: e.span?.start,
+    endOffset: e.span?.end,
+  };
 }
 
 function normalizeSyntaxError(

@@ -2,14 +2,18 @@ import { useEffect, useRef, useState } from "react";
 import { useMonaco } from "@monaco-editor/react";
 import type { editor } from "monaco-editor";
 import {
-  translateProject,
+  translateForInternals,
+  type InternalsTarget,
   type SourceFile,
   type TranslateError,
 } from "../translate.js";
 import { offsetToLineCol } from "../parser/sourceLoc.js";
 
 interface UseTranslationResult {
-  c: string;
+  source: string;
+  language: "c" | "javascript" | "plaintext";
+  label: string;
+  supportsRuntimeToggle: boolean;
   error: TranslateError | null;
 }
 
@@ -20,32 +24,40 @@ export function useTranslation(
   files: SourceFile[],
   activeName: string,
   editorModel: editor.ITextModel | null,
+  target: InternalsTarget,
   includeRuntime: boolean = false,
   enableTempInlining: boolean = true
 ): UseTranslationResult {
-  const [c, setC] = useState<string>("");
+  const [source, setSource] = useState<string>("");
+  const [language, setLanguage] = useState<"c" | "javascript" | "plaintext">(
+    "c"
+  );
+  const [label, setLabel] = useState<string>("GENERATED C");
+  const [supportsRuntimeToggle, setSupportsRuntimeToggle] = useState(true);
   const [error, setError] = useState<TranslateError | null>(null);
   const monaco = useMonaco();
   const lastModelRef = useRef<editor.ITextModel | null>(null);
 
   useEffect(() => {
     const handle = window.setTimeout(() => {
-      const result = translateProject(files, activeName, {
+      const result = translateForInternals(files, activeName, target, {
         includeRuntime,
         enableTempInlining,
       });
+      setLanguage(result.language);
+      setLabel(result.label);
+      setSupportsRuntimeToggle(result.supportsRuntimeToggle);
       if (result.error) {
         setError(result.error);
-        // Keep the previously-good C source so the user can still see
-        // what the last successful translation produced. (No-op on first
-        // failure: setC("") would erase it; the existing state stays.)
+        // Keep the previously-good source so the user can still see
+        // what the last successful translation produced.
       } else {
         setError(null);
-        setC(result.c ?? "");
+        setSource(result.source ?? "");
       }
     }, DEBOUNCE_MS);
     return () => window.clearTimeout(handle);
-  }, [files, activeName, includeRuntime, enableTempInlining]);
+  }, [files, activeName, target, includeRuntime, enableTempInlining]);
 
   // Drive Monaco markers off of (error, editorModel, monaco).
   useEffect(() => {
@@ -72,10 +84,10 @@ export function useTranslation(
       return;
     }
 
-    const source = editorModel.getValue();
-    const start = offsetToLineCol(source, error.startOffset);
+    const sourceText = editorModel.getValue();
+    const start = offsetToLineCol(sourceText, error.startOffset);
     const end = offsetToLineCol(
-      source,
+      sourceText,
       Math.max(error.endOffset, error.startOffset + 1)
     );
     monaco.editor.setModelMarkers(editorModel, MARKER_OWNER, [
@@ -90,5 +102,5 @@ export function useTranslation(
     ]);
   }, [monaco, editorModel, error, activeName]);
 
-  return { c, error };
+  return { source, language, label, supportsRuntimeToggle, error };
 }

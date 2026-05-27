@@ -10,7 +10,12 @@ import Editor from "@monaco-editor/react";
 import type { TranslateError, SourceFile } from "../translate";
 
 interface CSourcePanelProps {
-  c: string;
+  source: string;
+  language: "c" | "javascript" | "plaintext";
+  label: string;
+  /** Whether the active target supports the "runtime helpers" toggle.
+   *  False for interpreter mode (lowered IR has no runtime helpers). */
+  supportsRuntimeToggle: boolean;
   error: TranslateError | null;
   /** Other (non-active) files in the project. Used to suggest "function
    *  defined in helpers.m — switch to that file" when the active file
@@ -57,7 +62,10 @@ function buildErrorMessage(
 }
 
 export function CSourcePanel({
-  c,
+  source,
+  language,
+  label,
+  supportsRuntimeToggle,
   error,
   otherFiles,
   activeName,
@@ -88,25 +96,27 @@ export function CSourcePanel({
           variant="caption"
           sx={{ fontWeight: 600, color: "text.secondary" }}
         >
-          GENERATED C
+          {label}
         </Typography>
-        <Tooltip title="Show runtime helpers inline.">
-          <FormControlLabel
-            sx={{ m: 0 }}
-            control={
-              <Switch
-                size="small"
-                checked={includeRuntime}
-                onChange={e => onIncludeRuntimeChange(e.target.checked)}
-              />
-            }
-            label={
-              <Typography variant="caption" color="text.secondary">
-                runtime helpers
-              </Typography>
-            }
-          />
-        </Tooltip>
+        {supportsRuntimeToggle && (
+          <Tooltip title="Show runtime helpers inline.">
+            <FormControlLabel
+              sx={{ m: 0 }}
+              control={
+                <Switch
+                  size="small"
+                  checked={includeRuntime}
+                  onChange={e => onIncludeRuntimeChange(e.target.checked)}
+                />
+              }
+              label={
+                <Typography variant="caption" color="text.secondary">
+                  runtime helpers
+                </Typography>
+              }
+            />
+          </Tooltip>
+        )}
       </Box>
       {error && (
         <Alert
@@ -126,8 +136,8 @@ export function CSourcePanel({
       <Box sx={{ flex: 1, minHeight: 0 }}>
         <Editor
           height="100%"
-          language="c"
-          value={c}
+          language={language}
+          value={source}
           options={{
             readOnly: true,
             minimap: { enabled: false },

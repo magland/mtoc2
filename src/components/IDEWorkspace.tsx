@@ -40,7 +40,7 @@ import {
   numblLanguageConfig,
   createNumblTokensProvider,
 } from "../monaco/numblLanguage";
-import type { SourceFile } from "../translate";
+import type { InternalsTarget, SourceFile } from "../translate";
 import type { WasmOptLevel } from "../utils/wasmExecution";
 import { DEFAULT_OPT_PROFILE, profileSettings } from "../optProfile";
 import { textEncoder } from "../utils/textCodec";
@@ -252,10 +252,23 @@ export function IDEWorkspace({ filesApi, header }: IDEWorkspaceProps) {
     [sourceFiles, active]
   );
 
-  const { c, error } = useTranslation(
+  const internalsTarget: InternalsTarget =
+    execMode === "wasm"
+      ? "c-aot"
+      : execMode === "js"
+        ? "js-aot"
+        : "interpreter";
+  const {
+    source: internalsSource,
+    language: internalsLanguage,
+    label: internalsLabel,
+    supportsRuntimeToggle,
+    error,
+  } = useTranslation(
     sourceFiles,
     active ?? "",
     editorModel,
+    internalsTarget,
     includeRuntime,
     enableTempInlining
   );
@@ -290,12 +303,12 @@ export function IDEWorkspace({ filesApi, header }: IDEWorkspaceProps) {
     : isRunning
       ? false
       : requiresTranslate
-        ? !!c && !error
+        ? !!internalsSource && !error
         : true;
   const runDisabledReason = !active
     ? "Open a file to run."
     : requiresTranslate
-      ? !c
+      ? !internalsSource
         ? "Nothing to run yet."
         : error
           ? "Fix translation errors before running."
@@ -436,7 +449,10 @@ export function IDEWorkspace({ filesApi, header }: IDEWorkspaceProps) {
         >
           <Box sx={{ flex: 1, minHeight: 0, position: "relative" }}>
             <CSourcePanel
-              c={c}
+              source={internalsSource}
+              language={internalsLanguage}
+              label={internalsLabel}
+              supportsRuntimeToggle={supportsRuntimeToggle}
               error={error}
               otherFiles={otherFiles}
               activeName={active ?? ""}
