@@ -159,7 +159,12 @@ export function specializeUserFunction(
   callSiteSpan?: Span
 ): IRFunc {
   const errSpan = callSiteSpan ?? decl.span;
-  if (argTypes.length !== decl.params.length) {
+  // Allow calling with FEWER arguments than declared (the standard
+  // MATLAB pattern: `function y = f(a, b); if nargin < 2; b = ...;`).
+  // The unfilled trailing params are left unbound in env; the body
+  // must initialize them before any read (typically via an
+  // `if nargin < N` arm). Calls with too MANY args still reject.
+  if (argTypes.length > decl.params.length) {
     throw new TypeError(
       `function '${decl.name}' expects ${decl.params.length} arg(s), got ${argTypes.length}`,
       errSpan
@@ -236,11 +241,17 @@ export function specializeUserFunction(
   const seedOutputs: Type[] = effectiveOutputs.map(
     (_, i) => argTypes[i] ?? UNKNOWN
   );
+  // The IR function's params reflect only the args actually passed
+  // — each spec compiles to its own C function whose signature
+  // matches the call site's arity. Trailing declared params are
+  // dropped here; the body's references to them must be gated by
+  // the `nargin < N` fold.
+  const effectiveParams = decl.params.slice(0, argTypes.length);
   const placeholder: IRFunc = {
     name: decl.name,
     cName: key,
-    params: decl.params.slice(),
-    cParams: decl.params.map(cIdentForUserName),
+    params: effectiveParams.slice(),
+    cParams: effectiveParams.map(cIdentForUserName),
     paramTypes: argTypes,
     outputs: effectiveOutputs.slice(),
     cOutputs: effectiveOutputs.map(cIdentForUserName),
@@ -270,10 +281,15 @@ export function specializeUserFunction(
   const lowerBodyOnce = (): { body: IRStmt[]; outputTypes: Type[] } => {
     this.env = new Map();
     this.tempCounter = 0;
-    // Bind params. The C name goes through `cIdentForUserName` so a
-    // user-source `function r = f(struct)` doesn't reference the C
-    // keyword `struct` for reads of `struct` inside the body.
-    for (let i = 0; i < decl.params.length; i++) {
+    // Bind params for the args that were actually passed. Trailing
+    // params remain unbound — references to them inside the body
+    // surface as "use of undefined variable" unless the body
+    // initializes them (typically inside an `if nargin < N` arm
+    // that the cond fold prunes for this specialization). The C name
+    // goes through `cIdentForUserName` so a user-source
+    // `function r = f(struct)` doesn't reference the C keyword
+    // `struct` for reads inside the body.
+    for (let i = 0; i < argTypes.length; i++) {
       const pName = decl.params[i];
       this.env.set(pName, {
         cName: cIdentForUserName(pName),

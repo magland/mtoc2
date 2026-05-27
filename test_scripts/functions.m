@@ -7,6 +7,10 @@ test_recursive_call();
 test_recursive_call_runtime_arg();
 test_recursive_call_in_loop();
 test_void_function_in_expr_stmt();
+test_fewer_args_nargin_then();
+test_fewer_args_nargin_else();
+test_fewer_args_zero();
+test_fewer_args_many();
 
 function test_func_if_fold_on_arg()
   % Regression: a user function whose `if` cond is a comparison on
@@ -136,4 +140,55 @@ end
 
 function shout(n)
   disp(n);
+end
+
+% -------- fewer-args calls (nargin-gated body) --------
+
+function test_fewer_args_nargin_then()
+  % `helper(a)` — only the `nargin < 2` arm runs. `b` is unbound in
+  % this spec; the body must never reach a read of `b`.
+  disp(fewerargs_h(2));
+end
+
+function test_fewer_args_nargin_else()
+  % Same function, both args supplied — the `else` arm runs.
+  disp(fewerargs_h(2, 99));
+end
+
+function y = fewerargs_h(a, b)
+  if nargin < 2
+    y = a + 10;
+  else
+    y = b;
+  end
+end
+
+function test_fewer_args_zero()
+  % Zero-arg call to a function that declares one param.
+  disp(fewerargs_zero());
+end
+
+function v = fewerargs_zero(x)
+  if nargin < 1
+    v = 42;
+  else
+    v = x;
+  end
+end
+
+function test_fewer_args_many()
+  % Four declared, varying nargin. Each spec drops the unbound
+  % param branches via the if-cond fold.
+  disp(fewerargs_many(5));
+  disp(fewerargs_many(5, 6));
+  disp(fewerargs_many(5, 6, 7));
+  disp(fewerargs_many(5, 6, 7, 8));
+end
+
+function s = fewerargs_many(a, b, c, d)
+  s = 0;
+  if nargin >= 1, s = s + a; end
+  if nargin >= 2, s = s + b; end
+  if nargin >= 3, s = s + c; end
+  if nargin >= 4, s = s + d; end
 end
