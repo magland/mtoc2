@@ -9,13 +9,14 @@
 
 import type { IRExpr } from "../lowering/ir.js";
 import {
+  cellTypedefName,
   classTypedefName,
   handleTypedefName,
   isNumeric,
   isOwned,
   structTypedefName,
 } from "../lowering/types.js";
-import { formatDouble } from "./cHelpers.js";
+import { cTypeFor, formatDouble, ownedHelpersFor } from "./cHelpers.js";
 import {
   lookupBuiltin,
   makeEmitUseRuntime,
@@ -163,6 +164,10 @@ export function emitExpr(e: IRExpr, state: RuntimeState): string {
     }
     case "TensorConcat":
       return emitTensorConcat(e, state);
+    case "CellLit":
+      return emitCellLitC(e, state);
+    case "CellEmpty":
+      return emitCellEmptyC(e, state);
     case "Var":
       // Tensor Var reads pass the struct by value; downstream context
       // (Assign RHS, user-function call) wraps in copy where needed.
@@ -324,4 +329,81 @@ function emitMakeRange(
   const stepStr = emitExpr(e.step, state);
   const endStr = emitExpr(e.end, state);
   return `mtoc2_tensor_make_range(${startStr}, ${stepStr}, ${endStr})`;
+}
+
+/** Emit a `CellLit` expression — tuple-mode cell literal. Each slot
+ *  value is owned-consumed (the cell owns its slots) so owned slot
+ *  reads route through `emitOwnedRhs` (Var → `_copy(v)`; other owned
+ *  forms are already fresh producers). The result is a C compound
+ *  literal that initialises every slot directly. */
+function emitCellLitC(
+  e: Extract<IRExpr, { kind: "CellLit" }>,
+  state: RuntimeState
+): string {
+  if (e.ty.kind !== "Cell") {
+    throw new Error(`emit: CellLit ty is ${e.ty.kind}, expected Cell`);
+  }
+  const typedef = cellTypedefName(e.ty);
+  // Activate this typedef's `_empty / _copy / _free / _assign` so any
+  // surrounding consumer can call them.
+  activateOwnedRuntime(e.ty, state);
+  if (e.elements.length === 0) {
+    // Empty literal: rely on the `_empty()` helper.
+    return `${typedef}_empty()`;
+  }
+  const parts: string[] = [];
+  for (let i = 0; i < e.elements.length; i++) {
+    const el = e.elements[i];
+    const v = isOwned(el.ty) ? emitOwnedRhs(el, state) : emitExpr(el, state);
+    parts.push(`.slot_${i} = ${v}`);
+  }
+  return `(${typedef}){${parts.join(", ")}}`;
+}
+
+/** Emit a `CellEmpty` expression — `cell(n, m, ...)` allocation.
+ *  Tuple mode: the typedef's `_empty()` already creates each slot with
+ *  the per-slot `_empty()` (an empty double tensor); just call it.
+ *  Uniform mode: build the descriptor inline via a GCC statement-
+ *  expression — set `ndim` / `dims` / `nslots`, malloc the slot buffer,
+ *  initialise each slot via the elem's `_empty()`. */
+function emitCellEmptyC(
+  e: Extract<IRExpr, { kind: "CellEmpty" }>,
+  state: RuntimeState
+): string {
+  if (e.ty.kind !== "Cell") {
+    throw new Error(`emit: CellEmpty ty is ${e.ty.kind}, expected Cell`);
+  }
+  const typedef = cellTypedefName(e.ty);
+  activateOwnedRuntime(e.ty, state);
+  if (e.ty.mode === "tuple") {
+    return `${typedef}_empty()`;
+  }
+  // Uniform mode: build the descriptor with the supplied dims.
+  const elem = e.ty.elem!;
+  const elemHelpers = ownedHelpersFor(elem);
+  if (elemHelpers !== null && elemHelpers.isRuntime) {
+    useRuntimeByName(state, elemHelpers.empty);
+  }
+  const elemCType = cTypeFor(elem);
+  // `cell(n)` → 1-arg form means n×n square; the lowerer already
+  // expanded it to two dim exprs sharing the same source value.
+  const dimExprs = e.dims.map(d => emitExpr(d, state));
+  // Emit one `_v.dims[i] = (size_t)(<exprI>);` line per axis. The
+  // helper computes `nslots` as the product. Up to MTOC2_MAX_NDIM = 8.
+  const ndim = dimExprs.length;
+  const setDims = dimExprs
+    .map((d, i) => `_v.dims[${i}] = (size_t)(${d});`)
+    .join(" ");
+  const nslotsExpr =
+    ndim === 0 ? "0" : dimExprs.map((_, i) => `_v.dims[${i}]`).join(" * ");
+  const elemEmpty = elemHelpers !== null ? `${elemHelpers.empty}()` : "0.0";
+  return (
+    `({ ${typedef} _v = ${typedef}_empty(); _v.ndim = ${ndim}; ${setDims} ` +
+    `_v.nslots = ${nslotsExpr}; ` +
+    `if (_v.nslots > 0) { ` +
+    `_v.slots = (${elemCType}*)malloc(sizeof(${elemCType}) * _v.nslots); ` +
+    `for (size_t _i = 0; _i < _v.nslots; _i++) _v.slots[_i] = ${elemEmpty}; ` +
+    `} ` +
+    `_v; })`
+  );
 }

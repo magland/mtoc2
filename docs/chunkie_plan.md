@@ -306,10 +306,11 @@ needed by later phases.
    (Group 3)
 
 5. **Cells (type-system feature class).** New owned-value kind.
-   Plan this one out in its own doc (à la `complex_plan.md`)
-   before starting. Scope to numbl's full cell semantics — read,
-   write, comma-list expansion, `iscell`, etc. — not only the
-   `out{1:nout}` slice in `chunkerfunc.m`. (Group 4)
+   Design is in [cells_plan.md](cells_plan.md): four-phase
+   landing with a tuple+uniform two-mode `CellType` (no LUB),
+   covering literals, brace read/write, and comma-list
+   expansion (both LHS and RHS). Paren-indexing on cells and
+   `cellfun` / `cell2mat` deferred. (Group 4)
 
 6. **`try` / `catch` (interpreter-only first, control-flow
    feature class).** Add an IR node for completeness, raise

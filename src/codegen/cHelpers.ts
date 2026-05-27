@@ -7,6 +7,7 @@
  */
 
 import {
+  cellTypedefName,
   classTypedefName,
   handleTypedefName,
   isHandle,
@@ -23,6 +24,7 @@ export function cTypeFor(t: Type): string {
   if (isHandle(t)) return handleTypedefName(t);
   if (t.kind === "Struct") return structTypedefName(t);
   if (t.kind === "Class") return classTypedefName(t);
+  if (t.kind === "Cell") return cellTypedefName(t);
   if (t.kind === "String") return "mtoc2_string_t";
   if (t.kind === "Char") return "mtoc2_char_tensor_t";
   if (t.kind === "Numeric" && t.isComplex) return "double _Complex";
@@ -101,6 +103,16 @@ export function ownedHelpersFor(t: Type): OwnedHelpers | null {
   }
   if (t.kind === "Handle") {
     const name = handleTypedefName(t);
+    return {
+      empty: `${name}_empty`,
+      assign: `${name}_assign`,
+      copy: `${name}_copy`,
+      free: `${name}_free`,
+      isRuntime: false,
+    };
+  }
+  if (t.kind === "Cell") {
+    const name = cellTypedefName(t);
     return {
       empty: `${name}_empty`,
       assign: `${name}_assign`,

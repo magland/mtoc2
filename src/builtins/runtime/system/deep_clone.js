@@ -32,6 +32,13 @@ export function mtoc2_deep_clone(v) {
   if (v.mtoc2Tag === "char") {
     return { mtoc2Tag: "char", value: v.value };
   }
+  if (v.mtoc2Tag === "cell") {
+    return {
+      mtoc2Tag: "cell",
+      shape: v.shape.slice(),
+      data: v.data.map(mtoc2_deep_clone),
+    };
+  }
   if (v.mtoc2Handle === true) {
     // Function handle — captures are deep-cloned so a later write
     // through one alias doesn't bleed into another handle's frozen

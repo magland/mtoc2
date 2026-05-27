@@ -7,6 +7,8 @@
  */
 
 import {
+  cellTuple,
+  cellUniform,
   EXACT_ARRAY_MAX_ELEMENTS,
   scalarDouble,
   scalarLogical,
@@ -62,6 +64,40 @@ export function inferTypeFromValue(v: RuntimeValue): Type {
     return scalarComplex({ re: v.re, im: v.im });
   }
   if (typeof v === "object" && v !== null) {
+    // Cell-array runtime value: tagged with `mtoc2Tag: "cell"`. Build
+    // a `CellType` so builtins that branch on the type (iscell, disp)
+    // see the same shape they would in the AOT backends. Use tuple
+    // mode when the total slot count fits the exact cap so per-slot
+    // types are preserved; uniform mode (with empty-double elem) for
+    // larger or non-bounded cells.
+    if ((v as { mtoc2Tag?: string }).mtoc2Tag === "cell") {
+      const c = v as unknown as {
+        mtoc2Tag: "cell";
+        shape: number[];
+        data: RuntimeValue[];
+      };
+      if (c.data.length <= EXACT_ARRAY_MAX_ELEMENTS) {
+        return cellTuple(
+          c.shape.slice(),
+          c.data.map(slot => inferTypeFromValue(slot))
+        );
+      }
+      const dims: DimInfo[] = c.shape.map(n => ({
+        kind: "exact" as const,
+        value: n,
+      }));
+      return cellUniform(dims, {
+        kind: "Numeric",
+        elem: "double",
+        isComplex: false,
+        dims: [
+          { kind: "exact", value: 0 },
+          { kind: "exact", value: 0 },
+        ],
+        shape: [0, 0],
+        sign: "unknown",
+      });
+    }
     // Class instance: tagged with `mtoc2Class` by `constructClassInstance`
     // so workspace dispatch can detect the receiver type for
     // `method(obj, args)` resolution.

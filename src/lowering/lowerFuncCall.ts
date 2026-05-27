@@ -21,13 +21,21 @@ import type { Expr } from "../parser/index.js";
 import { TypeError, UnsupportedConstruct } from "./errors.js";
 import type { IRExpr } from "./ir.js";
 import {
+  DIM_ONE,
+  EXACT_ARRAY_MAX_ELEMENTS,
+  MTOC2_MAX_NDIM,
+  cellTuple,
+  cellUniform,
   classMethodSpecSource,
+  emptyDoubleTensorType,
   isHandle,
   isMultiElement,
   isNumeric,
+  isScalar,
   structType,
   typeToString,
 } from "./types.js";
+import type { DimInfo, Type } from "./types.js";
 import { getBuiltin } from "../builtins/index.js";
 import { withSpan } from "./errors.js";
 import { isSliceArg } from "./indexResolve.js";
@@ -53,6 +61,9 @@ export function lowerFuncCall(
   const envEntry = this.env.get(e.name);
   if (envEntry === undefined && e.name === "struct") {
     return lowerStructConstructor.call(this, e);
+  }
+  if (envEntry === undefined && e.name === "cell") {
+    return lowerCellConstructor.call(this, e);
   }
   if (envEntry === undefined && e.name === "bsxfun") {
     const rewritten = tryRewriteBsxfun.call(this, e);
@@ -408,6 +419,119 @@ function lowerStructConstructor(
     kind: "StructLit",
     fields: sortedValues,
     ty,
+    span: e.span,
+  };
+}
+
+/** `cell(n)` / `cell(n, m)` / `cell(n, m, k, ...)`. Builds a `CellEmpty`
+ *  IR node whose `ty` is a `CellType` whose mode depends on whether
+ *  every dim is exact and the total slot count fits the exact cap:
+ *    - all dims exact + total <= EXACT_ARRAY_MAX_ELEMENTS → tuple mode
+ *      with one empty-double slot per index;
+ *    - otherwise → uniform mode with empty-double elem.
+ *
+ *  Numbl reference: `interpreter/builtins/type-constructors.ts:442-469`
+ *  initialises each slot as `RTV.tensor(allocFloat64Array(0), [0, 0])`. */
+function lowerCellConstructor(
+  this: Lowerer,
+  e: Extract<Expr, { type: "FuncCall" }>
+): IRExpr {
+  if (e.args.length === 0) {
+    // `cell()` — match numbl which treats it as cell(0) (0×0). The
+    // common idiom is `cell(n)` though, so this path is rare.
+    return {
+      kind: "CellEmpty",
+      dims: [],
+      ty: cellTuple([0, 0], []),
+      span: e.span,
+    };
+  }
+  if (e.args.length > MTOC2_MAX_NDIM) {
+    throw new UnsupportedConstruct(
+      `'cell' accepts up to ${MTOC2_MAX_NDIM} dim arguments (got ${e.args.length})`,
+      e.span
+    );
+  }
+
+  // Lower each dim arg; require scalar real numeric.
+  const dimExprs: IRExpr[] = e.args.map(a => {
+    const v = this.lowerExpr(a);
+    this.requireValueType(v, "'cell' dim argument");
+    if (!isNumeric(v.ty) || !isScalar(v.ty) || v.ty.isComplex) {
+      throw new TypeError(
+        `'cell' dim argument must be a real scalar (got ${typeToString(v.ty)})`,
+        a.span
+      );
+    }
+    return v;
+  });
+
+  // Per-axis resolution: each axis becomes either exact (value known) or
+  // dynamic. `cell(n)` expands to an `n×n` square; we mirror by feeding
+  // dim 0's value to both axes when only one dim arg is supplied.
+  const axesIn: { exactValue: number | null; expr: IRExpr }[] = [];
+  if (dimExprs.length === 1) {
+    const exactValue =
+      isNumeric(dimExprs[0].ty) && typeof dimExprs[0].ty.exact === "number"
+        ? dimExprs[0].ty.exact
+        : null;
+    axesIn.push({ exactValue, expr: dimExprs[0] });
+    axesIn.push({ exactValue, expr: dimExprs[0] });
+  } else {
+    for (const de of dimExprs) {
+      const exactValue =
+        isNumeric(de.ty) && typeof de.ty.exact === "number"
+          ? de.ty.exact
+          : null;
+      axesIn.push({ exactValue, expr: de });
+    }
+  }
+
+  // Validate any exact-known dim is a non-negative integer.
+  for (let i = 0; i < axesIn.length; i++) {
+    const v = axesIn[i].exactValue;
+    if (v !== null) {
+      if (!Number.isInteger(v) || v < 0) {
+        throw new TypeError(
+          `'cell' dim argument ${i + 1} must be a non-negative integer (got ${v})`,
+          e.span
+        );
+      }
+    }
+  }
+
+  // Decide tuple vs uniform mode.
+  const allExact = axesIn.every(a => a.exactValue !== null);
+  let total: number | null = null;
+  if (allExact) {
+    total = 1;
+    for (const a of axesIn) total *= a.exactValue as number;
+  }
+  const useTuple =
+    allExact && total !== null && total <= EXACT_ARRAY_MAX_ELEMENTS;
+
+  if (useTuple) {
+    const shape = axesIn.map(a => a.exactValue as number);
+    const slotCount = total!;
+    const elements: Type[] = [];
+    for (let i = 0; i < slotCount; i++) elements.push(emptyDoubleTensorType());
+    return {
+      kind: "CellEmpty",
+      dims: axesIn.map(a => a.expr),
+      ty: cellTuple(shape, elements),
+      span: e.span,
+    };
+  }
+  // Uniform mode — every axis is exact or unknown; build a DimInfo per axis.
+  const dims: DimInfo[] = axesIn.map(a => {
+    if (a.exactValue === null) return { kind: "unknown" };
+    if (a.exactValue === 1) return DIM_ONE;
+    return { kind: "exact", value: a.exactValue };
+  });
+  return {
+    kind: "CellEmpty",
+    dims: axesIn.map(a => a.expr),
+    ty: cellUniform(dims, emptyDoubleTensorType()),
     span: e.span,
   };
 }

@@ -473,10 +473,47 @@ export function evalExpr(this: Interpreter, e: Expr): RuntimeValue {
       );
     }
 
+    case "Cell": {
+      // `{a, b, c; d, e, f}` → `{mtoc2Tag:"cell", shape:[r,c], data:[...]}`
+      // with column-major flat storage (matches numbl's
+      // `RuntimeCell` and the c-aot / js-aot codegen). Empty `{}` is
+      // a 0×0 cell.
+      const srcRows = e.rows;
+      if (srcRows.length === 0) {
+        return {
+          mtoc2Tag: "cell",
+          shape: [0, 0],
+          data: [],
+        } as unknown as RuntimeValue;
+      }
+      const rowCount = srcRows.length;
+      const colCount = srcRows[0].length;
+      for (let r = 0; r < rowCount; r++) {
+        if (srcRows[r].length !== colCount) {
+          throw new UnsupportedConstruct(
+            `interpreter: cell literal: row ${r + 1} has ${srcRows[r].length} ` +
+              `cells, expected ${colCount}`,
+            e.span
+          );
+        }
+      }
+      // Column-major flat: data[c*rowCount + r] = row r, col c.
+      const dataFlat: RuntimeValue[] = new Array(rowCount * colCount);
+      for (let c = 0; c < colCount; c++) {
+        for (let r = 0; r < rowCount; r++) {
+          dataFlat[c * rowCount + r] = this.evalExpr(srcRows[r][c]);
+        }
+      }
+      return {
+        mtoc2Tag: "cell",
+        shape: [rowCount, colCount],
+        data: dataFlat,
+      } as unknown as RuntimeValue;
+    }
+
     case "IndexCell":
     case "MemberDynamic":
     case "SuperMethodCall":
-    case "Cell":
     case "ClassInstantiation":
     case "MetaClass":
       throw new UnsupportedConstruct(

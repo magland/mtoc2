@@ -91,6 +91,40 @@ export function callByName(
     }
     return [out as unknown as RuntimeValue];
   }
+  // `cell(n)` / `cell(n, m, ...)` constructor — parallel to the
+  // `struct` special-case. Mirrors numbl `type-constructors.ts:442`:
+  // every slot is the canonical empty-double tensor `[0×0]`.
+  if (name === "cell") {
+    let dims: number[];
+    if (args.length === 0) {
+      dims = [0, 0];
+    } else if (args.length === 1) {
+      const n = Math.max(0, Math.floor(Number(args[0] as number)));
+      dims = [n, n];
+    } else {
+      dims = args.map(a => {
+        const n = Math.floor(Number(a as number));
+        return n > 0 ? n : 0;
+      });
+    }
+    let total = 1;
+    for (const d of dims) total *= d;
+    const data: RuntimeValue[] = new Array(total);
+    for (let i = 0; i < total; i++) {
+      data[i] = {
+        mtoc2Tag: "tensor",
+        shape: [0, 0],
+        data: new Float64Array(0),
+      } as unknown as RuntimeValue;
+    }
+    return [
+      {
+        mtoc2Tag: "cell",
+        shape: dims,
+        data,
+      } as unknown as RuntimeValue,
+    ];
+  }
   const argTypes = args.map(inferTypeFromValue);
 
   // Workspace dispatch first — numbl's `resolveFunction` applies the

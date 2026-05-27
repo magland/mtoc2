@@ -470,11 +470,27 @@ const REGISTRY: ReadonlyMap<string, RuntimeSnippet> = new Map<
     "mtoc2_disp_tensor",
     loadSnippet("disp_tensor.h", ["mtoc2_tensor_t", "mtoc2_format_double"]),
   ],
+  [
+    "mtoc2_disp_tensor_inline",
+    loadSnippet("disp_tensor_inline.h", [
+      "mtoc2_tensor_t",
+      "mtoc2_format_double",
+    ]),
+  ],
 
   // JS-only generic struct disp. The C path generates per-typedef
   // <name>_disp via emitNamedTypedef and never activates this snippet;
   // it's the only entry point for `disp(struct)` on the JS side.
   ["mtoc2_disp_struct", loadSnippet("disp_struct.h")],
+
+  // Cell array runtime. C-aot uses per-shape typedefs emitted from
+  // `emitCellTypedef.ts`; the snippet here is the JS sibling shipped
+  // to js-aot / interpreter. Basename is `cell` so the JS bundle
+  // contains `cell.js`. The `.h` is a topic placeholder (see
+  // `cell.h`) — no C registration needed.
+  ["mtoc2_cell_make", loadSnippet("cell.h")],
+  ["mtoc2_cell_empty", loadSnippet("cell.h")],
+  ["mtoc2_format_cell", loadSnippet("cell.h")],
 
   // ── Complex tensor lifecycle ──────────────────────────────────────
   // Sibling helpers of the real tensor family for the complex-typed

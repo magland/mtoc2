@@ -27,6 +27,12 @@ export function forEachSubExpr(e: IRExpr, visit: (sub: IRExpr) => void): void {
         for (const cell of row) forEachSubExpr(cell, visit);
       }
       return;
+    case "CellLit":
+      for (const el of e.elements) forEachSubExpr(el, visit);
+      return;
+    case "CellEmpty":
+      for (const d of e.dims) forEachSubExpr(d, visit);
+      return;
     case "Binary":
       forEachSubExpr(e.left, visit);
       forEachSubExpr(e.right, visit);

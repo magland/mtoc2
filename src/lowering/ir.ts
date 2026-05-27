@@ -300,6 +300,38 @@ export interface TensorConcat {
   span: Span;
 }
 
+/** Cell-array source literal `{a, b, c; d, e, f}`. `elements` lists
+ *  the slot expressions in column-major order; `shape` is the
+ *  declared `[rows, cols]` of the literal. `ty` is a `CellType`
+ *  whose `mode` is always `"tuple"` for literals — one slot type per
+ *  slot, even when several happen to coincide. Owned producer; ANFs
+ *  like other owned-producing expressions.
+ *
+ *  An empty literal `{}` produces a `CellLit` with `elements: []` and
+ *  `shape: [0, 0]`, matching numbl. */
+export interface CellLit {
+  kind: "CellLit";
+  elements: IRExpr[];
+  shape: number[];
+  ty: Type;
+  span: Span;
+}
+
+/** Runtime cell construction from `cell(n, m, ...)` (or `cell(n)`
+ *  → `n×n`). `dims` carries the IR expressions for each axis size
+ *  (parallel to `ty.dims`). When every axis is statically exact and
+ *  the slot count fits the exact cap, `ty.mode === "tuple"` and the
+ *  emitted code lays out per-slot empty-double slots inline;
+ *  otherwise `ty.mode === "uniform"` with `elem` set to the empty-
+ *  double sentinel and the helper allocates the slot buffer at
+ *  runtime. Owned producer; ANFs. */
+export interface CellEmpty {
+  kind: "CellEmpty";
+  dims: IRExpr[];
+  ty: Type;
+  span: Span;
+}
+
 /** Range used as a value (outside index slots and for-loop bounds).
  *  Emits a freshly-allocated `1×N` row tensor at runtime via
  *  `mtoc2_tensor_make_range`. Owned producer; ANFs. The `step` may
@@ -321,6 +353,8 @@ export type IRExpr =
   | StringLit
   | TensorBuild
   | TensorConcat
+  | CellLit
+  | CellEmpty
   | Var
   | Binary
   | Unary

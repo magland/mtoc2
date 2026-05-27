@@ -1,5 +1,7 @@
 import { TypeError, UnsupportedConstruct } from "../../../lowering/errors.js";
 import {
+  cellTypedefName,
+  isCell,
   isScalarRealNumeric,
   isNumeric,
   isScalar,
@@ -14,6 +16,7 @@ import {
   mtoc2_disp_struct,
   mtoc2_disp_tensor,
   mtoc2_disp_tensor_complex,
+  mtoc2_format_cell,
 } from "../../runtime/snippets.gen.js";
 
 export const disp: Builtin = {
@@ -50,8 +53,11 @@ export const disp: Builtin = {
     if (t.kind === "Struct") {
       return [{ kind: "Unknown" }];
     }
+    if (isCell(t)) {
+      return [{ kind: "Unknown" }];
+    }
     throw new TypeError(
-      `'disp' arg must be a scalar numeric, a real or complex tensor, text, or a struct ` +
+      `'disp' arg must be a scalar numeric, a real or complex tensor, text, a struct, or a cell ` +
         `(got ${t.kind})`
     );
   },
@@ -64,6 +70,13 @@ export const disp: Builtin = {
     const t = argTypes[0];
     if (t.kind === "Struct") {
       return `${structTypedefName(t)}_disp(${argsC[0]})`;
+    }
+    if (isCell(t)) {
+      // The per-shape cell typedef's `_disp` helper renders the
+      // numbl-format `{e1, e2, ...}`. Numbl's `disp` appends a
+      // trailing newline; we add it explicitly here so the helper
+      // stays inline-renderable from nested contexts (cell-of-cell).
+      return `(${cellTypedefName(t)}_disp(${argsC[0]}), printf("\\n"))`;
     }
     if (t.kind === "String") {
       return `mtoc2_disp_text(mtoc2_text_from_string(${argsC[0]}))`;
@@ -112,6 +125,12 @@ export const disp: Builtin = {
       useRuntime("mtoc2_disp_struct");
       return `mtoc2_disp_struct(${argsJs[0]})`;
     }
+    if (isCell(t)) {
+      // Format via `mtoc2_format_cell` and print with a trailing
+      // newline, matching numbl's `disp(c) = displayValue(c) + '\n'`.
+      useRuntime("mtoc2_format_cell");
+      return `($write(mtoc2_format_cell(${argsJs[0]}) + "\\n"))`;
+    }
     throw new UnsupportedConstruct(
       `'disp' emitJs for arg kind '${t.kind}' is not yet wired`
     );
@@ -130,6 +149,14 @@ export const disp: Builtin = {
       } else {
         mtoc2_disp_tensor(v);
       }
+    } else if (
+      v &&
+      typeof v === "object" &&
+      (v as { mtoc2Tag?: string }).mtoc2Tag === "cell"
+    ) {
+      ctx.helpers.write(
+        mtoc2_format_cell(v as Parameters<typeof mtoc2_format_cell>[0]) + "\n"
+      );
     } else if (v && typeof v === "object") {
       mtoc2_disp_struct(v as Record<string, unknown>);
     } else {

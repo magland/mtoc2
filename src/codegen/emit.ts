@@ -25,9 +25,11 @@
 import type { IRExpr, IRStmt, IRProgram } from "../lowering/ir.js";
 import { cTypeFor, requireOwnedHelpers } from "./cHelpers.js";
 import {
+  cellTypedefName,
   classTypedefName,
   handleTypedefName,
   structTypedefName,
+  type CellType,
   type ClassType,
   type HandleType,
   type StructType,
@@ -49,6 +51,7 @@ import {
   specForHandle,
   specForStruct,
 } from "./emitNamedTypedef.js";
+import { emitCellTypedef } from "./emitCellTypedef.js";
 import {
   collectLocals,
   defaultInitFor,
@@ -88,6 +91,10 @@ export function emitProgram(prog: IRProgram, opts: EmitOptions = {}): string {
   // owned-kind helpers (and a `_disp` helper for structs).
   const namedTypedefs = collectNamedTypedefs(prog);
   for (const t of namedTypedefs) {
+    if (t.kind === "Cell") {
+      userParts.push(emitCellTypedef(t, state));
+      continue;
+    }
     const spec =
       t.kind === "Struct"
         ? specForStruct(t)
@@ -214,7 +221,7 @@ function runtimePlaceholder(state: RuntimeState): string {
   return `/* runtime helpers omitted (${state.active.size}): ${names} */\n`;
 }
 
-type NamedType = StructType | ClassType | HandleType;
+type NamedType = StructType | ClassType | HandleType | CellType;
 
 /** Walk the program and collect every distinct named (struct / class /
  *  handle) typedef shape, returning them in dependency-topological
@@ -230,7 +237,10 @@ function collectNamedTypedefs(prog: IRProgram): NamedType[] {
   const innerTys = (t: NamedType): Type[] => {
     if (t.kind === "Struct") return t.fields.map(f => f.ty);
     if (t.kind === "Class") return t.properties.map(p => p.ty);
-    return t.captures.map(c => c.ty);
+    if (t.kind === "Handle") return t.captures.map(c => c.ty);
+    // Cell: tuple → per-slot types; uniform → single elem type.
+    if (t.mode === "tuple") return t.elements ?? [];
+    return t.elem !== undefined ? [t.elem] : [];
   };
 
   const considerNamed = (t: Type | undefined): void => {
@@ -245,6 +255,9 @@ function collectNamedTypedefs(prog: IRProgram): NamedType[] {
       named = t;
     } else if (t.kind === "Handle") {
       key = handleTypedefName(t);
+      named = t;
+    } else if (t.kind === "Cell") {
+      key = cellTypedefName(t);
       named = t;
     } else {
       return;
@@ -295,7 +308,8 @@ function collectNamedTypedefs(prog: IRProgram): NamedType[] {
 function namedTypedefKey(t: NamedType): string {
   if (t.kind === "Struct") return structTypedefName(t);
   if (t.kind === "Class") return classTypedefName(t);
-  return handleTypedefName(t);
+  if (t.kind === "Handle") return handleTypedefName(t);
+  return cellTypedefName(t);
 }
 
 function topoSortNamedTypedefs(
@@ -314,7 +328,8 @@ function topoSortNamedTypedefs(
       if (
         ity.kind === "Struct" ||
         ity.kind === "Class" ||
-        ity.kind === "Handle"
+        ity.kind === "Handle" ||
+        ity.kind === "Cell"
       ) {
         const dep = byName.get(namedTypedefKey(ity));
         if (dep) visit(dep);

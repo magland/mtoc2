@@ -263,6 +263,33 @@ export interface ClassType {
   properties: ReadonlyArray<{ name: string; ty: Type }>;
 }
 
+/** Cell array. Two modes:
+ *  - **tuple**: per-slot types, used when the cell's shape is exact
+ *    AND the total slot count fits `EXACT_ARRAY_MAX_ELEMENTS`. Cell
+ *    literals `{a, b, c}` and small `cell(n, m)` constructors land
+ *    here. `elements.length === shape product`; slot k is the
+ *    column-major-flat index. Each `elements[k]` is the *static*
+ *    type of slot k.
+ *  - **uniform**: a single `elem` type covers every slot. Used for
+ *    `cell(n, m)` with a non-exact dim or a slot count above the
+ *    cap, and for tuple cells that "demote" on a non-static-index
+ *    write whose existing slot types all unify with the rhs type.
+ *
+ *  Cells have no LUB / heterogeneous mode. When neither tuple nor
+ *  uniform applies (a non-static-index write into a tuple whose
+ *  slot types don't all unify with the rhs), the lowerer raises
+ *  `UnsupportedConstruct`. */
+export interface CellType {
+  kind: "Cell";
+  mode: "tuple" | "uniform";
+  dims: DimInfo[];
+  shape?: number[];
+  /** Tuple-mode only: per-slot types in column-major order. */
+  elements?: Type[];
+  /** Uniform-mode only: every slot has this type. */
+  elem?: Type;
+}
+
 export type Type =
   | NumericType
   | StringType
@@ -271,7 +298,8 @@ export type Type =
   | VoidType
   | HandleType
   | StructType
-  | ClassType;
+  | ClassType
+  | CellType;
 
 export const VOID: VoidType = { kind: "Void" };
 
@@ -473,6 +501,63 @@ export function classType(
   return { kind: "Class", className, properties: sorted };
 }
 
+/** Construct a tuple-mode `CellType`. The caller must provide a fully
+ *  exact shape (every entry in `dims` is `exact`) and an `elements`
+ *  array whose length equals the shape product. */
+export function cellTuple(shape: number[], elements: Type[]): CellType {
+  const total = shapeNumel(shape);
+  if (elements.length !== total) {
+    throw new Error(
+      `cellTuple: shape [${shape.join(",")}] requires ${total} slots, got ${elements.length}`
+    );
+  }
+  const dims: DimInfo[] = shape.map(s =>
+    s === 1 ? DIM_ONE : { kind: "exact", value: s }
+  );
+  return {
+    kind: "Cell",
+    mode: "tuple",
+    dims,
+    shape: shape.slice(),
+    elements: elements.slice(),
+  };
+}
+
+/** Construct a uniform-mode `CellType`. Used when the cell's slot
+ *  count exceeds `EXACT_ARRAY_MAX_ELEMENTS`, when a dim is non-exact,
+ *  or when a tuple cell demotes after a non-static-index write. */
+export function cellUniform(dims: DimInfo[], elem: Type): CellType {
+  const t: CellType = {
+    kind: "Cell",
+    mode: "uniform",
+    dims: dims.slice(),
+    elem,
+  };
+  if (dims.every(d => d.kind === "exact")) {
+    t.shape = dims.map(d => (d as { kind: "exact"; value: number }).value);
+  }
+  return t;
+}
+
+/** The canonical "empty `[]` double tensor" slot type — what numbl
+ *  initialises every fresh slot in `cell(n, m)` to
+ *  (see `numbl/.../type-constructors.ts:442-469`). Shape is `[0, 0]`,
+ *  no exact data, sign unknown. Mtoc2 reuses this exact representation
+ *  so cross-runner displays of an unwritten slot match byte-for-byte. */
+export function emptyDoubleTensorType(): NumericType {
+  return {
+    kind: "Numeric",
+    elem: "double",
+    isComplex: false,
+    dims: [
+      { kind: "exact", value: 0 },
+      { kind: "exact", value: 0 },
+    ],
+    shape: [0, 0],
+    sign: "unknown",
+  };
+}
+
 // ── Predicates ──────────────────────────────────────────────────────────
 
 export function isNumeric(t: Type): t is NumericType {
@@ -501,6 +586,10 @@ export function isString(t: Type): t is StringType {
 
 export function isChar(t: Type): t is CharType {
   return t.kind === "Char";
+}
+
+export function isCell(t: Type): t is CellType {
+  return t.kind === "Cell";
 }
 
 /** True when `t` can be consumed by a "text-accepting" runtime helper
@@ -608,6 +697,7 @@ export function isOwned(t: Type): boolean {
   if (t.kind === "Handle") return true;
   if (t.kind === "String") return true;
   if (t.kind === "Char") return true;
+  if (t.kind === "Cell") return true;
   return false;
 }
 
@@ -838,6 +928,15 @@ export function withoutExact(t: Type): Type {
       })),
     };
   }
+  if (t.kind === "Cell") {
+    if (t.mode === "tuple") {
+      return {
+        ...t,
+        elements: t.elements!.map(withoutExact),
+      };
+    }
+    return { ...t, elem: withoutExact(t.elem!) };
+  }
   return t;
 }
 
@@ -938,7 +1037,54 @@ export function unify(a: Type, b: Type): Type {
     }
     return classType(a.className, props);
   }
+  if (a.kind === "Cell" && b.kind === "Cell") {
+    // Two tuple cells with the same shape and pairwise-unifiable
+    // elements merge into a tuple with the unified slot types.
+    // Otherwise both sides demote to uniform (via the existing tuple-
+    // to-uniform widening rule) before unifying. If either uniform's
+    // elem fails to unify, the result is UNKNOWN.
+    if (
+      a.mode === "tuple" &&
+      b.mode === "tuple" &&
+      a.shape !== undefined &&
+      b.shape !== undefined &&
+      a.shape.length === b.shape.length &&
+      a.shape.every((s, i) => s === b.shape![i])
+    ) {
+      const aElems = a.elements!;
+      const bElems = b.elements!;
+      const out = aElems.map((ea, i) => unify(ea, bElems[i]));
+      return cellTuple(a.shape, out);
+    }
+    const aUni = cellWidenToUniform(a);
+    const bUni = cellWidenToUniform(b);
+    if (aUni === undefined || bUni === undefined) return UNKNOWN;
+    if (aUni.dims.length !== bUni.dims.length) return UNKNOWN;
+    const dims = aUni.dims.map((d, i) => unifyDim(d, bUni.dims[i]));
+    const elem = unify(aUni.elem!, bUni.elem!);
+    if (elem.kind === "Unknown") return UNKNOWN;
+    return cellUniform(dims, elem);
+  }
   return UNKNOWN;
+}
+
+/** Demote a tuple-mode cell to uniform mode if every slot type
+ *  unifies. Returns undefined if the cell is already uniform (no
+ *  work) or if the demotion isn't possible (heterogeneous slot
+ *  types). Used inside `unify` and at non-static-index writes. */
+export function cellWidenToUniform(t: CellType): CellType | undefined {
+  if (t.mode === "uniform") return t;
+  const els = t.elements!;
+  if (els.length === 0) {
+    // Empty tuple cell — represent as uniform of empty-double sentinel.
+    return cellUniform(t.dims, emptyDoubleTensorType());
+  }
+  let elem = els[0];
+  for (let i = 1; i < els.length; i++) {
+    elem = unify(elem, els[i]);
+    if (elem.kind === "Unknown") return undefined;
+  }
+  return cellUniform(t.dims, elem);
 }
 
 function unifyDim(a: DimInfo, b: DimInfo): DimInfo {
@@ -1012,6 +1158,19 @@ export function typeToString(t: Type): string {
         .map(p => `${p.name}:${typeToString(p.ty)}`)
         .join(", ");
       return `class ${t.className}{${inner}}`;
+    }
+    case "Cell": {
+      const dimsStr =
+        t.shape !== undefined
+          ? t.shape.join("×")
+          : t.dims
+              .map(d => (d.kind === "exact" ? String(d.value) : "?"))
+              .join("×");
+      if (t.mode === "tuple") {
+        const inner = t.elements!.map(typeToString).join(", ");
+        return `cell[${dimsStr}]{${inner}}`;
+      }
+      return `cell[${dimsStr}]<${typeToString(t.elem!)}>`;
     }
   }
 }
@@ -1156,6 +1315,22 @@ function canon(t: Type): unknown {
         n: t.className,
         p: t.properties.map(p => [p.name, canon(p.ty)]),
       };
+    case "Cell":
+      if (t.mode === "tuple") {
+        return {
+          k: "Cl",
+          m: "t",
+          sh: t.shape,
+          e: t.elements!.map(canon),
+        };
+      }
+      return {
+        k: "Cl",
+        m: "u",
+        d: t.dims.map(d => (d.kind === "exact" ? d.value : "?")),
+        sh: t.shape,
+        e: canon(t.elem!),
+      };
   }
 }
 
@@ -1219,6 +1394,7 @@ export function cFieldTypeStr(t: Type): string {
   if (t.kind === "Handle") return handleTypedefName(t);
   if (t.kind === "Struct") return structTypedefName(t);
   if (t.kind === "Class") return classTypedefName(t);
+  if (t.kind === "Cell") return cellTypedefName(t);
   throw new Error(
     `cFieldTypeStr: type '${t.kind}' is not a valid struct/class field type`
   );
@@ -1257,6 +1433,31 @@ export function classTypedefName(t: ClassType): string {
     p: t.properties.map(p => [p.name, cFieldTypeStr(p.ty)]),
   });
   return `mtoc2_class_${sanitizeCIdent(t.className)}__${hashType(canonical)}`;
+}
+
+/** Mangled C typedef name for a cell shape. The hash sees the cell's
+ *  mode, dim shape (with `?` for non-exact axes), and either the
+ *  list of per-slot `cFieldTypeStr` values (tuple) or the elem
+ *  `cFieldTypeStr` (uniform). Two cell types whose internal types
+ *  differ only in lattice precision (sign, exact, tensor shape)
+ *  share one typedef. */
+export function cellTypedefName(t: CellType): string {
+  const dimsTag = t.dims.map(d => (d.kind === "exact" ? d.value : "?"));
+  let canonical: string;
+  if (t.mode === "tuple") {
+    canonical = JSON.stringify({
+      m: "t",
+      d: dimsTag,
+      e: t.elements!.map(cFieldTypeStr),
+    });
+  } else {
+    canonical = JSON.stringify({
+      m: "u",
+      d: dimsTag,
+      e: cFieldTypeStr(t.elem!),
+    });
+  }
+  return `mtoc2_cell__${hashType(canonical)}`;
 }
 
 /** Class-method specialization-name source. Becomes the input to

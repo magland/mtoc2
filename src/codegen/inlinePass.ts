@@ -368,6 +368,20 @@ function appearsInNonSlotPosition(e: IRExpr, cName: string): boolean {
       }
       return false;
     }
+    case "CellLit": {
+      for (const el of e.elements) {
+        if (el.kind === "Var" && el.cName === cName) return true;
+        if (appearsInNonSlotPosition(el, cName)) return true;
+      }
+      return false;
+    }
+    case "CellEmpty": {
+      for (const d of e.dims) {
+        if (d.kind === "Var" && d.cName === cName) return true;
+        if (appearsInNonSlotPosition(d, cName)) return true;
+      }
+      return false;
+    }
     case "StructLit": {
       for (const f of e.fields) {
         if (f.value.kind === "Var" && f.value.cName === cName) return true;
@@ -411,6 +425,8 @@ function substituteVar(e: IRExpr, target: string, replacement: IRExpr): IRExpr {
     case "EndRef":
     case "TensorBuild":
     case "TensorConcat":
+    case "CellLit":
+    case "CellEmpty":
     case "MakeRange":
     case "MemberLoad":
     case "StructLit":

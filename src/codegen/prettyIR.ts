@@ -119,6 +119,21 @@ function irExprToString(e: IRExpr): string {
       const rowsOut = e.cells.map(row => row.map(irExprToString).join(" "));
       return `[${rowsOut.join("; ")}]`;
     }
+    case "CellLit": {
+      const [rows, cols] = e.shape;
+      if (rows === 0 || cols === 0) return "{}";
+      const rowsOut: string[] = [];
+      for (let r = 0; r < rows; r++) {
+        const cells: string[] = [];
+        for (let c = 0; c < cols; c++) {
+          cells.push(irExprToString(e.elements[c * rows + r]));
+        }
+        rowsOut.push(cells.join(", "));
+      }
+      return `{${rowsOut.join("; ")}}`;
+    }
+    case "CellEmpty":
+      return `cell(${e.dims.map(irExprToString).join(", ")})`;
     case "HandleLit":
       if (e.ty.kind === "Handle") {
         if (e.captures.length === 0) return `@${e.ty.targetName}`;

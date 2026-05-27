@@ -830,6 +830,29 @@ function emitExpr(e: IRExpr, state: RuntimeState): string {
       return emitTensorConcatJs(e, state, emitExpr);
     }
 
+    case "CellLit": {
+      // `{a, b, c}` → fresh `mtoc2_cell_make`-built cell. Slot values
+      // are owned-consumed; route owned aliases through deep_clone so
+      // the cell owns its own copy (mirrors the c-aot consume rule).
+      useRuntimeByName(state, "mtoc2_cell_make");
+      const slots = e.elements
+        .map(el =>
+          isOwned(el.ty) ? emitOwnedRhsJs(el, state) : emitExpr(el, state)
+        )
+        .join(", ");
+      const shapeLit = JSON.stringify(e.shape);
+      return `mtoc2_cell_make([${slots}], ${shapeLit})`;
+    }
+
+    case "CellEmpty": {
+      // `cell(n, m, ...)` → fresh cell with empty-double slots.
+      // The 1-arg square form expands to two dim args at lowering
+      // time; everything here is the resolved per-axis form.
+      useRuntimeByName(state, "mtoc2_cell_empty");
+      const dimsJs = e.dims.map(d => emitExpr(d, state)).join(", ");
+      return `mtoc2_cell_empty([${dimsJs}])`;
+    }
+
     case "IndexSlice":
       return emitIndexSliceJs(e, state);
 

@@ -106,6 +106,7 @@ import { withSpan } from "./errors.js";
 import { exactComplex } from "../builtins/defs/_shared.js";
 import { isSliceArg } from "./indexResolve.js";
 import { lowerTensorLit } from "./lowerTensorLit.js";
+import { lowerCellLit } from "./lowerCellLit.js";
 import { lowerMultiAssign } from "./lowerMultiAssign.js";
 import { lowerAnonFunc, lowerFuncHandle } from "./lowerHandle.js";
 import { lowerMethodCall } from "./lowerMethodCall.js";
@@ -578,6 +579,24 @@ export class Lowerer {
           cells: e.cells.map(row =>
             row.map(cell => this.anfRequireScalarOrVar(cell, hoists))
           ),
+        };
+      case "CellLit":
+        // Each slot value is consumed by the freshly-allocated cell
+        // (parallel to TensorBuild / StructLit). Owned slot values must
+        // be fresh producers (ANF guarantees this) and stay in place;
+        // non-owned slot values pass through scalar-or-Var ANF.
+        return {
+          ...e,
+          elements: e.elements.map(el =>
+            isOwned(el.ty)
+              ? this.anfChildren(el, hoists)
+              : this.anfRequireScalarOrVar(el, hoists)
+          ),
+        };
+      case "CellEmpty":
+        return {
+          ...e,
+          dims: e.dims.map(d => this.anfRequireScalarOrVar(d, hoists)),
         };
       case "Binary":
         return {
@@ -1201,6 +1220,15 @@ export class Lowerer {
         return lowerFuncCall.call(this, e);
       case "Tensor":
         return lowerTensorLit.call(this, e);
+      case "Cell":
+        return lowerCellLit.call(this, e);
+      case "IndexCell":
+        // Phase A: lifecycle + literals only. Brace read/write lands
+        // in phase B.
+        throw new UnsupportedConstruct(
+          `cell indexing 'c{...}' not yet supported`,
+          e.span
+        );
       case "FuncHandle":
         return lowerFuncHandle.call(this, e);
       case "AnonFunc":
