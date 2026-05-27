@@ -356,5 +356,31 @@ identical (both call the real transpose helper).
 - **Logical as a distinct kind** — comparisons carry `elem:
 "logical"` but emit as `double` in C. Splitting it off would only
   matter once codegen cares (bit ops, packed storage, etc.).
-- **Cells, sparse, dictionaries** — present in numbl's RuntimeValue
-  model, absent here. Add when the lowering scope reaches them.
+- **Sparse, dictionaries** — present in numbl's RuntimeValue model,
+  absent here. Add when the lowering scope reaches them.
+
+## Cells
+
+`CellType` is a discriminated union with two modes:
+
+- `mode: "tuple"` — per-slot `Type[]` indexed column-major. Used
+  when the cell's shape is exact AND the total slot count fits
+  `EXACT_ARRAY_MAX_ELEMENTS`. Cell literals `{a, b, c}` and small
+  `cell(n, m)` constructors land here.
+- `mode: "uniform"` — a single `elem: Type` covers every slot,
+  with a `DimInfo[]` shape that may be non-exact. Used for
+  `cell(n, m)` with runtime dims, or for any non-tuple-eligible
+  construction site.
+
+The lattice has **no LUB / heterogeneous fallback**. When neither
+mode applies (a non-static-index write into a tuple whose slot
+types don't all share storage with the rhs), the lowerer raises
+`UnsupportedConstruct` with a span. See
+[cells_plan.md](cells_plan.md) for the design.
+
+Cell slot storage is sealed at construction. Writes must be
+**storage-equivalent** (`storageEquivalent(slot, rhs)` — same C
+representation regardless of shape / sign / exact precision) with
+the existing slot type — cells don't reshape mid-lifetime. Lattice
+precision still narrows through standard env refresh, but the
+underlying per-shape typedef stays put.

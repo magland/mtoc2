@@ -99,16 +99,25 @@ inventory by example. Highlights:
   scalar handle), used as backing types for `fprintf` / `error` /
   `sprintf` / `assert` with the full numbl-compatible format
   engine.
+- **Cells**: literal `{a, b, c}`, constructor `cell(n, m)`, brace
+  read `c{i}` / `c{i, j}`, brace write `c{i} = rhs`, comma-list
+  LHS expansion `[out{1:nout}] = call(...)` (with statically-exact
+  range bounds in AOT), and `iscell(x)`. Type lattice is two-mode
+  (tuple + uniform, no LUB). Slot storage is sealed at construction
+  — writes must be storage-equivalent with the existing slot type.
+  Out-of-bounds writes are rejected (no auto-grow); comma-list RHS
+  `f(c{:})` / `[c{:}]` and paren-indexing `c(1:3)` are deferred.
+  See [docs/cells_plan.md](docs/cells_plan.md).
 - **Plotting**: every name in numbl's `PLOT_ALL_NAMES` accepts,
   emitting one JSON record per call (real-time consumable by a
   numbl plot viewer).
 
 Several features still get explicit rejection: per-axis logical-mask
 writes (`M(:, mask) = rhs` — the linear form `a(mask) = rhs` works),
-vector-of-indices writes (`a(idx_vec) = rhs`), member-rooted index
-writes (`obj.f(i) = rhs`), indexed delete (`a(2:5) = []`), char
-arithmetic (`'A' + 1`), builtin handles (`@disp`),
-`private/` directories, and `import` statements. `.mtoc2.js` user
+vector-of-indices writes (`a(idx_vec) = rhs`), indexed delete
+(`a(2:5) = []`), cell paren-indexing (`c(1:3)`) and cell auto-grow
+on out-of-bounds writes, char arithmetic (`'A' + 1`), builtin
+handles (`@disp`), `private/` directories, and `import` statements. `.mtoc2.js` user
 functions that declare `cSources` work via `mtoc2 run` but not via
 the `translate` subcommand (which produces a single C string and
 can't represent sibling C files). Expanding scope is gated by the

@@ -91,22 +91,33 @@ architecture standpoint:
   keys, and the canonical form **includes `exact`** — so each
   distinct exact-value input produces its own specialization.
 
-Owned kinds (tensor, struct, class instance, handle, char, string)
-all share the same four-helper contract
+Owned kinds (tensor, struct, class instance, handle, char, string,
+cell) all share the same four-helper contract
 (`_empty`/`_assign`/`_copy`/`_free`); the typedef hash uses
 `cFieldTypeStr`, so precision differences don't shard the typedef.
+
+Cells live as per-shape generated typedefs from
+`emitCellTypedef.ts` (sibling of `emitNamedTypedef.ts`). Tuple-mode
+cells emit a struct with positional `slot_0`, `slot_1`, … fields;
+uniform-mode cells emit an `ndim`/`dims`/`nslots`/`slots`
+descriptor whose `slots` buffer is malloc'd at construction.
+JS-aot and interpreter share a single `mtoc2_cell` JS runtime
+shape (`{mtoc2Tag:"cell", shape, data}`) matching numbl's
+`RuntimeCell`.
 
 ### IR
 
 A small typed tree (`src/lowering/ir.ts`). Expressions: `NumLit`,
-`StringLit`, `Var`, `Binary`, `Unary`, `Call`, `TensorBuild`,
-`TensorConcat`, `HandleLit`, `HandleCaptureLoad`, `StructLit`,
+`ImagLit`, `StringLit`, `Var`, `Binary`, `Unary`, `Call`,
+`TensorBuild`, `TensorConcat`, `CellLit`, `CellEmpty`,
+`CellIndexLoad`, `HandleLit`, `HandleCaptureLoad`, `StructLit`,
 `MemberLoad`, `IndexLoad`, `IndexSlice`, `EndRef`, `MakeRange`.
 Statements: `ExprStmt`, `Assign`, `If`, `While`, `For`,
 `ReturnFromFunction`, `Break`, `Continue`, `MemberStore`,
-`IndexStore`, `IndexSliceStore`, `MultiAssignCall`, `TypeComment`.
-`IRFunc` captures a single specialization; `IRProgram` is top-level
-statements plus a map of specializations.
+`IndexStore`, `IndexSliceStore`, `CellIndexStore`,
+`MultiAssignCall`, `TypeComment`. `IRFunc` captures a single
+specialization; `IRProgram` is top-level statements plus a map of
+specializations.
 
 ### Lowerer (`lower.ts`)
 
