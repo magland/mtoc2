@@ -127,10 +127,12 @@ export function resolveClassType(
     );
   }
   const decl = reg.constructor;
-  if (argTypes.length !== decl.params.length) {
-    // Surface the arity mismatch with the constructor call site span.
+  // Match the user-function rule: too-many args is an error, fewer
+  // is fine — the body's `if nargin < N` branch (folded by the
+  // exact `nargin` fold) handles the unbound trailing params.
+  if (argTypes.length > decl.params.length) {
     throw new TypeError(
-      `constructor '${reg.className}' expects ${decl.params.length} arg(s), got ${argTypes.length}`,
+      `constructor '${reg.className}' expects at most ${decl.params.length} arg(s), got ${argTypes.length}`,
       span
     );
   }
@@ -145,7 +147,7 @@ export function resolveClassType(
   this.env = new Map();
   this.tempCounter = 0;
   this.currentFile = reg.file;
-  for (let i = 0; i < decl.params.length; i++) {
+  for (let i = 0; i < argTypes.length; i++) {
     this.env.set(decl.params[i], {
       cName: cIdentForUserName(decl.params[i]),
       ty: argTypes[i],

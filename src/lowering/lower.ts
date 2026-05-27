@@ -51,6 +51,7 @@ import {
   type Sign,
   type NumericType,
   scalarDouble,
+  scalarLogical,
   scalarComplex,
   tensorDouble,
   signFromExactArray,
@@ -1671,6 +1672,43 @@ export class Lowerer {
           span: e.span,
         };
       }
+    }
+    // Short-circuit `||` / `&&`: lower the LHS first, fold if it
+    // already determines the result, and only lower the RHS when
+    // needed. This matches the runtime semantics (numbl + C's
+    // native short-circuit) and — load-bearing — keeps the RHS
+    // from being lowered when it reads an unbound name in a dead
+    // branch (e.g. `nargin < 1 || isempty(pref)` inside a 0-arg
+    // spec where `pref` is unfilled).
+    if (e.op === BinaryOperation.OrOr || e.op === BinaryOperation.AndAnd) {
+      const lhs = this.lowerExpr(e.left);
+      this.requireValueType(lhs, "binary operator operand");
+      // Pull `exact` if the LHS is a scalar real numeric / logical.
+      let lhsExact: number | undefined;
+      if (
+        isNumeric(lhs.ty) &&
+        !lhs.ty.isComplex &&
+        isScalarRealNumeric(lhs.ty) &&
+        typeof lhs.ty.exact === "number"
+      ) {
+        lhsExact = lhs.ty.exact;
+      }
+      const isOr = e.op === BinaryOperation.OrOr;
+      if (lhsExact !== undefined) {
+        if (
+          (isOr && lhsExact !== 0 && !Number.isNaN(lhsExact)) ||
+          (!isOr && (lhsExact === 0 || Number.isNaN(lhsExact)))
+        ) {
+          return {
+            kind: "NumLit",
+            value: isOr ? 1 : 0,
+            ty: scalarLogical(isOr),
+            span: e.span,
+          };
+        }
+      }
+      // RHS needs to be evaluated; defer to the standard builtin
+      // path so transfer-time exact propagation still fires.
     }
     const left = this.lowerExpr(e.left);
     this.requireValueType(left, "binary operator operand");
