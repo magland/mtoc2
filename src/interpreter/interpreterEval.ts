@@ -345,7 +345,27 @@ export function evalExpr(this: Interpreter, e: Expr): RuntimeValue {
       // via the field name. Errors out for non-object bases. When the
       // base is a class instance and the class declares a `get.<f>`
       // accessor, route the read through it (matches numbl's
-      // `getMember` in `runtimeMemberAccess.ts`).
+      // `getMember` in `runtimeMemberAccess.ts`). When the base is a
+      // bare class name (no env entry), treat the member access as a
+      // 0-arg static-method call — MATLAB allows omitting `()` on a
+      // 0-arg method.
+      if (
+        e.base.type === "Ident" &&
+        this.workspace !== undefined &&
+        this.env.get(e.base.name) === undefined
+      ) {
+        const reg = this.workspace.classes.get(e.base.name);
+        const staticFn = reg?.staticMethods.get(e.name);
+        if (staticFn !== undefined) {
+          return this.callUserFunction(
+            staticFn,
+            [],
+            1,
+            e.span,
+            staticFn.span.file
+          )[0];
+        }
+      }
       const base = this.evalExpr(e.base);
       if (
         typeof base !== "object" ||
@@ -596,7 +616,53 @@ export function evalExpr(this: Interpreter, e: Expr): RuntimeValue {
       }
       return cell.data[off];
     }
-    case "MemberDynamic":
+    case "MemberDynamic": {
+      // `obj.(nameExpr)` — dynamic field read. Evaluate `nameExpr`
+      // to a char/string, then read the field. Class-getter routing
+      // is honored for dependent properties (same dispatch shape as
+      // the static-name `Member` case).
+      const base = this.evalExpr(e.base);
+      if (
+        typeof base !== "object" ||
+        base === null ||
+        isTensor(base) ||
+        isCharRV(base)
+      ) {
+        throw new UnsupportedConstruct(
+          `interpreter: '.(...)' applied to non-struct value`,
+          e.span
+        );
+      }
+      const nameVal = this.evalExpr(e.nameExpr);
+      const name =
+        typeof nameVal === "string"
+          ? nameVal
+          : isCharRV(nameVal)
+            ? (nameVal as { value: string }).value
+            : String(nameVal);
+      const o = base as Record<string, RuntimeValue>;
+      const tag = (base as { mtoc2Class?: string }).mtoc2Class;
+      if (tag !== undefined && this.workspace !== undefined) {
+        const reg = this.workspace.classes.get(tag);
+        const getter = reg?.getters.get(name);
+        if (getter !== undefined) {
+          return this.callUserFunction(
+            getter,
+            [base],
+            1,
+            e.span,
+            getter.span.file
+          )[0];
+        }
+      }
+      if (!(name in o)) {
+        throw new UnsupportedConstruct(
+          `interpreter: struct has no field '${name}'`,
+          e.span
+        );
+      }
+      return o[name];
+    }
     case "SuperMethodCall":
     case "ClassInstantiation":
     case "MetaClass":

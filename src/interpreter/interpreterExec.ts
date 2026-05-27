@@ -752,9 +752,80 @@ export function assignLValue(
     if (!suppressed) this.autoDisp(rootName, host as RuntimeValue);
     return;
   }
-  throw new UnsupportedConstruct(
-    `interpreter: lvalue '${lv.type}' is not yet implemented`
-  );
+  if (lv.type === "MemberDynamic") {
+    // `obj.(nameExpr) = rhs` — dynamic field write. v1 supports only
+    // a bare-Ident base (a chained-dynamic write like
+    // `s.x.(name) = rhs` is rare in practice and pulls in the same
+    // walk-and-clone path as static Member writes; skip for now).
+    if (lv.base.type !== "Ident") {
+      throw new UnsupportedConstruct(
+        `interpreter: dynamic-field assignment '.(name) = rhs' ` +
+          `requires a bare-variable base (got '${lv.base.type}')`
+      );
+    }
+    const nameVal = this.evalExpr(lv.nameExpr);
+    const name =
+      typeof nameVal === "string"
+        ? nameVal
+        : isCharRV(nameVal)
+          ? (nameVal as { value: string }).value
+          : String(nameVal);
+    const rootName = lv.base.name;
+    // Class setter routing parallels the static-Member case so a
+    // dependent-property setter still fires.
+    if (this.workspace !== undefined) {
+      const existing = this.env.get(rootName);
+      const tag =
+        existing && typeof existing === "object" && existing !== null
+          ? (existing as { mtoc2Class?: string }).mtoc2Class
+          : undefined;
+      if (tag !== undefined) {
+        const reg = this.workspace.classes.get(tag);
+        const setter = reg?.setters.get(name);
+        if (setter !== undefined) {
+          const newObj = this.callUserFunction(
+            setter,
+            [existing as RuntimeValue, v],
+            1,
+            setter.span,
+            setter.span.file
+          )[0];
+          this.env.set(rootName, newObj);
+          if (!suppressed) this.autoDisp(rootName, newObj);
+          return;
+        }
+        if (reg?.dependentProperties.has(name)) {
+          throw new UnsupportedConstruct(
+            `interpreter: dependent property '${tag}.${name}' ` +
+              `has no setter; cannot assign`
+          );
+        }
+      }
+    }
+    let host = this.env.get(rootName) as
+      | Record<string, RuntimeValue>
+      | undefined;
+    if (host === undefined || typeof host !== "object" || host === null) {
+      host = {};
+    } else if (
+      isTensor(host as unknown as RuntimeValue) ||
+      isCharRV(host as unknown as RuntimeValue)
+    ) {
+      host = {};
+    } else {
+      host = Interpreter.cloneStructLocal(host);
+    }
+    host[name] = v;
+    this.env.set(rootName, host as RuntimeValue);
+    if (!suppressed) this.autoDisp(rootName, host as RuntimeValue);
+    return;
+  }
+  // Exhaustive: all LValue variants are handled above. The
+  // following line is a TypeScript exhaustiveness pin — at this
+  // point `lv` has narrowed to `never`.
+  const _exhaustive: never = lv;
+  void _exhaustive;
+  throw new UnsupportedConstruct(`interpreter: unhandled lvalue`);
 }
 
 // ── For-range expansion ───────────────────────────────────────────────────

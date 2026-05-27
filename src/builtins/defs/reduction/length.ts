@@ -4,6 +4,8 @@ import {
   signFromNumber,
   isNumeric,
   isScalar,
+  isCell,
+  type Type,
 } from "../../../lowering/types.js";
 import type { Builtin } from "../../registry.js";
 import { isTensor, isChar } from "../../../runtime/value.js";
@@ -19,7 +21,25 @@ export const length: Builtin = {
         `'length' does not support multi-output (nargout=${nargout})`
       );
     }
-    const t = argTypes[0];
+    const t: Type = argTypes[0];
+    // Cells take the same max-of-shape semantics. Unknown lets the
+    // interpreter's `call` hook compute at runtime; AOT codegen
+    // would need a per-shape branch (deferred).
+    if (isCell(t)) {
+      if (t.shape !== undefined) {
+        const v = t.shape.some(s => s === 0)
+          ? 0
+          : t.shape.reduce((a, b) => Math.max(a, b), 0);
+        return [scalarDouble(signFromNumber(v), v)];
+      }
+      return [scalarDouble("nonneg")];
+    }
+    if (t.kind === "Unknown") {
+      // The interpreter is the only consumer of an Unknown-typed
+      // value (e.g. `fieldnames(s)` returns Unknown today). Let the
+      // call hook compute the length at runtime.
+      return [scalarDouble("nonneg")];
+    }
     if (!isNumeric(t)) {
       throw new TypeError(`'length' arg must be numeric (got ${t.kind})`);
     }
@@ -57,6 +77,14 @@ export const length: Builtin = {
     }
     if (typeof v === "string") return [1];
     if (isChar(v)) return [v.value.length];
+    if (v !== null && typeof v === "object") {
+      const tag = (v as { mtoc2Tag?: string }).mtoc2Tag;
+      const shape = (v as { shape?: number[] }).shape;
+      if (tag === "cell" && Array.isArray(shape)) {
+        if (shape.some(s => s === 0)) return [0];
+        return [shape.reduce((a, b) => (a > b ? a : b), 0)];
+      }
+    }
     throw new TypeError(
       `'length' got an unsupported runtime value (typeof = ${typeof v})`
     );
