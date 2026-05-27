@@ -1,7 +1,7 @@
 /**
  * `isnan(x)` — elementwise test for NaN, returning logical 1 / 0.
- * Mirrors numbl's `isnan` for real input. (Complex input is not yet
- * supported; `requireRealDouble` rejects it with a span.)
+ * Real input: per-element `isnan`. Complex input: per-element
+ * `isnan(re) || isnan(im)` (matches numbl / MATLAB).
  */
 import { defineUnaryPred } from "./_unary_pred.js";
 
@@ -11,4 +11,10 @@ export const isnan = defineUnaryPred({
   jsScalar: arg => `(Number.isNaN(${arg}) ? 1 : 0)`,
   jsFn: Number.isNaN,
   tensorHelper: "mtoc2_tensor_predicate",
+  complex: {
+    cScalarComplex: (re, im) => `isnan(${re}) || isnan(${im})`,
+    jsScalarComplex: (re, im) => `Number.isNaN(${re}) || Number.isNaN(${im})`,
+    jsFnComplex: (re, im) => Number.isNaN(re) || Number.isNaN(im),
+    tensorHelperComplex: "mtoc2_tensor_isnan_complex",
+  },
 });

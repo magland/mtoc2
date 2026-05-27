@@ -89,8 +89,8 @@ type Type =
 - `sign` ∈ `{ positive, nonneg, negative, nonpositive, zero,
 nonzero, unknown }` — coarser than exact but stays useful after
   ops that lose `exact`. Tensor sign is derived from the exact data
-  when present (so `sqrt(zeros(N, N))` passes the domain check
-  without needing a runtime branch); the `%!numbl:opaque` directive
+  when present (so `sqrt(zeros(N, N))` stays on the real path
+  rather than lifting to complex); the `%!numbl:opaque` directive
   strips `exact` but leaves `sign` intact.
 - `exact` is the precise value when known. See below.
 
@@ -303,9 +303,9 @@ A second stale-lattice trap: `x = zeros(1, 5)` enters env with
 `sign = nonneg` (derived from the exact zero data), and an `x(3) =
 -10` indexed write leaves the type's `sign` lattice unchanged even
 though the runtime tensor now contains a negative element. Without
-widening, a downstream `sqrt(x)` slips past `requireDomain` and
-the emitted C silently produces `NaN` for that element, diverging
-from numbl's complex result.
+widening, a downstream `sqrt(x)` slips past its `realDomainOk`
+predicate and stays on the real path — diverging from numbl, which
+lifts the call to the complex result a negative input demands.
 
 `widenAfterIndexedWrite` (in `types.ts`) handles this: after every
 `IndexStore` / `IndexSliceStore` lowering, it drops the base's
@@ -367,6 +367,22 @@ helpers without an explicit promote step. Scalar operands of mixed
 real/complex tensor ops are promoted at emit time via
 `mtoc2_cmake(re, 0.0)` so the runtime helper always sees a
 `double _Complex` in its scalar slot.
+
+Unary math builtins whose real domain is bounded (`sqrt`, `log`,
+`log2`, `log10`) lift a real-typed input to the complex path when
+the input's `sign` lattice can't prove it stays in the real domain
+(non-nonneg sign for `sqrt`/`log`-family). The factory wires this
+via `realDomainOk` (predicate) + `complex.liftOnDomainMiss` on the
+builtin's spec; the lift reuses the same complex helpers as a
+genuinely-complex input, with a `mtoc2_cmake(arg, 0.0)` wrap on the
+JS scalar path and a direct hand-off on the C scalar path (C99 also
+auto-promotes, but the explicit wrap keeps emitted JS readable).
+
+**Project rule:** every new builtin lands with complex support — see
+CLAUDE.md's architectural-rules section. Real-only is acceptable
+only when MATLAB itself rejects complex for the op (`atan2`,
+`hypot`, `mod`, `rem`, etc.), and the rejection text must say so
+rather than "not yet supported".
 
 `'` (conjugate transpose) on a complex operand lowers to
 `transpose(conj(z))` at the IR level (per the plan's "no native

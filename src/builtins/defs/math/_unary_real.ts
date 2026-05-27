@@ -4,9 +4,12 @@
  *
  * Mirrors `arithmetic/_elemwise.ts`'s binary factory: one transfer +
  * codegen pair, parametrized over the (`cFnReal`, `jsFn`, `signRule`,
- * `requireDomain`) quadruple. Scalar path emits a bare C `<math.h>`
+ * `realDomainOk`) quadruple. Scalar path emits a bare C `<math.h>`
  * call; tensor path emits a per-name runtime helper that lives in
- * `runtime/tensor_unary_real_math.h`.
+ * `runtime/tensor_unary_real_math.h`. Builtins whose real domain is
+ * limited (`sqrt`, `log`, …) opt in to a real→complex lift via the
+ * `complex.liftOnDomainMiss` flag instead of throwing at translate
+ * time.
  *
  * Exact-fold rule: when every input element is exact AND every output
  * element is finite, attach the result as `exact` on the returned
@@ -127,18 +130,23 @@ export interface UnaryRealMathOpts {
   /** Sign refinement on the result type. Called with the (validated)
    *  real-numeric input type. */
   signRule: (t: NumericType) => Sign;
-  /** Optional input-domain validator (used by `sqrt`, `log`, `log2`,
-   *  `log10`). Called with the input `NumericType`; throws on
-   *  out-of-domain input. `undefined` means "any real input is fine". */
-  requireDomain?: (t: NumericType) => void;
+  /** Optional real-domain predicate. `true` means the real input stays
+   *  on the real path; `false` means it leaves the real domain (would
+   *  produce NaN / -Inf / complex). When `false` AND `complex.liftOnDomainMiss`
+   *  is set, the call lifts to the complex path (real-input,
+   *  complex-output); otherwise the factory throws `TypeError`. */
+  realDomainOk?: (t: NumericType) => boolean;
   /** Optional complex-input support. When set, complex scalars route
    *  through `cFnComplex` (a `mtoc2_c*` helper); complex tensors
    *  route through `mtoc2_tensor_<name>_complex`. `jsFnComplex`
    *  folds at the type-system layer when the input has an exact
-   *  `{re, im}` carrier. */
+   *  `{re, im}` carrier. `liftOnDomainMiss` makes the factory lift
+   *  a real-typed input through the same complex path when
+   *  `realDomainOk` returns false (e.g. `sqrt(-1)`). */
   complex?: {
     cFnComplex: string;
     jsFnComplex: (z: { re: number; im: number }) => { re: number; im: number };
+    liftOnDomainMiss?: boolean;
   };
 }
 
@@ -162,8 +170,19 @@ export function roundingSignRule(
 }
 
 export function defineUnaryRealMath(opts: UnaryRealMathOpts): Builtin {
-  const { name, cFnReal, jsFn, signRule, requireDomain, complex } = opts;
+  const { name, cFnReal, jsFn, signRule, realDomainOk, complex } = opts;
   const jsExpr = opts.jsExpr ?? ((a: string) => `Math.${name}(${a})`);
+  /** True when a real-typed input should route through the complex
+   *  path because it leaves the real domain (e.g. `sqrt(-1)`,
+   *  `log(-2)`). Requires both `realDomainOk` (predicate) and
+   *  `complex.liftOnDomainMiss` (opt-in). Pure on `ty`, so emit / call
+   *  can recompute it without extra state. */
+  const liftRealToComplex = (ty: NumericType): boolean => {
+    if (ty.isComplex) return false;
+    if (realDomainOk === undefined) return false;
+    if (realDomainOk(ty)) return false;
+    return complex !== undefined && complex.liftOnDomainMiss === true;
+  };
   return {
     name,
     transfer(argTypes, nargout) {
@@ -183,9 +202,20 @@ export function defineUnaryRealMath(opts: UnaryRealMathOpts): Builtin {
         requireRealDouble(argTypes[0], `'${name}' arg`);
       }
       const a = argTypes[0] as NumericType;
-      if (a.isComplex) {
+      // Complex result path: either input is already complex, or input
+      // is real but leaves the real domain and we're configured to lift.
+      const lifting = liftRealToComplex(a);
+      if (a.isComplex || lifting) {
         if (isScalar(a)) {
-          const cx = exactComplex(a);
+          // Pick up the exact value in `{re, im}` form regardless of
+          // which side fed us (complex carries `{re, im}`; real lift
+          // projects `re=x, im=0`).
+          const cx = a.isComplex
+            ? exactComplex(a)
+            : (() => {
+                const ax = exactDouble(a);
+                return ax !== undefined ? { re: ax, im: 0 } : undefined;
+              })();
           if (cx !== undefined) {
             const v = complex!.jsFnComplex(cx);
             if (Number.isFinite(v.re) && Number.isFinite(v.im)) {
@@ -194,28 +224,62 @@ export function defineUnaryRealMath(opts: UnaryRealMathOpts): Builtin {
           }
           return [scalarComplex()];
         }
-        const cx = exactComplexArray(a);
-        if (cx !== undefined && a.shape !== undefined) {
-          const total = shapeNumel(a.shape);
-          if (total <= EXACT_ARRAY_MAX_ELEMENTS) {
-            const re = new Float64Array(total);
-            const im = new Float64Array(total);
-            let allFinite = true;
-            for (let i = 0; i < total; i++) {
-              const v = complex!.jsFnComplex({ re: cx.re[i], im: cx.im[i] });
-              if (!Number.isFinite(v.re) || !Number.isFinite(v.im)) {
-                allFinite = false;
-                break;
+        if (a.isComplex) {
+          const cx = exactComplexArray(a);
+          if (cx !== undefined && a.shape !== undefined) {
+            const total = shapeNumel(a.shape);
+            if (total <= EXACT_ARRAY_MAX_ELEMENTS) {
+              const re = new Float64Array(total);
+              const im = new Float64Array(total);
+              let allFinite = true;
+              for (let i = 0; i < total; i++) {
+                const v = complex!.jsFnComplex({
+                  re: cx.re[i],
+                  im: cx.im[i],
+                });
+                if (!Number.isFinite(v.re) || !Number.isFinite(v.im)) {
+                  allFinite = false;
+                  break;
+                }
+                re[i] = v.re;
+                im[i] = v.im;
               }
-              re[i] = v.re;
-              im[i] = v.im;
+              if (allFinite) return [tensorComplex(a.shape, { re, im })];
             }
-            if (allFinite) return [tensorComplex(a.shape, { re, im })];
+          }
+        } else {
+          // Real-tensor lift: project each element through `jsFnComplex`
+          // with im=0 to populate the exact complex result.
+          const arr = exactRealArray(a);
+          if (arr !== undefined && a.shape !== undefined) {
+            const total = shapeNumel(a.shape);
+            if (total <= EXACT_ARRAY_MAX_ELEMENTS) {
+              const re = new Float64Array(total);
+              const im = new Float64Array(total);
+              let allFinite = true;
+              for (let i = 0; i < total; i++) {
+                const v = complex!.jsFnComplex({ re: arr[i], im: 0 });
+                if (!Number.isFinite(v.re) || !Number.isFinite(v.im)) {
+                  allFinite = false;
+                  break;
+                }
+                re[i] = v.re;
+                im[i] = v.im;
+              }
+              if (allFinite) return [tensorComplex(a.shape, { re, im })];
+            }
           }
         }
         return [tensorComplexFromDims(a.dims.slice())];
       }
-      if (requireDomain !== undefined) requireDomain(a);
+      if (realDomainOk !== undefined && !realDomainOk(a)) {
+        throw new TypeError(
+          `'${name}' of input that may leave the real domain is not yet ` +
+            `supported for real-typed input (would produce NaN / -Inf or ` +
+            `a complex result). Guard upstream or make the input complex ` +
+            `(e.g. '${name}(x + 0i)').`
+        );
+      }
 
       if (isScalar(a)) {
         const ax = exactDouble(a);
@@ -249,13 +313,22 @@ export function defineUnaryRealMath(opts: UnaryRealMathOpts): Builtin {
     },
     emitC({ argsC, argTypes, useRuntime }) {
       const ty = argTypes[0] as NumericType;
-      if (isNumeric(ty) && ty.isComplex) {
+      const lifting = liftRealToComplex(ty);
+      if ((isNumeric(ty) && ty.isComplex) || lifting) {
         useRuntime("mtoc2_cscalar");
         if (isMultiElement(ty)) {
+          // Complex tensor helpers tolerate a real-tensor input
+          // (`imag == NULL`), so the lift path passes the real tensor
+          // straight through with no promote step.
           useRuntime("mtoc2_tensor_unary_complex_math");
           return `mtoc2_tensor_${name}_complex(${argsC[0]})`;
         }
-        return `${complex!.cFnComplex}(${argsC[0]})`;
+        // Scalar lift: promote the `double` arg into `double _Complex`
+        // via `mtoc2_cmake(arg, 0.0)` to match the binary elemwise
+        // convention. C99 would auto-promote here, but the explicit
+        // form keeps the emitted C self-evidently complex-typed.
+        const arg = lifting ? `mtoc2_cmake(${argsC[0]}, 0.0)` : argsC[0];
+        return `${complex!.cFnComplex}(${arg})`;
       }
       if (isMultiElement(ty)) {
         useRuntime("mtoc2_tensor_unary_real_math");
@@ -273,7 +346,8 @@ export function defineUnaryRealMath(opts: UnaryRealMathOpts): Builtin {
     },
     emitJs({ argsJs, argTypes, useRuntime }) {
       const ty = argTypes[0] as NumericType;
-      if (isNumeric(ty) && ty.isComplex) {
+      const lifting = liftRealToComplex(ty);
+      if ((isNumeric(ty) && ty.isComplex) || lifting) {
         if (isMultiElement(ty)) {
           if (JS_TENSOR_UNARY_COMPLEX[name] === undefined) {
             throw new UnsupportedConstruct(
@@ -285,7 +359,10 @@ export function defineUnaryRealMath(opts: UnaryRealMathOpts): Builtin {
           return `mtoc2_tensor_${name}_complex(${argsJs[0]})`;
         }
         useRuntime("mtoc2_cscalar");
-        return `${complex!.cFnComplex}(${argsJs[0]})`;
+        // Real-scalar lift: JS has no implicit real→complex promotion,
+        // so wrap explicitly in `{re, im}` via `mtoc2_cmake`.
+        const arg = lifting ? `mtoc2_cmake(${argsJs[0]}, 0.0)` : argsJs[0];
+        return `${complex!.cFnComplex}(${arg})`;
       }
       if (isMultiElement(ty)) {
         if (JS_TENSOR_UNARY[name] === undefined) {
@@ -300,7 +377,8 @@ export function defineUnaryRealMath(opts: UnaryRealMathOpts): Builtin {
     },
     call({ args, argTypes }) {
       const ty = argTypes[0] as NumericType;
-      if (isNumeric(ty) && ty.isComplex) {
+      const lifting = liftRealToComplex(ty);
+      if ((isNumeric(ty) && ty.isComplex) || lifting) {
         if (isMultiElement(ty)) {
           const kernel = JS_TENSOR_UNARY_COMPLEX[name];
           if (kernel === undefined) {

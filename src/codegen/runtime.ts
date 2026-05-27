@@ -471,6 +471,16 @@ const REGISTRY: ReadonlyMap<string, RuntimeSnippet> = new Map<
     "mtoc2_tensor_predicate",
     loadSnippet("tensor_predicate.h", ["mtoc2_tensor_t", "mtoc2_alloc"]),
   ],
+  // Complex-tensor → logical-tensor predicates (`isnan_complex`,
+  // `isinf_complex`, `isfinite_complex`, `not_complex`). The result
+  // is real-typed (logical); only the input needs complex storage.
+  [
+    "mtoc2_tensor_predicate_complex",
+    loadSnippet("tensor_predicate_complex.h", [
+      "mtoc2_tensor_t",
+      "mtoc2_alloc",
+    ]),
+  ],
   // Prefix scans (`cumsum`, `cumprod`). One snippet defines both
   // helpers; the builtin dispatches on op kind.
   [

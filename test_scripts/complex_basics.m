@@ -17,6 +17,12 @@ test_tensor_arith_ts();
 test_tensor_arith_st();
 test_tensor_arith_bcast();
 test_tensor_arith_mixed_real();
+test_real_lift_scalar();
+test_real_lift_tensor();
+test_real_lift_opaque();
+test_complex_predicates_scalar();
+test_complex_predicates_tensor();
+test_complex_not();
 
 function test_literals()
   disp(1i);
@@ -212,4 +218,72 @@ function test_tensor_arith_mixed_real()
   disp(c .* r);
   disp(c ./ r);
   disp(-c);
+end
+
+% sqrt / log / log2 / log10 of real inputs that leave the real domain
+% lift to the complex path. Scalar exact-fold path.
+function test_real_lift_scalar()
+  disp(sqrt(-1));
+  disp(sqrt(-4));
+  disp(log(-1));
+  disp(log2(-4));
+  disp(log10(-100));
+end
+
+% sqrt / log lift on real tensor inputs (mix of negative and non-negative
+% entries → sign:nonzero → lifts; result is a complex tensor).
+function test_real_lift_tensor()
+  disp(sqrt([-1, 4, -9]));
+  disp(log([-1, 1, -exp(1)]));
+end
+
+% Opaque (sign-stripped → unknown) real input lifts on the runtime path,
+% no compile-time exact-fold available.
+function test_real_lift_opaque()
+  x = -1;
+  %!numbl:opaque x
+  disp(sqrt(x));
+
+  y = -2;
+  %!numbl:opaque y
+  disp(log(y));
+
+  z = [-1, 4, -9];
+  %!numbl:opaque z
+  disp(sqrt(z));
+end
+
+% Per-component NaN/Inf/finite checks on complex scalars: any
+% NaN-component → isnan true; any Inf-component → isinf true;
+% all-finite → isfinite true (matches numbl / MATLAB).
+function test_complex_predicates_scalar()
+  z = 1 + 2i;
+  disp(isnan(z));
+  disp(isnan(NaN + 0i));
+  disp(isnan(1 + NaN*1i));
+  disp(isinf(Inf + 0i));
+  disp(isinf(1 + Inf*1i));
+  disp(isinf(z));
+  disp(isfinite(z));
+  disp(isfinite(Inf + 0i));
+  disp(isfinite(1 + NaN*1i));
+end
+
+% Same predicates on complex tensors — exercises the
+% `_complex` per-element runtime helper.
+function test_complex_predicates_tensor()
+  v = [1+1i, NaN+0i, Inf+0i, 0+NaN*1i];
+  disp(isnan(v));
+  disp(isinf(v));
+  disp(isfinite(v));
+end
+
+% Logical NOT on complex scalars and tensors. Zero in both
+% components is "true" under `~`; any nonzero component → "false".
+function test_complex_not()
+  disp(~(0+0i));
+  disp(~(1+0i));
+  disp(~(0+1i));
+  w = [0+0i, 1+0i, 0+1i, 2+3i];
+  disp(~w);
 end

@@ -404,6 +404,18 @@ read the env at the lowering point.
   `IRFunc` and `IRStmt` to a numbl-like comment. The c-aot emitter
   places these above every specialized definition and statement.
   Synthetic ANF temps and folded branches show through.
+- **New builtins ship with complex support**. Every builtin landing in
+  mtoc2 must handle complex inputs in the same PR — across all three
+  backends (`transfer`, `call`, `emitJs`, `emitC`). Real-only is
+  acceptable only when MATLAB itself rejects complex for the op
+  (e.g. `atan2`, `hypot`, `mod`, `rem`), and the rejection message
+  must say so. Elemwise math hooks into the `complex` slot on the
+  unary / binary factory (paired `mtoc2_c*` scalar + `_complex`
+  tensor helper); shape / layout / indexing ops walk both `real` and
+  `imag` lanes (the complex tensor helpers tolerate `imag == NULL`
+  for the real-input case). New cross-runner coverage goes in
+  `complex_basics.m` or the relevant topic file so a future
+  regression trips the all-modes runner.
 
 ## Naming
 

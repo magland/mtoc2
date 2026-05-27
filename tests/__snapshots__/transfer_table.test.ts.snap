@@ -827,9 +827,10 @@ exports[`builtin transfer-table snapshot > sin > tensor nonneg 1`] = `
 
 exports[`builtin transfer-table snapshot > sqrt > scalar opaque 1`] = `
 {
-  "errorClass": "TypeError",
-  "errorMessage": "'sqrt' of input that may be negative is not yet supported for real-typed input (would produce a complex result). Either guard upstream or make the input complex (e.g. 'sqrt(x + 0i)').",
-  "ok": false,
+  "ok": true,
+  "outputs": [
+    "complex(double)[1×1]",
+  ],
 }
 `;
 

@@ -14,9 +14,16 @@
 export type C = { re: number; im: number };
 
 export function cSqrt(z: C): C {
-  const mag = Math.sqrt(Math.hypot(z.re, z.im));
-  const phase = 0.5 * Math.atan2(z.im, z.re);
-  return { re: mag * Math.cos(phase), im: mag * Math.sin(phase) };
+  // Smith's stable formula — matches `mtoc2_csqrt` in cscalar.js
+  // exactly. The polar form (`mag * cos/sin(phase/2)`) carries a
+  // ~6e-17 real residue for pure-real negative input because
+  // `Math.cos(pi/2)` isn't exactly 0; the Smith form returns clean
+  // `{re: 0, im: sqrt(-re)}` for that case.
+  const r = Math.hypot(z.re, z.im);
+  if (r === 0) return { re: 0, im: 0 };
+  const re = Math.sqrt((r + z.re) / 2);
+  const im = (z.im >= 0 ? 1 : -1) * Math.sqrt((r - z.re) / 2);
+  return { re, im };
 }
 
 export function cExp(z: C): C {

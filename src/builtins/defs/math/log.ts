@@ -1,24 +1,19 @@
 import { defineUnaryRealMath } from "./_unary_real.js";
-import { TypeError } from "../../../lowering/errors.js";
-import { signIsPositive } from "../../../lowering/types.js";
+import { signIsNonneg } from "../../../lowering/types.js";
 import { cLog } from "./_complex_fold.js";
 
-/** Natural log. Real-path domain: strictly positive. Complex inputs
- *  skip the domain check and fold/emit through `mtoc2_clog`.
- */
+/** Natural log. Provably non-negative real inputs stay on the real
+ *  path (`log(0) = -Inf` is still real-typed in MATLAB); anything that
+ *  could be negative lifts to the complex path. */
 export const log = defineUnaryRealMath({
   name: "log",
   cFnReal: "log",
   jsFn: Math.log,
   signRule: () => "unknown",
-  requireDomain: t => {
-    if (!signIsPositive(t.sign)) {
-      throw new TypeError(
-        `'log' of input that is not statically positive is not yet supported ` +
-          `for real-typed input (produces -Inf or complex). Guard upstream ` +
-          `or make the input complex (e.g. 'log(x + 0i)').`
-      );
-    }
+  realDomainOk: t => signIsNonneg(t.sign),
+  complex: {
+    cFnComplex: "mtoc2_clog",
+    jsFnComplex: cLog,
+    liftOnDomainMiss: true,
   },
-  complex: { cFnComplex: "mtoc2_clog", jsFnComplex: cLog },
 });

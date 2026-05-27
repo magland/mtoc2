@@ -1,90 +1,127 @@
 /**
- * Domain-rejection tests for `sqrt`, `log`, `log2`, `log10`.
+ * Real-domain handling for `sqrt`, `log`, `log2`, `log10`.
  *
- * mtoc2 has no complex type yet; the cross-runner can't compare a
- * mtoc2 TypeError against numbl's complex result, so these
- * "translation must error" cases live in vitest.
+ * Each of these builtins stays on the real path when the input is
+ * provably in the real domain, and lifts to the complex path
+ * (real input → complex output via `mtoc2_csqrt` / `mtoc2_clog` / …)
+ * when it isn't. The cross-runner already covers byte-for-byte
+ * agreement with numbl; these tests pin the lattice contract so a
+ * regression that re-introduces a translate-time throw (or that
+ * silently keeps a real-domain miss on the real path) is caught
+ * before the slower runners.
  */
 
-import { describe, it, expect } from "vitest";
-import { parseMFile } from "../src/parser/index.js";
-import { Lowerer } from "../src/lowering/lower.js";
-import { Workspace } from "../src/workspace/workspace.js";
-import { TypeError } from "../src/lowering/errors.js";
+import { describe, expect, it } from "vitest";
+import "../src/builtins/index.js";
+import { getBuiltin } from "../src/builtins/registry.js";
+import {
+  type NumericType,
+  type Type,
+  scalarDouble,
+  tensorDouble,
+  isNumeric,
+} from "../src/lowering/types.js";
 
-function lower(source: string, fileName = "test.m"): void {
-  const ast = parseMFile(source, fileName);
-  const ws = new Workspace(fileName);
-  ws.addFile({ name: fileName, source, ast });
-  new Lowerer(ws).lowerProgram(ast);
+function transfer(name: string, argTypes: Type[]): Type {
+  const b = getBuiltin(name);
+  if (!b) throw new Error(`builtin '${name}' not registered`);
+  const out = b.transfer(argTypes, 1);
+  return out[0];
 }
 
-function expectTypeError(source: string, msg: RegExp): void {
-  let caught: unknown = null;
-  try {
-    lower(source);
-  } catch (e) {
-    caught = e;
-  }
-  expect(caught).toBeInstanceOf(TypeError);
-  expect((caught as Error).message).toMatch(msg);
-}
-
-describe("sqrt rejects non-statically-nonneg input", () => {
-  it("rejects a negative literal", () => {
-    expectTypeError("x = sqrt(-1);", /sqrt.*may be negative/);
-  });
-
-  it("accepts sqrt of an exact nonneg literal", () => {
-    expect(() => lower("disp(sqrt(4));")).not.toThrow();
-  });
-
-  it("accepts sqrt of a tensor literal with nonneg elements", () => {
-    expect(() => lower("disp(sqrt([0 1 4 9]));")).not.toThrow();
-  });
-
-  it("rejects sqrt of a tensor literal with a negative element", () => {
-    // The tensor's sign is derived from exact data; `[-1 4]` has sign
-    // `nonzero` (mixed positive/negative, no zero), which is NOT nonneg.
-    expectTypeError("disp(sqrt([-1 4]));", /sqrt.*may be negative/);
-  });
-
-  it("accepts sqrt(zeros(n,n)) — fill value is statically nonneg", () => {
-    expect(() => lower("disp(sqrt(zeros(3, 3)));")).not.toThrow();
-  });
-
-  it("rejects sqrt of an opaque'd negative scalar", () => {
-    // The opaque directive strips `exact` but preserves `sign`. The
-    // literal -1 starts with `sign:"negative"`, so the post-opaque
-    // value is still statically not nonneg.
-    expectTypeError(
-      ["x = -1;", "%!numbl:opaque x", "disp(sqrt(x));"].join("\n"),
-      /sqrt.*may be negative/
+function expectReal(name: string, argTypes: Type[]): NumericType {
+  const ty = transfer(name, argTypes);
+  if (!isNumeric(ty) || ty.isComplex) {
+    throw new Error(
+      `expected real result from '${name}', got ${JSON.stringify(ty)}`
     );
+  }
+  return ty;
+}
+
+function expectComplex(name: string, argTypes: Type[]): NumericType {
+  const ty = transfer(name, argTypes);
+  if (!isNumeric(ty) || !ty.isComplex) {
+    throw new Error(
+      `expected complex result from '${name}', got ${JSON.stringify(ty)}`
+    );
+  }
+  return ty;
+}
+
+describe("sqrt", () => {
+  it("stays real for nonneg scalar", () => {
+    expectReal("sqrt", [scalarDouble("positive", 4)]);
+    expectReal("sqrt", [scalarDouble("nonneg")]);
+    expectReal("sqrt", [scalarDouble("zero", 0)]);
+  });
+
+  it("stays real for a nonneg tensor literal", () => {
+    expectReal("sqrt", [tensorDouble([4], new Float64Array([0, 1, 4, 9]))]);
+  });
+
+  it("stays real for zeros(n, n) (fill sign is statically nonneg)", () => {
+    // zeros' transfer produces a real tensor with sign:"zero"; the
+    // result of sqrt is the same shape, real, sign:"nonneg".
+    const z = transfer("zeros", [scalarDouble("positive", 3)]);
+    expectReal("sqrt", [z]);
+  });
+
+  it("lifts a negative literal to complex", () => {
+    expectComplex("sqrt", [scalarDouble("negative", -1)]);
+  });
+
+  it("lifts a tensor with mixed-sign elements to complex", () => {
+    // `[-1 4]` has sign "nonzero" (positive + negative, no zero),
+    // which is not in the nonneg subset → lift.
+    expectComplex("sqrt", [tensorDouble([2], new Float64Array([-1, 4]))]);
+  });
+
+  it("lifts an opaque scalar (sign:unknown) to complex", () => {
+    expectComplex("sqrt", [scalarDouble("unknown")]);
+  });
+
+  it("folds an exact negative scalar to an exact complex result", () => {
+    const ty = expectComplex("sqrt", [scalarDouble("negative", -1)]);
+    expect(ty.exact).toEqual({ re: 0, im: 1 });
   });
 });
 
-describe("log/log2/log10 reject non-statically-positive input", () => {
-  it("rejects log(0)", () => {
-    expectTypeError("disp(log(0));", /log.*not statically positive/);
+describe("log / log2 / log10", () => {
+  it("stay real for positive scalar input", () => {
+    expectReal("log", [scalarDouble("positive", 1)]);
+    expectReal("log2", [scalarDouble("positive", 4)]);
+    expectReal("log10", [scalarDouble("positive", 100)]);
   });
 
-  it("rejects log(-1)", () => {
-    expectTypeError("disp(log(-1));", /log.*not statically positive/);
+  it("stay real for a nonneg input including zero (log(0) = -Inf is real)", () => {
+    // sign:"zero" stays on the real path; the exact-fold rejects
+    // `Math.log(0) = -Inf` (non-finite), so we just confirm the
+    // output type is real (the runtime will emit -Inf at exec).
+    expectReal("log", [scalarDouble("zero", 0)]);
+    expectReal("log2", [scalarDouble("nonneg")]);
   });
 
-  it("accepts log of an exact positive literal", () => {
-    expect(() => lower("disp(log(1));")).not.toThrow();
+  it("stay real for a provably-positive tensor literal", () => {
+    expectReal("log10", [tensorDouble([3], new Float64Array([1, 10, 100]))]);
   });
 
-  it("rejects log2 of an opaque'd nonneg scalar (could be zero)", () => {
-    expectTypeError(
-      ["x = 0;", "%!numbl:opaque x", "disp(log2(x));"].join("\n"),
-      /log2.*not statically positive/
-    );
+  it("lift a negative scalar literal to complex", () => {
+    expectComplex("log", [scalarDouble("negative", -1)]);
+    expectComplex("log2", [scalarDouble("negative", -4)]);
+    expectComplex("log10", [scalarDouble("negative", -100)]);
   });
 
-  it("accepts log10 of a positive tensor literal", () => {
-    expect(() => lower("disp(log10([1 10 100]));")).not.toThrow();
+  it("lift an opaque scalar (sign:unknown) to complex", () => {
+    expectComplex("log", [scalarDouble("unknown")]);
+  });
+
+  it("folds an exact negative log to an exact complex result", () => {
+    const ty = expectComplex("log", [scalarDouble("negative", -1)]);
+    // log(-1) = 0 + i*pi.
+    expect(ty.exact).toBeDefined();
+    const cx = ty.exact as { re: number; im: number };
+    expect(cx.re).toBeCloseTo(0, 12);
+    expect(cx.im).toBeCloseTo(Math.PI, 12);
   });
 });

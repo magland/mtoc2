@@ -25,10 +25,16 @@ import {
   typeToString,
 } from "../../../lowering/types.js";
 import type { Builtin } from "../../registry.js";
-import { exactDouble, exactRealArray, exactComplex } from "../_shared.js";
+import {
+  exactDouble,
+  exactRealArray,
+  exactComplex,
+  exactComplexArray,
+} from "../_shared.js";
 import {
   mtoc2_cnonzero,
   mtoc2_tensor_not as jsTensorNot,
+  mtoc2_tensor_not_complex as jsTensorNotComplex,
 } from "../../runtime/snippets.gen.js";
 import {
   isComplexValue,
@@ -75,12 +81,6 @@ export const notBuiltin: Builtin = {
         `'~' / 'not' arg must be a real double or logical (got ${a.elem})`
       );
     }
-    if (a.isComplex && isMultiElement(a)) {
-      throw new UnsupportedConstruct(
-        `'~' on a complex tensor is not yet supported`
-      );
-    }
-
     // Scalar input → scalar logical, sign nonneg.
     if (isScalar(a)) {
       if (a.isComplex) {
@@ -99,6 +99,20 @@ export const notBuiltin: Builtin = {
 
     // Tensor input → logical tensor of same shape. Exact-fold within
     // the element-count cap.
+    if (a.isComplex) {
+      const cx = exactComplexArray(a);
+      if (a.shape !== undefined && cx !== undefined) {
+        const total = shapeNumel(a.shape);
+        if (total <= EXACT_ARRAY_MAX_ELEMENTS) {
+          const out = new Float64Array(total);
+          for (let i = 0; i < total; i++) {
+            out[i] = cx.re[i] === 0 && cx.im[i] === 0 ? 1.0 : 0.0;
+          }
+          return [logicalTensor(a.dims, a.shape, out)];
+        }
+      }
+      return [logicalTensor(a.dims, a.shape)];
+    }
     const arr = exactRealArray(a);
     if (a.shape !== undefined && arr !== undefined) {
       const total = shapeNumel(a.shape);
@@ -113,11 +127,15 @@ export const notBuiltin: Builtin = {
     return [logicalTensor(a.dims, a.shape)];
   },
   emitC({ argsC, argTypes, useRuntime }) {
-    if (isMultiElement(argTypes[0])) {
+    const a = argTypes[0] as NumericType;
+    if (isMultiElement(a)) {
+      if (a.isComplex) {
+        useRuntime("mtoc2_tensor_predicate_complex");
+        return `mtoc2_tensor_not_complex(${argsC[0]})`;
+      }
       useRuntime("mtoc2_tensor_logical_real");
       return `mtoc2_tensor_not(${argsC[0]})`;
     }
-    const a = argTypes[0] as NumericType;
     if (a.isComplex) {
       useRuntime("mtoc2_cscalar");
       // Complex scalar is "false" iff both parts are exactly 0.
@@ -129,11 +147,15 @@ export const notBuiltin: Builtin = {
     return `((${argsC[0]}) == 0.0 ? 1.0 : 0.0)`;
   },
   emitJs({ argsJs, argTypes, useRuntime }) {
-    if (isMultiElement(argTypes[0])) {
+    const a = argTypes[0] as NumericType;
+    if (isMultiElement(a)) {
+      if (a.isComplex) {
+        useRuntime("mtoc2_tensor_predicate_complex");
+        return `mtoc2_tensor_not_complex(${argsJs[0]})`;
+      }
       useRuntime("mtoc2_tensor_logical_real");
       return `mtoc2_tensor_not(${argsJs[0]})`;
     }
-    const a = argTypes[0] as NumericType;
     if (a.isComplex) {
       useRuntime("mtoc2_cscalar");
       return `(mtoc2_cnonzero(${argsJs[0]}) ? 0 : 1)`;
@@ -141,18 +163,19 @@ export const notBuiltin: Builtin = {
     return `((${argsJs[0]}) == 0 ? 1 : 0)`;
   },
   call({ args, argTypes }) {
-    if (isMultiElement(argTypes[0])) {
-      const a = argTypes[0] as NumericType;
+    const a = argTypes[0] as NumericType;
+    if (isMultiElement(a)) {
       if (a.isComplex) {
-        throw new UnsupportedConstruct(
-          `'not' complex-tensor 'call' not yet wired`
-        );
+        return [
+          jsTensorNotComplex(
+            args[0] as RuntimeTensor
+          ) as unknown as RuntimeTensor,
+        ];
       }
       return [
         jsTensorNot(args[0] as RuntimeTensor) as unknown as RuntimeTensor,
       ];
     }
-    const a = argTypes[0] as NumericType;
     if (a.isComplex) {
       const v = args[0] as RuntimeValue;
       const cx = isComplexValue(v) ? v : { re: Number(v), im: 0 };
