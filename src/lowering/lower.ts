@@ -143,6 +143,17 @@ export class Lowerer {
   /** Monotonic counter for synthesizing `_mtoc2_t1`, `_mtoc2_t2`, ...
    *  hoist-temp names. Reset per function specialization. */
   tempCounter: number = 0;
+  /** Monotonic counter for the synthetic suffix used when an
+   *  incompatible reassignment is split into a fresh binding
+   *  (`_mtoc2_<cName>__v<N>`). See `recordAssignment`. Per-Lowerer, so
+   *  each function specialization / script scope numbers independently. */
+  splitCounter: number = 0;
+  /** Nesting depth inside `if` / `while` / `for` bodies. Bumped by
+   *  `withControlDepth` around each body lowering. An incompatible
+   *  reassignment can only be *split* at depth 0 (straight-line scope);
+   *  inside a branch or loop the env merge can't reconcile two storage
+   *  categories under one name, so it throws instead. */
+  controlDepth: number = 0;
   /** Expression-level hoist statements queued by sub-lowerings that
    *  can't pass a `hoists` array up the IR-expression return chain.
    *  Used today by member-rooted indexing (`obj.field(args)`) to push a
@@ -202,6 +213,19 @@ export class Lowerer {
    *  scope, or undefined otherwise. */
   envLookup(name: string): EnvEntry | undefined {
     return this.env.get(name);
+  }
+
+  /** Run `fn` with `controlDepth` incremented; restored on exit. Used by
+   *  `lowerIf` / `lowerWhile` / `lowerFor` to mark "we're inside a
+   *  branch or loop body" so an incompatible reassignment throws rather
+   *  than splitting (see `recordAssignment`). */
+  withControlDepth<T>(fn: () => T): T {
+    this.controlDepth++;
+    try {
+      return fn();
+    } finally {
+      this.controlDepth--;
+    }
   }
 
   /** Look up a registered class (workspace or local) by name. */
@@ -968,18 +992,43 @@ export class Lowerer {
     // used for `MemberStore` writes — it compares `cFieldTypeStr` so
     // it catches every C-level slot mismatch.
     if (existing && !storageEquivalent(existing.ty, expr.ty)) {
-      if (isMultiElement(existing.ty) !== isMultiElement(expr.ty)) {
+      // Incompatible reassignment: the new value can't share the prior
+      // binding's C variable (scalar↔tensor, char↔double, different
+      // struct/class/handle storage, ...). At the top level of a scope
+      // we SPLIT — allocate a fresh C local for the new value and
+      // repoint the name's env entry at it. Subsequent reads see the new
+      // binding; earlier reads of the old one stay valid. The predeclare
+      // walk (`collectAllLocals`) keys by cName, so each binding is
+      // declared, lived, and freed independently. Inside control flow we
+      // can't split: the branch / loop env merge would have to reconcile
+      // two storage categories under one name (`mergeBranchEnvs` keeps a
+      // single cName per key), so we throw with a span instead.
+      if (this.controlDepth > 0) {
+        if (isMultiElement(existing.ty) !== isMultiElement(expr.ty)) {
+          throw new UnsupportedConstruct(
+            `cannot reassign '${name}' across scalar/tensor boundary ` +
+              `inside control flow`,
+            span
+          );
+        }
         throw new UnsupportedConstruct(
-          `cannot reassign '${name}' across scalar/tensor boundary`,
+          `cannot reassign '${name}': new value's C storage ` +
+            `(${typeToString(expr.ty)}) is incompatible with the ` +
+            `existing binding (${typeToString(existing.ty)}) inside ` +
+            `control flow`,
           span
         );
       }
-      throw new UnsupportedConstruct(
-        `cannot reassign '${name}': new value's C storage ` +
-          `(${typeToString(expr.ty)}) is incompatible with the ` +
-          `existing binding (${typeToString(existing.ty)})`,
-        span
-      );
+      const splitCName = `_mtoc2_${existing.cName}__v${++this.splitCounter}`;
+      this.env.set(name, { cName: splitCName, ty: expr.ty });
+      return {
+        kind: "Assign",
+        name,
+        cName: splitCName,
+        ty: expr.ty,
+        expr,
+        span,
+      };
     }
     const cName = existing?.cName ?? cIdentForUserName(name);
     this.env.set(name, { cName, ty: expr.ty });
@@ -1036,29 +1085,31 @@ export class Lowerer {
     const envBefore = new Map(this.env);
     const branchEnvs: Map<string, EnvEntry>[] = [];
 
-    // Then-branch.
-    this.env = new Map(envBefore);
-    const thenBody = this.lowerStmts(s.thenBody);
-    branchEnvs.push(this.env);
+    return this.withControlDepth(() => {
+      // Then-branch.
+      this.env = new Map(envBefore);
+      const thenBody = this.lowerStmts(s.thenBody);
+      branchEnvs.push(this.env);
 
-    // Else chain.
-    this.env = new Map(envBefore);
-    const elseBody = this.lowerElseChain(
-      s.elseifBlocks,
-      s.elseBody,
-      envBefore,
-      branchEnvs
-    );
+      // Else chain.
+      this.env = new Map(envBefore);
+      const elseBody = this.lowerElseChain(
+        s.elseifBlocks,
+        s.elseBody,
+        envBefore,
+        branchEnvs
+      );
 
-    // Merge.
-    this.env = this.mergeBranchEnvs(branchEnvs);
-    return {
-      kind: "If",
-      cond,
-      thenBody,
-      elseBody,
-      span: s.span,
-    };
+      // Merge.
+      this.env = this.mergeBranchEnvs(branchEnvs);
+      return {
+        kind: "If",
+        cond,
+        thenBody,
+        elseBody,
+        span: s.span,
+      };
+    });
   }
 
   private lowerElseChain(
@@ -1114,7 +1165,7 @@ export class Lowerer {
     stripExactFromEnv(this.env, collectAssignedNames(s.body));
     const cond = this.lowerExpr(s.cond);
     this.requireScalarCondType(cond.ty, "while condition", s.span);
-    const body = this.lowerStmts(s.body);
+    const body = this.withControlDepth(() => this.lowerStmts(s.body));
     this.env = this.mergeBranchEnvs([envBefore, this.env]);
     return { kind: "While", cond, body, span: s.span };
   }
@@ -1176,7 +1227,7 @@ export class Lowerer {
 
     stripExactFromEnv(this.env, collectAssignedNames(s.body));
 
-    const body = this.lowerStmts(s.body);
+    const body = this.withControlDepth(() => this.lowerStmts(s.body));
     this.env = this.mergeBranchEnvs([envBefore, this.env]);
     return {
       kind: "For",
