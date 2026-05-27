@@ -403,3 +403,28 @@ lint && npm run format:check`. All clean.
 
 When in doubt about a feature's semantics, read numbl, not MATLAB
 documentation. mtoc2's dialect is numbl's dialect.
+
+## Patching chunkie sources
+
+A small number of chunkie source files use language features that
+mtoc2 deliberately rejects (the contract is "feature X isn't
+supported in any backend" — see the scope section of
+[../CLAUDE.md](../CLAUDE.md)). When that's the only thing
+blocking the driver and the fix is a local, semantically-
+equivalent rewrite, we patch the chunkie file in place in the
+local clone (`/home/magland/src/chunkie/`) rather than grow
+mtoc2's accepted-feature surface.
+
+Each patch must be byte-for-byte equivalent under numbl — i.e.
+the patched file produces the same outputs when numbl runs the
+driver. Confirm by running
+`npx tsx ../numbl/src/cli.ts run tmp/chunkie_ex01_circle.m`
+both before and after the edit. Mark the patched region with an
+`mtoc2-patch:` comment explaining what was rewritten and why.
+
+Patches applied so far:
+
+- `@chunkerpref/chunkerpref.m` — the `for f = fieldnames(s), obj.(f) = ...`
+  field-merge loop rewrote to explicit per-field
+  copies + `isfield` checks. mtoc2 rejects dynamic field access
+  (`obj.(nameExpr)`) in every backend.

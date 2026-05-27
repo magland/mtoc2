@@ -117,11 +117,14 @@ writes (`M(:, mask) = rhs` — the linear form `a(mask) = rhs` works),
 vector-of-indices writes (`a(idx_vec) = rhs`), indexed delete
 (`a(2:5) = []`), cell paren-indexing (`c(1:3)`) and cell auto-grow
 on out-of-bounds writes, char arithmetic (`'A' + 1`), builtin
-handles (`@disp`), `private/` directories, and `import` statements. `.mtoc2.js` user
-functions that declare `cSources` work via `mtoc2 run` but not via
-the `translate` subcommand (which produces a single C string and
-can't represent sibling C files). Expanding scope is gated by the
-cross-runner.
+handles (`@disp`), `private/` directories, `import` statements, and
+**dynamic field access** (`obj.(nameExpr)` reads and
+`obj.(nameExpr) = rhs` writes) — rejected by every backend for
+parity; the AOT lowerer can't pick a static C struct slot for a
+runtime-known field name. `.mtoc2.js` user functions that declare
+`cSources` work via `mtoc2 run` but not via the `translate`
+subcommand (which produces a single C string and can't represent
+sibling C files). Expanding scope is gated by the cross-runner.
 
 Coverage parity across backends is uneven today — c-aot is the most
 complete, js-aot and the interpreter have gaps documented in
