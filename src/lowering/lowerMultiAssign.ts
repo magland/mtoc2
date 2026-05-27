@@ -74,25 +74,35 @@ export function lowerMultiAssign(
     );
   }
   const fc = { name: callName, args: argExprs, span: callSpan };
+  // Expand a single `[out{1:nout}]` style brace-with-range lvalue
+  // into N separate `out{k}` IndexCell lvalues — comma-list LHS
+  // expansion (phase C of cells_plan.md). The range bounds must be
+  // statically known at lowering so the arity is fixed.
+  const expandedLvalues = expandRangeCellLvalues.call(this, s.lvalues, s.span);
+
   // Validate lvalues up-front. Var / Ignore are the direct sret
-  // targets; Member and Index lvalues are accepted via a temp-
-  // substitute pass that lands the call into freshly-named locals
-  // and then runs a synthesized per-slot AssignLValue through the
-  // regular write paths. MemberDynamic / IndexCell are out of scope.
-  for (const lv of s.lvalues) {
+  // targets; Member, Index, and IndexCell lvalues are accepted via
+  // a temp-substitute pass that lands the call into freshly-named
+  // locals and then runs a synthesized per-slot AssignLValue through
+  // the regular write paths. MemberDynamic is out of scope.
+  for (const lv of expandedLvalues) {
     if (
       lv.type !== "Var" &&
       lv.type !== "Ignore" &&
       lv.type !== "Member" &&
-      lv.type !== "Index"
+      lv.type !== "Index" &&
+      lv.type !== "IndexCell"
     ) {
       throw new UnsupportedConstruct(
         `multi-assign lvalue must be a simple identifier, '~' ignore, ` +
-          `a member access, or an indexed write (got '${lv.type}')`,
+          `a member access, an indexed write, or a brace-indexed cell ` +
+          `write (got '${lv.type}')`,
         s.span
       );
     }
   }
+  // Switch over to the expanded lvalues for the rest of this lower.
+  s = { ...s, lvalues: expandedLvalues };
   // Handle multi-output via in-scope handle variable: route to the
   // handle dispatch path (it specializes the underlying target at the
   // caller's nargout and emits the same Call / MultiAssignCall IR
@@ -477,4 +487,81 @@ function buildBuiltinMultiAssign(
   const postStmts = lowerPostStores.call(this, sub.postStores);
   const head: IRStmt[] = argHoists.length === 0 ? [mac] : [...argHoists, mac];
   return [...head, ...postStmts];
+}
+
+/** Expand `[out{1:nout}]` / `[out{start:end}]` style multi-assign
+ *  LHS into N separate `out{k}` IndexCell lvalues — the LHS shape
+ *  of cell comma-list expansion (phase C of docs/cells_plan.md).
+ *
+ *  The expansion only fires when:
+ *    - the LHS list has exactly one entry, AND
+ *    - that entry is an `IndexCell` with exactly one index, AND
+ *    - the index is a `Range` whose bounds resolve statically.
+ *
+ *  Everything else passes through unchanged. */
+function expandRangeCellLvalues(
+  this: Lowerer,
+  lvalues: ReadonlyArray<LValue>,
+  span: Span
+): LValue[] {
+  if (lvalues.length !== 1) return lvalues.slice();
+  const lv = lvalues[0];
+  if (lv.type !== "IndexCell") return lvalues.slice();
+  if (lv.indices.length !== 1) return lvalues.slice();
+  const idx = lv.indices[0];
+  if (idx.type !== "Range") return lvalues.slice();
+  const startTy = this.lowerExpr(idx.start).ty;
+  const endTy = this.lowerExpr(idx.end).ty;
+  const stepTy = idx.step !== null ? this.lowerExpr(idx.step).ty : null;
+  const startExact =
+    startTy.kind === "Numeric" && typeof startTy.exact === "number"
+      ? startTy.exact
+      : null;
+  const endExact =
+    endTy.kind === "Numeric" && typeof endTy.exact === "number"
+      ? endTy.exact
+      : null;
+  const stepExact =
+    stepTy === null
+      ? 1
+      : stepTy.kind === "Numeric" && typeof stepTy.exact === "number"
+        ? stepTy.exact
+        : null;
+  if (startExact === null || endExact === null || stepExact === null) {
+    throw new UnsupportedConstruct(
+      `multi-assign LHS '[<cell>{<range>}]': the range bounds must be ` +
+        `statically known at compile time (got non-exact bounds)`,
+      span
+    );
+  }
+  if (
+    !Number.isInteger(startExact) ||
+    !Number.isInteger(endExact) ||
+    !Number.isInteger(stepExact) ||
+    stepExact === 0
+  ) {
+    throw new UnsupportedConstruct(
+      `multi-assign LHS '[<cell>{<range>}]': range bounds must be ` +
+        `non-zero integers (got ${startExact}:${stepExact}:${endExact})`,
+      span
+    );
+  }
+  const slotIdxs: number[] = [];
+  if (stepExact > 0) {
+    for (let v = startExact; v <= endExact; v += stepExact) slotIdxs.push(v);
+  } else {
+    for (let v = startExact; v >= endExact; v += stepExact) slotIdxs.push(v);
+  }
+  if (slotIdxs.length === 0) {
+    throw new UnsupportedConstruct(
+      `multi-assign LHS '[<cell>{<range>}]': empty range (no slots to assign)`,
+      span
+    );
+  }
+  const out: LValue[] = slotIdxs.map(k => ({
+    type: "IndexCell",
+    base: lv.base,
+    indices: [{ type: "Number", value: String(k), span }],
+  }));
+  return out;
 }

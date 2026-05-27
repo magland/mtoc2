@@ -93,8 +93,15 @@ export function execStmt(this: Interpreter, s: Stmt): void {
       // shape. Both come through callByName. MethodCall RHS routes
       // through the same dispatch: dotted package call (pkg.fn(args))
       // is the common case in `[a, b] = pkg.foo(x)`.
+      // Expand a single `[out{1:nout}]`-style brace lvalue to N
+      // synthesized `out{k}` lvalues so the multi-assign nargout
+      // counts correctly (cells phase C comma-list LHS).
+      const expandedLvalues = expandRangeCellLvaluesInterpreter.call(
+        this,
+        s.lvalues
+      );
       let results: RuntimeValue[];
-      const nargout = s.lvalues.length;
+      const nargout = expandedLvalues.length;
       if (s.expr.type === "FuncCall") {
         const argVals = s.expr.args.map(a => this.evalExpr(a));
         // In-scope handle variable: route through callHandle so the
@@ -134,8 +141,8 @@ export function execStmt(this: Interpreter, s: Stmt): void {
           s.span
         );
       }
-      for (let i = 0; i < s.lvalues.length; i++) {
-        this.assignLValue(s.lvalues[i], results[i], s.suppressed);
+      for (let i = 0; i < expandedLvalues.length; i++) {
+        this.assignLValue(expandedLvalues[i], results[i], s.suppressed);
       }
       return;
     }
@@ -765,4 +772,58 @@ export function autoDisp(
   } else {
     this.ctx.helpers.write(String(v) + "\n");
   }
+}
+
+/** Expand `[out{1:nout}]` / `[out{start:end}]` style multi-assign
+ *  LHS into N separate `out{k}` IndexCell lvalues so the multi-
+ *  assign nargout matches the comma-list count. Sibling of the
+ *  c-aot lowerer's `expandRangeCellLvalues`; runtime variant
+ *  evaluates the range bounds with the interpreter's env (no
+ *  static-exact requirement). */
+export function expandRangeCellLvaluesInterpreter(
+  this: Interpreter,
+  lvalues: ReadonlyArray<LValue>
+): LValue[] {
+  if (lvalues.length !== 1) return lvalues.slice();
+  const lv = lvalues[0];
+  if (lv.type !== "IndexCell") return lvalues.slice();
+  if (lv.indices.length !== 1) return lvalues.slice();
+  const idx = lv.indices[0];
+  if (idx.type !== "Range") return lvalues.slice();
+  const start = Math.floor(Number(this.evalExpr(idx.start) as number));
+  const end = Math.floor(Number(this.evalExpr(idx.end) as number));
+  const step =
+    idx.step === null
+      ? 1
+      : Math.floor(Number(this.evalExpr(idx.step) as number));
+  if (!Number.isFinite(start) || !Number.isFinite(end) || step === 0) {
+    throw new UnsupportedConstruct(
+      `interpreter: multi-assign LHS '[<cell>{<range>}]': invalid range ` +
+        `(${start}:${step}:${end})`,
+      lv.indices[0].span
+    );
+  }
+  const out: LValue[] = [];
+  if (step > 0) {
+    for (let v = start; v <= end; v += step) {
+      out.push({
+        type: "IndexCell",
+        base: lv.base,
+        indices: [
+          { type: "Number", value: String(v), span: lv.indices[0].span },
+        ],
+      });
+    }
+  } else {
+    for (let v = start; v >= end; v += step) {
+      out.push({
+        type: "IndexCell",
+        base: lv.base,
+        indices: [
+          { type: "Number", value: String(v), span: lv.indices[0].span },
+        ],
+      });
+    }
+  }
+  return out;
 }

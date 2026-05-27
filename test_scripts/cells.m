@@ -10,6 +10,7 @@ test_cell_brace_read_literal();
 test_cell_brace_read_2d();
 test_cell_brace_write_tensor_slots();
 test_cell_brace_write_then_read();
+test_cell_commalist_lhs_range();
 
 function test_cell_literal_basic()
   c = {1, 2, 3};
@@ -82,4 +83,16 @@ function test_cell_brace_write_then_read()
   out{3} = [7 8 9];
   s = out{1} + out{2} + out{3};
   disp(s);
+end
+
+function test_cell_commalist_lhs_range()
+  out = cell(2, 1);
+  [out{1:2}] = swap2_arrays([1 2 3], [4 5 6]);
+  disp(out{1});
+  disp(out{2});
+end
+
+function [a, b] = swap2_arrays(x, y)
+  a = y;
+  b = x;
 end
