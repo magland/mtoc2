@@ -26,5 +26,7 @@
 
 MTOC2_DEFINE_UNARY_PRED(mtoc2_tensor_isnan, isnan(x))
 MTOC2_DEFINE_UNARY_PRED(mtoc2_tensor_logical, x != 0.0)
+MTOC2_DEFINE_UNARY_PRED(mtoc2_tensor_isinf, isinf(x))
+MTOC2_DEFINE_UNARY_PRED(mtoc2_tensor_isfinite, isfinite(x))
 
 #undef MTOC2_DEFINE_UNARY_PRED

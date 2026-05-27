@@ -14,6 +14,9 @@ test_isequal_complex();
 test_isequal_nargs();
 test_isreal_basic();
 test_isempty_basic();
+test_ndims_ismatrix();
+test_rowcol();
+test_char_string_int();
 
 function test_isfield_struct()
   s = struct('alpha', 1, 'beta', 2);
@@ -166,4 +169,35 @@ function test_isempty_basic()
   disp(isempty(zeros(0, 3)));  % statically-empty shape
   n = numel([1 2 3 4]);        % keep a runtime scalar around
   disp(isempty(zeros(1, n)));  % runtime-shaped, non-empty
+end
+
+function test_ndims_ismatrix()
+  disp(ndims(5));
+  disp(ndims([1 2 3]));
+  disp(ndims([1 2; 3 4]));
+  disp(ndims(zeros(2, 3, 4)));
+  disp(ismatrix(5));
+  disp(ismatrix([1 2; 3 4]));
+  disp(ismatrix(zeros(2, 3, 4)));
+end
+
+function test_rowcol()
+  disp(isrow(5));
+  disp(isrow([1 2 3]));
+  disp(isrow([1; 2; 3]));
+  disp(iscolumn([1; 2; 3]));
+  disp(iscolumn([1 2 3]));
+  % runtime-shaped row (dim 0 statically 1)
+  n = numel([1 2 3 4 5]);
+  disp(isrow(zeros(1, n)));
+  disp(iscolumn(zeros(n, 1)));
+end
+
+function test_char_string_int()
+  disp(ischar('hello'));
+  disp(ischar(5));
+  disp(isstring("hi"));
+  disp(isstring('hi'));
+  disp(isinteger(5));
+  disp(isinteger(3.5));
 end

@@ -97,6 +97,16 @@ import { isreal } from "./defs/logical/isreal.js";
 import { isempty } from "./defs/logical/isempty.js";
 import { isnan } from "./defs/logical/isnan.js";
 import { logical } from "./defs/logical/logical.js";
+import { isinf, isfinite } from "./defs/logical/isinf.js";
+import {
+  ischarBuiltin,
+  isstring,
+  isinteger,
+  ndims,
+  ismatrix,
+  isrow,
+  iscolumn,
+} from "./defs/logical/typequery.js";
 import { strcmp, strcmpi } from "./defs/logical/strcmp.js";
 import { plotBuiltins } from "./defs/plot/dispatch.js";
 
@@ -195,6 +205,15 @@ for (const b of [
   isempty,
   isnan,
   logical,
+  isinf,
+  isfinite,
+  ischarBuiltin,
+  isstring,
+  isinteger,
+  ndims,
+  ismatrix,
+  isrow,
+  iscolumn,
   strcmp,
   strcmpi,
 ]) {

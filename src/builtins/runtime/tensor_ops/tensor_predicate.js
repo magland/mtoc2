@@ -21,3 +21,11 @@ export function mtoc2_tensor_isnan(a) {
 export function mtoc2_tensor_logical(a) {
   return pred_kernel(a, x => x !== 0);
 }
+
+export function mtoc2_tensor_isinf(a) {
+  return pred_kernel(a, x => x === Infinity || x === -Infinity);
+}
+
+export function mtoc2_tensor_isfinite(a) {
+  return pred_kernel(a, Number.isFinite);
+}

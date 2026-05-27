@@ -34,6 +34,7 @@ test_isnan_scalar();
 test_isnan_tensor();
 test_logical_scalar();
 test_logical_tensor();
+test_isinf_isfinite();
 
 function test_scalar_exact_unary()
   % Trig
@@ -565,4 +566,17 @@ function test_logical_tensor()
   a = [0, 2, 0, -3] + 0;
   disp(logical(a));
   disp(sum(logical(a)));
+end
+
+function test_isinf_isfinite()
+  disp(isinf(1/0));
+  disp(isinf(-1/0));
+  disp(isinf(5));
+  disp(isfinite(5));
+  disp(isfinite(1/0));
+  disp(isfinite(0/0));
+  v = [1, 1/0, -1/0, 0/0, 5] + 0;
+  disp(isinf(v));
+  disp(isfinite(v));
+  disp(any(isinf(v)));
 end

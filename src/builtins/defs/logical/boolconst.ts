@@ -79,7 +79,10 @@ function boolBuiltin(name: "true" | "false"): Builtin {
       return shape.emitJs(args);
     },
     call(args) {
-      if (args.argTypes.length === 0) return [value];
+      // A logical scalar is a JS boolean in the interpreter (see
+      // `inferTypeFromValue`), so the 0-arg form returns true / false
+      // rather than 1 / 0 — keeping `islogical` / `class` honest.
+      if (args.argTypes.length === 0) return [value === 1];
       if (!shape.call) {
         throw new TypeError(
           `internal: '${name}' shape constructor has no call`
