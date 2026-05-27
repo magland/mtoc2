@@ -69,6 +69,9 @@ export function lowerFuncCall(
     const rewritten = tryRewriteBsxfun.call(this, e);
     if (rewritten !== null) return rewritten;
   }
+  if (envEntry === undefined && e.name === "feval") {
+    return lowerFevalCall.call(this, e);
+  }
   if (envEntry !== undefined && isHandle(envEntry.ty)) {
     return dispatchHandleCall.call(this, e.name, envEntry, e.args, e.span);
   }
@@ -284,6 +287,100 @@ export function lowerFuncCall(
       };
     }
   }
+}
+
+/** `feval(handle_or_name, args...)` — invoke a function handle or a
+ *  function named by a char literal. Rewrites the call into a direct
+ *  call on the underlying name, then recursively lowers that:
+ *    - `feval(@foo, x, y)`  → `foo(x, y)` (FuncHandle literal)
+ *    - `feval(f, x, y)`      → `f(x, y)` where `f` is an in-scope
+ *                              handle variable (Ident path; the
+ *                              recursive lowerFuncCall picks the
+ *                              env-handle dispatch branch)
+ *    - `feval('foo', x, y)`  → `foo(x, y)` (Char literal)
+ *
+ *  Runtime-computed handle expressions (`feval(get_h(), ...)`,
+ *  `feval(handles{k}, ...)`, inline `@(x) ...`) are rejected with
+ *  `UnsupportedConstruct` — mtoc2's AOT call sites are specialized
+ *  at lowering time, so the handle's target name must be statically
+ *  visible. The user-level workaround is to bind the value to a
+ *  local first (`f = ...; feval(f, ...)`). */
+function lowerFevalCall(
+  this: Lowerer,
+  e: Extract<Expr, { type: "FuncCall" }>
+): IRExpr {
+  const synth = rewriteFevalToDirectCall(e);
+  return lowerFuncCall.call(this, synth);
+}
+
+/** Shared AST rewrite used by both `lowerFevalCall` (single-output
+ *  expression context) and the multi-assign path (`lowerMultiAssign`
+ *  calls this to rewrite the RHS before its own dispatch). Returns a
+ *  fresh `FuncCall` node naming the resolved target with `args[0]`
+ *  consumed. */
+export function rewriteFevalToDirectCall(
+  e: Extract<Expr, { type: "FuncCall" }>
+): Extract<Expr, { type: "FuncCall" }> {
+  if (e.args.length < 1) {
+    throw new UnsupportedConstruct(
+      `'feval' expects at least 1 argument (the function handle or name), ` +
+        `got 0`,
+      e.span
+    );
+  }
+  const first = e.args[0];
+  const rest = e.args.slice(1);
+  let targetName: string;
+  switch (first.type) {
+    case "FuncHandle":
+      // `feval(@foo, args)` → `foo(args)`.
+      targetName = first.name;
+      break;
+    case "Ident":
+      // `feval(f, args)` where `f` is in scope as a handle variable.
+      // The recursive lowerFuncCall will check `env.get(f)` and route
+      // through `dispatchHandleCall`. If `f` is bound to a non-handle
+      // (number, tensor, …) the recursive call surfaces the same
+      // "cannot be called" message the user would see for `f(args)`.
+      targetName = first.name;
+      break;
+    case "Char":
+    case "String":
+      // `feval('foo', args)` / `feval("foo", args)` — the numbl
+      // parser keeps the surrounding quotes in `.value`. Strip them
+      // and validate identifier shape so we don't synthesize a
+      // FuncCall whose `name` carries quotes / spaces / dots.
+      targetName = stripQuotes(first.value);
+      if (!/^[A-Za-z_][A-Za-z0-9_.]*$/.test(targetName)) {
+        throw new UnsupportedConstruct(
+          `'feval' name argument '${targetName}' is not a valid function ` +
+            `identifier`,
+          first.span
+        );
+      }
+      break;
+    case "AnonFunc":
+      throw new UnsupportedConstruct(
+        `'feval' on an inline anonymous handle ('@(...) ...') is not ` +
+          `supported; bind the handle to a local variable first ` +
+          `(f = @(...) ...; feval(f, ...))`,
+        e.span
+      );
+    default:
+      throw new UnsupportedConstruct(
+        `'feval' first argument must be a function-handle literal (@name), ` +
+          `an in-scope handle variable, or a char/string function name; ` +
+          `got '${first.type}' (runtime-computed handle expressions are ` +
+          `not supported — bind to a local first)`,
+        first.span
+      );
+  }
+  return {
+    type: "FuncCall",
+    name: targetName,
+    args: rest,
+    span: e.span,
+  };
 }
 
 /** `bsxfun(@fn, A, B)` — when `@fn` is a function-handle literal

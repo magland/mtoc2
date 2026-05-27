@@ -492,6 +492,20 @@ const REGISTRY: ReadonlyMap<string, RuntimeSnippet> = new Map<
     "mtoc2_tensor_diag",
     loadSnippet("tensor_diag.h", ["mtoc2_tensor_t", "mtoc2_tensor_alloc"]),
   ],
+  // `triu` / `tril` — upper / lower triangular mask. One snippet
+  // defines both `mtoc2_tensor_triu` and `mtoc2_tensor_tril`.
+  [
+    "mtoc2_tensor_triangular",
+    loadSnippet("tensor_triangular.h", [
+      "mtoc2_tensor_t",
+      "mtoc2_tensor_alloc",
+    ]),
+  ],
+  // `cat(dim, A, B, ...)` — concatenate tensors / scalars along a dim.
+  [
+    "mtoc2_tensor_cat",
+    loadSnippet("tensor_cat.h", ["mtoc2_tensor_t", "mtoc2_tensor_alloc_nd"]),
+  ],
   // `besselh(nu, 1, x)` for nu in {0, 1} via POSIX `j0/j1/y0/y1`.
   // One snippet defines both scalar and tensor entry points; the
   // builtin dispatches via the exact value of `nu`.

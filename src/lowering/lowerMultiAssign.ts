@@ -29,6 +29,7 @@ import type { Lowerer } from "./lower.js";
 import { tryExtractDottedName } from "./lower.js";
 import { specializeUserFunction } from "./specialize.js";
 import { dispatchHandleMultiAssign } from "./lowerHandle.js";
+import { rewriteFevalToDirectCall } from "./lowerFuncCall.js";
 
 export function lowerMultiAssign(
   this: Lowerer,
@@ -46,9 +47,19 @@ export function lowerMultiAssign(
   let callSpan: { file: string; start: number; end: number };
   let specSource: string | undefined;
   if (s.expr.type === "FuncCall") {
-    callName = s.expr.name;
-    argExprs = s.expr.args;
-    callSpan = s.expr.span;
+    // `[a, b] = feval(handle_or_name, args...)` — rewrite the RHS
+    // to a direct call on the underlying name before any of the
+    // downstream resolution logic runs. Only the unshadowed form
+    // qualifies; a local `feval` variable would have taken precedence
+    // via the (rejected-here) "in-scope variable on the right of
+    // [...] = ..." path below.
+    let rhs = s.expr;
+    if (rhs.name === "feval" && this.env.get("feval") === undefined) {
+      rhs = rewriteFevalToDirectCall(rhs);
+    }
+    callName = rhs.name;
+    argExprs = rhs.args;
+    callSpan = rhs.span;
     specSource = undefined; // default: decl.name
   } else if (s.expr.type === "MethodCall") {
     const dottedBase = tryExtractDottedName(s.expr.base);

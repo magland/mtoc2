@@ -13,6 +13,7 @@ import type { Type } from "../lowering/types.js";
 import type { ClassRegistration } from "../lowering/classDefs.js";
 import {
   isChar as isCharRV,
+  isHandleValue,
   type RuntimeHandle,
   type RuntimeValue,
 } from "../runtime/value.js";
@@ -90,6 +91,39 @@ export function callByName(
       out[fname] = args[i + 1];
     }
     return [out as unknown as RuntimeValue];
+  }
+  // `feval(handle_or_name, args...)` — parallel to the AOT lowerer's
+  // `rewriteFevalToDirectCall`. Routes the call to the underlying
+  // handle via `callHandle`, or to the named function via a recursive
+  // `callByName`. `nargout` from the outer caller flows through to
+  // the dispatched target. Runtime-computed first-arg shapes (e.g.
+  // class instances) fall through to MATLAB's standard "feval as a
+  // method" resolution — mtoc2 v1 rejects those with a clear error.
+  if (name === "feval") {
+    if (args.length < 1) {
+      throw new UnsupportedConstruct(
+        `'feval' expects at least 1 argument (the function handle or name), ` +
+          `got 0`,
+        span
+      );
+    }
+    const first = args[0];
+    const rest = args.slice(1);
+    if (isHandleValue(first)) {
+      return this.callHandle(first, rest, nargout, span);
+    }
+    if (isCharRV(first)) {
+      return this.callByName(first.value, rest, nargout, span);
+    }
+    if (typeof first === "string") {
+      return this.callByName(first, rest, nargout, span);
+    }
+    throw new UnsupportedConstruct(
+      `'feval' first argument must be a function handle or a function-name ` +
+        `string; got value of type '${typeof first}' (runtime-computed ` +
+        `handle expressions and class-instance dispatch are not supported)`,
+      span
+    );
   }
   // `cell(n)` / `cell(n, m, ...)` constructor — parallel to the
   // `struct` special-case. Mirrors numbl `type-constructors.ts:442`:

@@ -103,7 +103,12 @@ import { cumsum } from "./defs/reduction/cumsum.js";
 import { cumprod } from "./defs/reduction/cumprod.js";
 import { repmat } from "./defs/shape/repmat.js";
 import { diag } from "./defs/shape/diag.js";
+import { triu } from "./defs/shape/triu.js";
+import { tril } from "./defs/shape/tril.js";
+import { cat } from "./defs/shape/cat.js";
 import { doubleBuiltin } from "./defs/math/double.js";
+import { deal } from "./defs/system/deal.js";
+import { feval } from "./defs/system/feval.js";
 import {
   ischarBuiltin,
   isstring,
@@ -225,7 +230,12 @@ for (const b of [
   cumprod,
   repmat,
   diag,
+  triu,
+  tril,
+  cat,
   doubleBuiltin,
+  deal,
+  feval,
   strcmp,
   strcmpi,
 ]) {
