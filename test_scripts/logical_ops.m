@@ -14,6 +14,9 @@ test_in_if_cond();
 test_in_while_cond();
 test_chained_logical();
 test_not_pass_to_func();
+test_true_false_scalar();
+test_true_false_in_cond();
+test_true_false_shape();
 
 function test_or_basic()
   disp(1 || 0);
@@ -136,4 +139,39 @@ end
 function s = count_nonzero(v)
   % sum(~~v) counts the truthy entries of v. We use ~~ to map nonzero → 1.
   s = sum(~~v);
+end
+
+function test_true_false_scalar()
+  % Bare logical constants and their use in arithmetic/predicates.
+  disp(true);
+  disp(false);
+  disp(true + true);
+  assert(true);
+  assert(~false);
+end
+
+function test_true_false_in_cond()
+  if true
+    disp(10);
+  end
+  if false
+    disp(-1);
+  else
+    disp(20);
+  end
+  x = true;
+  while x
+    disp(30);
+    x = false;
+  end
+end
+
+function test_true_false_shape()
+  % Shape-constructor form: logical tensors of 1s / 0s.
+  disp(true(2, 3));
+  disp(false(1, 4));
+  disp(true(2));
+  a = false(1, 3);
+  disp(numel(a));
+  disp(sum(true(3, 3)));
 end

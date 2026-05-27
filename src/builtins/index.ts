@@ -91,6 +91,7 @@ import { andand } from "./defs/logical/andand.js";
 import { isfield } from "./defs/logical/isfield.js";
 import { isscalar } from "./defs/logical/isscalar.js";
 import { iscell } from "./defs/logical/iscell.js";
+import { trueBuiltin, falseBuiltin } from "./defs/logical/boolconst.js";
 import { strcmp, strcmpi } from "./defs/logical/strcmp.js";
 import { plotBuiltins } from "./defs/plot/dispatch.js";
 
@@ -182,6 +183,8 @@ for (const b of [
   isfield,
   isscalar,
   iscell,
+  trueBuiltin,
+  falseBuiltin,
   strcmp,
   strcmpi,
 ]) {
