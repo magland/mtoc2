@@ -616,53 +616,22 @@ export function evalExpr(this: Interpreter, e: Expr): RuntimeValue {
       }
       return cell.data[off];
     }
-    case "MemberDynamic": {
-      // `obj.(nameExpr)` — dynamic field read. Evaluate `nameExpr`
-      // to a char/string, then read the field. Class-getter routing
-      // is honored for dependent properties (same dispatch shape as
-      // the static-name `Member` case).
-      const base = this.evalExpr(e.base);
-      if (
-        typeof base !== "object" ||
-        base === null ||
-        isTensor(base) ||
-        isCharRV(base)
-      ) {
-        throw new UnsupportedConstruct(
-          `interpreter: '.(...)' applied to non-struct value`,
-          e.span
-        );
-      }
-      const nameVal = this.evalExpr(e.nameExpr);
-      const name =
-        typeof nameVal === "string"
-          ? nameVal
-          : isCharRV(nameVal)
-            ? (nameVal as { value: string }).value
-            : String(nameVal);
-      const o = base as Record<string, RuntimeValue>;
-      const tag = (base as { mtoc2Class?: string }).mtoc2Class;
-      if (tag !== undefined && this.workspace !== undefined) {
-        const reg = this.workspace.classes.get(tag);
-        const getter = reg?.getters.get(name);
-        if (getter !== undefined) {
-          return this.callUserFunction(
-            getter,
-            [base],
-            1,
-            e.span,
-            getter.span.file
-          )[0];
-        }
-      }
-      if (!(name in o)) {
-        throw new UnsupportedConstruct(
-          `interpreter: struct has no field '${name}'`,
-          e.span
-        );
-      }
-      return o[name];
-    }
+    case "MemberDynamic":
+      // Dynamic-field access (`obj.(nameExpr)`) is rejected in
+      // every mtoc2 backend so the contract is uniform: the AOT
+      // lowerer can't pick a static C struct slot for a runtime
+      // field name, and the interpreter follows the same rule for
+      // parity. Source-code patterns that rely on it (the
+      // chunkie pattern of `for f = fieldnames(s), dst.(f{1}) = ...`
+      // loops) should be rewritten with explicit field names when
+      // the field set is statically known.
+      throw new UnsupportedConstruct(
+        `interpreter: dynamic field access 'obj.(nameExpr)' is not ` +
+          `supported in mtoc2 (every backend rejects it for parity); ` +
+          `use static field names when the field set is statically ` +
+          `known`,
+        e.span
+      );
     case "SuperMethodCall":
     case "ClassInstantiation":
     case "MetaClass":
