@@ -28,6 +28,7 @@ test_complex_shape_repmat();
 test_complex_shape_triangular();
 test_complex_shape_diag();
 test_complex_shape_cat();
+test_complex_cumulative();
 
 function test_literals()
   disp(1i);
@@ -339,4 +340,21 @@ function test_complex_shape_cat()
   disp(cat(2, [1+1i; 2-2i], [3+3i; 4]));
   disp(cat(1, [1+1i, 2], [3, 4]));
   disp(cat(2, 1+1i, 2-2i, 3));
+end
+
+% cumsum / cumprod on complex tensors. cumprod walks both lanes via
+% complex multiplication; cumsum is component-wise.
+function test_complex_cumulative()
+  v = [1+1i, 2-2i, 3+3i, 4-4i];
+  disp(cumsum(v));
+  disp(cumprod(v));
+  m = [1+1i, 2; 3-3i, 4+4i];
+  disp(cumsum(m));
+  disp(cumsum(m, 2));
+  disp(cumprod(m));
+  % Opaque path forces the runtime kernel.
+  w = [1+1i, 2-2i, 3+3i];
+  %!numbl:opaque w
+  disp(cumsum(w));
+  disp(cumprod(w));
 end

@@ -477,14 +477,15 @@ const REGISTRY: ReadonlyMap<string, RuntimeSnippet> = new Map<
     "mtoc2_tensor_predicate",
     loadSnippet("tensor_predicate.h", ["mtoc2_tensor_t", "mtoc2_alloc"]),
   ],
-  // Prefix scans (`cumsum`, `cumprod`). One snippet defines both
-  // helpers; the builtin dispatches on op kind.
+  // Prefix scans (`cumsum`, `cumprod`) — real and complex siblings
+  // in one file; the builtin dispatches on op kind + input type.
   [
     "mtoc2_tensor_cumulative",
     loadSnippet("tensor_cumulative.h", [
       "mtoc2_tensor_t",
       "mtoc2_alloc",
       "mtoc2_tensor_alloc_nd",
+      "mtoc2_tensor_alloc_nd_complex",
     ]),
   ],
   // `repmat` (real + complex sibling in the same file).
