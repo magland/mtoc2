@@ -12,6 +12,7 @@ import { TypeError, UnsupportedConstruct } from "../../../lowering/errors.js";
 import {
   isNumeric,
   isScalar,
+  isMultiElement,
   scalarLogical,
   type Type,
   type NumericType,
@@ -109,6 +110,19 @@ export function defineCompare(
       return [scalarLogical()];
     },
     emitC({ argsC, argTypes, useRuntime }) {
+      // Tensor compare goes through `emitTensorFused` (per-slot path),
+      // which calls this hook with scalar-versioned arg types. If we
+      // see multi-element types here it means the fused path didn't
+      // trigger (shape mismatch / broadcast / shape-unknown result
+      // type) and a runtime helper would be needed. Reject explicitly
+      // so the JIT bridge falls back to the interpreter cleanly.
+      if (isMultiElement(argTypes[0]) || isMultiElement(argTypes[1])) {
+        throw new UnsupportedConstruct(
+          `'${name}' on tensors that don't share static shape ` +
+            `(broadcast / runtime-unknown) is not yet supported by ` +
+            `mtoc2's AOT backends; the interpreter handles it`
+        );
+      }
       const aCx = isScalarComplex(argTypes[0]);
       const bCx = isScalarComplex(argTypes[1]);
       if (aCx || bCx) {
@@ -138,6 +152,13 @@ export function defineCompare(
     // (tensor element writes, %d/%f formatting, etc.) either coerce
     // via JS implicit conversion or explicitly box with Number(v).
     emitJs({ argsJs, argTypes }) {
+      if (isMultiElement(argTypes[0]) || isMultiElement(argTypes[1])) {
+        throw new UnsupportedConstruct(
+          `'${name}' on tensors that don't share static shape ` +
+            `(broadcast / runtime-unknown) is not yet supported by ` +
+            `mtoc2's AOT backends; the interpreter handles it`
+        );
+      }
       const aCx = isScalarComplex(argTypes[0]);
       const bCx = isScalarComplex(argTypes[1]);
       if (aCx || bCx) {
