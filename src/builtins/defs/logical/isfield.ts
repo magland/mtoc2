@@ -69,10 +69,10 @@ export const isfield: Builtin = {
   },
   emitJs({ argTypes }) {
     const name = requireExactName(argTypes[1]);
-    return staticHasField(argTypes[0], name) ? `1` : `0`;
+    return staticHasField(argTypes[0], name) ? `true` : `false`;
   },
   call({ argTypes }) {
     const name = requireExactName(argTypes[1]);
-    return [staticHasField(argTypes[0], name) ? 1 : 0];
+    return [staticHasField(argTypes[0], name)];
   },
 };

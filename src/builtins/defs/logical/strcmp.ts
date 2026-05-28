@@ -77,15 +77,17 @@ function makeBuiltin(name: string, mode: CmpMode, helperName: string): Builtin {
     },
     emitJs({ argsJs, argTypes, useRuntime }) {
       const v = staticAnswer(argTypes[0], argTypes[1], mode);
-      if (v !== undefined) return v ? `1` : `0`;
+      if (v !== undefined) return v ? `true` : `false`;
       useRuntime(helperName);
-      return `${helperName}(${argsJs[0]}, ${argsJs[1]})`;
+      // Helper returns 0/1 (matches C signature). Wrap to bool so
+      // the spec output round-trips as a JS boolean.
+      return `(${helperName}(${argsJs[0]}, ${argsJs[1]}) !== 0)`;
     },
     call({ args }) {
       const a = runtimeText(args[0]);
       const b = runtimeText(args[1]);
-      if (a === null || b === null) return [0];
-      return [jsFn(a, b) as number];
+      if (a === null || b === null) return [false];
+      return [(jsFn(a, b) as number) !== 0];
     },
   };
 }

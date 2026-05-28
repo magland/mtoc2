@@ -147,7 +147,7 @@ export function defineUnaryPred(opts: UnaryPredOpts): Builtin {
         }
         const re = `creal(${argsC[0]})`;
         const im = `cimag(${argsC[0]})`;
-        return `((${complex!.cScalarComplex(re, im)}) ? 1.0 : 0.0)`;
+        return `(${complex!.cScalarComplex(re, im)})`;
       }
       if (isMultiElement(a)) {
         useRuntime(tensorHelper);
@@ -162,8 +162,8 @@ export function defineUnaryPred(opts: UnaryPredOpts): Builtin {
           useRuntime("mtoc2_tensor_predicate");
           return `${complex!.tensorHelperComplex}(${argsJs[0]})`;
         }
-        // Scalar complex: `{re, im}` shape.
-        return `((${complex!.jsScalarComplex(`${argsJs[0]}.re`, `${argsJs[0]}.im`)}) ? 1 : 0)`;
+        // Scalar complex: `{re, im}` shape. Result is a bare JS bool.
+        return `(${complex!.jsScalarComplex(`${argsJs[0]}.re`, `${argsJs[0]}.im`)})`;
       }
       if (isMultiElement(a)) {
         useRuntime(tensorHelper);
@@ -194,10 +194,10 @@ export function defineUnaryPred(opts: UnaryPredOpts): Builtin {
         return [r];
       }
       if (complex !== undefined && isComplexValue(v)) {
-        return [complex.jsFnComplex(v.re, v.im) ? 1 : 0];
+        return [complex.jsFnComplex(v.re, v.im)];
       }
       const n = typeof v === "number" ? v : Number(v);
-      return [jsFn(n) ? 1 : 0];
+      return [jsFn(n)];
     },
     elementwise: true,
   };

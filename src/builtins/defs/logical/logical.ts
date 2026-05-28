@@ -8,8 +8,8 @@ import { defineUnaryPred } from "./_unary_pred.js";
 
 export const logical = defineUnaryPred({
   name: "logical",
-  cScalar: arg => `((${arg}) != 0.0 ? 1.0 : 0.0)`,
-  jsScalar: arg => `((${arg}) !== 0 ? 1 : 0)`,
+  cScalar: arg => `((${arg}) != 0.0)`,
+  jsScalar: arg => `((${arg}) !== 0)`,
   jsFn: x => x !== 0,
   tensorHelper: "mtoc2_tensor_predicate",
 });

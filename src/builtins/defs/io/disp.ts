@@ -86,7 +86,11 @@ export const disp: Builtin = {
     }
     if (isNumeric(t) && !t.isComplex && isScalar(t)) {
       useRuntime("mtoc2_disp_double");
-      return `mtoc2_disp_double(${argsJs[0]})`;
+      // Scalar logical is a JS boolean; coerce to 0/1 before
+      // formatting (MATLAB / numbl disp logical as "0" / "1").
+      const arg =
+        t.elem === "logical" ? `(${argsJs[0]} ? 1 : 0)` : argsJs[0];
+      return `mtoc2_disp_double(${arg})`;
     }
     if (isNumeric(t) && !t.isComplex && !isScalar(t)) {
       useRuntime("mtoc2_disp_tensor");

@@ -24,6 +24,7 @@ import type { Builtin } from "../../registry.js";
 import {
   isTensor,
   isChar as isRtChar,
+  isComplexValue,
   type RuntimeValue,
 } from "../../../runtime/value.js";
 
@@ -64,20 +65,42 @@ function kindPredicate(
       return ofType(argTypes[0]) ? "1.0" : "0.0";
     },
     emitJs({ argTypes }) {
-      return ofType(argTypes[0]) ? "1" : "0";
+      return ofType(argTypes[0]) ? "true" : "false";
     },
     call({ args }) {
-      return [ofValue(args[0]) ? 1 : 0];
+      return [ofValue(args[0])];
     },
   };
 }
 
-// NOTE on `isnumeric` / `islogical` / `isfloat`: these depend on
-// distinguishing a logical scalar from a double scalar at runtime, but
-// the interpreter represents most logical results (comparisons, isnan,
-// …) as plain numbers, so it can't tell them apart faithfully. They are
-// deliberately NOT registered until the interpreter carries logical-ness
-// on scalars; shipping them would diverge from numbl in the interpreter.
+// `islogical` / `isnumeric` / `isfloat`: scalar logical is a JS
+// `boolean` at runtime, and logical tensors carry an `isLogical: true`
+// flag — so we can tell them apart from doubles. Mirrors numbl.
+
+export const islogical = kindPredicate(
+  "islogical",
+  t => isNumeric(t) && t.elem === "logical",
+  v => {
+    if (typeof v === "boolean") return true;
+    if (isTensor(v) && v.isLogical) return true;
+    return false;
+  }
+);
+
+// `isnumeric` is defined in its own file (`isnumeric.ts`).
+
+export const isfloat = kindPredicate(
+  "isfloat",
+  // Floating-point: only double (mtoc2 has no single-precision lane).
+  t => isNumeric(t) && t.elem === "double",
+  v => {
+    if (typeof v === "number") return true;
+    if (typeof v === "boolean") return false;
+    if (isComplexValue(v)) return true;
+    if (isTensor(v)) return !v.isLogical;
+    return false;
+  }
+);
 
 export const ischarBuiltin = kindPredicate(
   "ischar",
@@ -131,10 +154,10 @@ export const ismatrix: Builtin = {
     return typeRank(argTypes[0]) <= 2 ? "1.0" : "0.0";
   },
   emitJs({ argTypes }) {
-    return typeRank(argTypes[0]) <= 2 ? "1" : "0";
+    return typeRank(argTypes[0]) <= 2 ? "true" : "false";
   },
   call({ args }) {
-    return [rtShape(args[0]).length <= 2 ? 1 : 0];
+    return [rtShape(args[0]).length <= 2];
   },
 };
 
@@ -165,17 +188,17 @@ function rowColPredicate(name: string, axis: 0 | 1): Builtin {
       const v = otherDescribed(argTypes[0]);
       if (v === true) return "1.0";
       if (v === false) return "0.0";
-      return `((${argsC[0]}).ndim == 2 && (${argsC[0]}).dims[${axis}] == 1 ? 1.0 : 0.0)`;
+      return `((${argsC[0]}).ndim == 2 && (${argsC[0]}).dims[${axis}] == 1)`;
     },
     emitJs({ argTypes, argsJs }) {
       const v = otherDescribed(argTypes[0]);
-      if (v === true) return "1";
-      if (v === false) return "0";
-      return `(${argsJs[0]}.shape.length === 2 && ${argsJs[0]}.shape[${axis}] === 1 ? 1 : 0)`;
+      if (v === true) return "true";
+      if (v === false) return "false";
+      return `(${argsJs[0]}.shape.length === 2 && ${argsJs[0]}.shape[${axis}] === 1)`;
     },
     call({ args }) {
       const s = rtShape(args[0]);
-      return [s.length === 2 && s[axis] === 1 ? 1 : 0];
+      return [s.length === 2 && s[axis] === 1];
     },
   };
 }

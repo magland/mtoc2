@@ -118,22 +118,28 @@ export function defineShortCircuit(
       const rhs = (argTypes[1] as NumericType).isComplex
         ? `mtoc2_cnonzero(${argsC[1]})`
         : `(${argsC[1]})`;
-      // C's `||` / `&&` short-circuit and yield 0/1; cast to double
-      // so the scalar slot matches the logical-as-double convention.
-      return `((double)(${lhs} ${cOp} ${rhs}))`;
+      // C's `||` / `&&` short-circuit and yield int 0/1; auto-promotes
+      // to double when assigned to a double scalar slot.
+      return `(${lhs} ${cOp} ${rhs})`;
     },
     emitJs({ argsJs, argTypes, useRuntime }) {
       const aN = argTypes[0] as NumericType;
       const bN = argTypes[1] as NumericType;
       const anyComplex = aN.isComplex || bN.isComplex;
       if (anyComplex) useRuntime("mtoc2_cscalar");
+      // Coerce to a bool with `!!x`. The operand may be a bare double
+      // (`0`/`nonzero`) or a JS boolean from an upstream logical op;
+      // `!!` works for both. Strict `!== 0` would WRONGLY return
+      // `true` for a JS `false` because of strict-equality non-
+      // coercion (`false !== 0` is `true` in JS).
       const lhs = aN.isComplex
         ? `mtoc2_cnonzero(${argsJs[0]})`
-        : `(${argsJs[0]})`;
+        : `!!(${argsJs[0]})`;
       const rhs = bN.isComplex
         ? `mtoc2_cnonzero(${argsJs[1]})`
-        : `(${argsJs[1]})`;
-      return `((${lhs} ${cOp} ${rhs}) ? 1 : 0)`;
+        : `!!(${argsJs[1]})`;
+      // Result is a bare JS bool.
+      return `(${lhs} ${cOp} ${rhs})`;
     },
     call({ args, argTypes }) {
       const aN = argTypes[0] as NumericType;
@@ -148,7 +154,7 @@ export function defineShortCircuit(
       };
       const a = toBool(args[0], aN.isComplex);
       const b = toBool(args[1], bN.isComplex);
-      return [kind === "or" ? (a || b ? 1 : 0) : a && b ? 1 : 0];
+      return [kind === "or" ? a || b : a && b];
     },
   };
 }

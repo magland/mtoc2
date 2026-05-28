@@ -10,8 +10,11 @@ const isInfNumber = (x: number): boolean => x === Infinity || x === -Infinity;
 
 export const isinf = defineUnaryPred({
   name: "isinf",
-  cScalar: arg => `(isinf(${arg}) ? 1.0 : 0.0)`,
-  jsScalar: arg => `(Math.abs(${arg}) === Infinity ? 1 : 0)`,
+  // C99 `isinf(x)` returns nonzero for ±Infinity but the sign of
+  // the return value is implementation-defined (glibc returns -1 for
+  // -Inf). Normalize to 0/1 with `!= 0`.
+  cScalar: arg => `(isinf(${arg}) != 0)`,
+  jsScalar: arg => `(Math.abs(${arg}) === Infinity)`,
   jsFn: isInfNumber,
   tensorHelper: "mtoc2_tensor_predicate",
   complex: {
@@ -25,8 +28,8 @@ export const isinf = defineUnaryPred({
 
 export const isfinite = defineUnaryPred({
   name: "isfinite",
-  cScalar: arg => `(isfinite(${arg}) ? 1.0 : 0.0)`,
-  jsScalar: arg => `(Number.isFinite(${arg}) ? 1 : 0)`,
+  cScalar: arg => `isfinite(${arg})`,
+  jsScalar: arg => `Number.isFinite(${arg})`,
   jsFn: Number.isFinite,
   tensorHelper: "mtoc2_tensor_predicate",
   complex: {

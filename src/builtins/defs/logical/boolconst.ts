@@ -70,7 +70,7 @@ function boolBuiltin(name: "true" | "false"): Builtin {
       return shape.emitC(args);
     },
     emitJs(args) {
-      if (args.argTypes.length === 0) return String(value);
+      if (args.argTypes.length === 0) return value === 1 ? "true" : "false";
       if (!shape.emitJs) {
         throw new TypeError(
           `internal: '${name}' shape constructor has no emitJs`

@@ -7,8 +7,8 @@ import { defineUnaryPred } from "./_unary_pred.js";
 
 export const isnan = defineUnaryPred({
   name: "isnan",
-  cScalar: arg => `(isnan(${arg}) ? 1.0 : 0.0)`,
-  jsScalar: arg => `(Number.isNaN(${arg}) ? 1 : 0)`,
+  cScalar: arg => `isnan(${arg})`,
+  jsScalar: arg => `Number.isNaN(${arg})`,
   jsFn: Number.isNaN,
   tensorHelper: "mtoc2_tensor_predicate",
   complex: {

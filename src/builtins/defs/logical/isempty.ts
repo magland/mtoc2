@@ -77,22 +77,22 @@ export const isempty: Builtin = {
     if (v === false) return "0.0";
     requireNumericRuntime(argTypes[0]);
     useRuntime("mtoc2_numel");
-    return `(mtoc2_numel(${argsC[0]}) == 0 ? 1.0 : 0.0)`;
+    return `(mtoc2_numel(${argsC[0]}) == 0)`;
   },
   emitJs({ argTypes, argsJs }) {
     const v = staticVerdict(argTypes[0]);
-    if (v === true) return "1";
-    if (v === false) return "0";
+    if (v === true) return "true";
+    if (v === false) return "false";
     requireNumericRuntime(argTypes[0]);
-    return `(${argsJs[0]}.shape.reduce((a,b)=>a*b,1) === 0 ? 1 : 0)`;
+    return `(${argsJs[0]}.shape.reduce((a,b)=>a*b,1) === 0)`;
   },
   call({ args }) {
     const v = args[0];
-    if (typeof v === "number" || typeof v === "boolean") return [0];
-    if (isTensor(v)) return [v.data.length === 0 ? 1 : 0];
-    if (isRtChar(v)) return [v.value.length === 0 ? 1 : 0];
-    if (typeof v === "string") return [0];
+    if (typeof v === "number" || typeof v === "boolean") return [false];
+    if (isTensor(v)) return [v.data.length === 0];
+    if (isRtChar(v)) return [v.value.length === 0];
+    if (typeof v === "string") return [false];
     // struct / complex / handle
-    return [0];
+    return [false];
   },
 };

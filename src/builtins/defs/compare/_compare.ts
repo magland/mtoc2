@@ -121,19 +121,22 @@ export function defineCompare(
         if (kind === "eq") {
           const aImC = aCx ? `mtoc2_cimag(${argsC[0]})` : "0.0";
           const bImC = bCx ? `mtoc2_cimag(${argsC[1]})` : "0.0";
-          return `((${aReC} == ${bReC} && ${aImC} == ${bImC}) ? 1.0 : 0.0)`;
+          return `(${aReC} == ${bReC} && ${aImC} == ${bImC})`;
         }
         if (kind === "ne") {
           const aImC = aCx ? `mtoc2_cimag(${argsC[0]})` : "0.0";
           const bImC = bCx ? `mtoc2_cimag(${argsC[1]})` : "0.0";
-          return `((${aReC} != ${bReC} || ${aImC} != ${bImC}) ? 1.0 : 0.0)`;
+          return `(${aReC} != ${bReC} || ${aImC} != ${bImC})`;
         }
-        return `((${aReC} ${cOp} ${bReC}) ? 1.0 : 0.0)`;
+        return `(${aReC} ${cOp} ${bReC})`;
       }
-      return `((${argsC[0]} ${cOp} ${argsC[1]}) ? 1.0 : 0.0)`;
+      return `(${argsC[0]} ${cOp} ${argsC[1]})`;
     },
-    // Logical result encoded as 1/0 to mirror MATLAB's
-    // logical-as-double semantics (the C side does the same).
+    // Scalar logical result emits as a bare JS boolean (mirroring
+    // numbl's scalarEmit + interpreter, where RuntimeLogical IS just
+    // a JS boolean). Downstream sites that need a numeric value
+    // (tensor element writes, %d/%f formatting, etc.) either coerce
+    // via JS implicit conversion or explicitly box with Number(v).
     emitJs({ argsJs, argTypes }) {
       const aCx = isScalarComplex(argTypes[0]);
       const bCx = isScalarComplex(argTypes[1]);
@@ -143,16 +146,16 @@ export function defineCompare(
         if (kind === "eq") {
           const aIm = aCx ? `${argsJs[0]}.im` : `0`;
           const bIm = bCx ? `${argsJs[1]}.im` : `0`;
-          return `((${aRe} === ${bRe} && ${aIm} === ${bIm}) ? 1 : 0)`;
+          return `(${aRe} === ${bRe} && ${aIm} === ${bIm})`;
         }
         if (kind === "ne") {
           const aIm = aCx ? `${argsJs[0]}.im` : `0`;
           const bIm = bCx ? `${argsJs[1]}.im` : `0`;
-          return `((${aRe} !== ${bRe} || ${aIm} !== ${bIm}) ? 1 : 0)`;
+          return `(${aRe} !== ${bRe} || ${aIm} !== ${bIm})`;
         }
-        return `((${aRe} ${cOp} ${bRe}) ? 1 : 0)`;
+        return `(${aRe} ${cOp} ${bRe})`;
       }
-      return `((${argsJs[0]} ${cOp} ${argsJs[1]}) ? 1 : 0)`;
+      return `(${argsJs[0]} ${cOp} ${argsJs[1]})`;
     },
     call({ args, argTypes }) {
       // Elementwise tensor path: at least one side is a non-scalar
@@ -221,13 +224,13 @@ export function defineCompare(
           typeof bv === "number" ? bv : (bv as { re: number; im: number }).re;
         const bIm =
           typeof bv === "number" ? 0 : (bv as { re: number; im: number }).im;
-        if (kind === "eq") return [aRe === bRe && aIm === bIm ? 1 : 0];
-        if (kind === "ne") return [aRe !== bRe || aIm !== bIm ? 1 : 0];
-        return [fold(aRe, bRe) ? 1 : 0];
+        if (kind === "eq") return [aRe === bRe && aIm === bIm];
+        if (kind === "ne") return [aRe !== bRe || aIm !== bIm];
+        return [fold(aRe, bRe)];
       }
       const av = typeof args[0] === "number" ? args[0] : Number(args[0]);
       const bv = typeof args[1] === "number" ? args[1] : Number(args[1]);
-      return [fold(av, bv) ? 1 : 0];
+      return [fold(av, bv)];
     },
     elementwise: true,
   };

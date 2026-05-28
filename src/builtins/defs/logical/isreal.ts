@@ -57,19 +57,19 @@ export const isreal: Builtin = {
     if (v === true) return "1.0";
     if (v === false) return "0.0";
     useRuntime("mtoc2_cscalar");
-    return `(cimag(${argsC[0]}) == 0.0 ? 1.0 : 0.0)`;
+    return `(cimag(${argsC[0]}) == 0.0)`;
   },
   emitJs({ argTypes, argsJs }) {
     const v = staticVerdict(argTypes[0]);
-    if (v === true) return "1";
-    if (v === false) return "0";
-    return `(${argsJs[0]}.im === 0 ? 1 : 0)`;
+    if (v === true) return "true";
+    if (v === false) return "false";
+    return `(${argsJs[0]}.im === 0)`;
   },
   call({ args }) {
     const v = args[0];
-    if (typeof v === "number" || typeof v === "boolean") return [1];
-    if (isComplexValue(v)) return [v.im === 0 ? 1 : 0];
-    if (isTensor(v)) return [v.imag ? 0 : 1];
-    return [1];
+    if (typeof v === "number" || typeof v === "boolean") return [true];
+    if (isComplexValue(v)) return [v.im === 0];
+    if (isTensor(v)) return [!v.imag];
+    return [true];
   },
 };

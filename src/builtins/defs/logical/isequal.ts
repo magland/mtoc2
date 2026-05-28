@@ -276,21 +276,24 @@ export const isequal: Builtin = {
         `(${pairC(argTypes[0], argsC[0], argTypes[i], argsC[i], useRuntime)}) != 0.0`
       );
     }
-    return `((${parts.join(" && ")}) ? 1.0 : 0.0)`;
+    return `(${parts.join(" && ")})`;
   },
   emitJs({ argTypes, argsJs, useRuntime }) {
     const parts: string[] = [];
     for (let i = 1; i < argTypes.length; i++) {
+      // Each pairJs returns 1/0 (boolean-equivalent in JS); wrap with
+      // `!== 0` to coerce to a real JS bool so the `&&` chain stays
+      // boolean rather than returning the last truthy operand.
       parts.push(
         `(${pairJs(argTypes[0], argsJs[0], argTypes[i], argsJs[i], useRuntime)}) !== 0`
       );
     }
-    return `((${parts.join(" && ")}) ? 1 : 0)`;
+    return `(${parts.join(" && ")})`;
   },
   call({ args }) {
     for (let i = 1; i < args.length; i++) {
-      if (!valuesEqual(args[0], args[i])) return [0];
+      if (!valuesEqual(args[0], args[i])) return [false];
     }
-    return [1];
+    return [true];
   },
 };

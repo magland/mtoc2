@@ -98,25 +98,25 @@ export const isscalar: Builtin = {
     if (v !== undefined) return v ? `1.0` : `0.0`;
     // Numeric with unknown shape — emit a runtime numel check.
     useRuntime("mtoc2_numel");
-    return `(mtoc2_numel(${argsC[0]}) == 1 ? 1.0 : 0.0)`;
+    return `(mtoc2_numel(${argsC[0]}) == 1)`;
   },
   emitJs({ argsJs, argTypes }) {
     const t = argTypes[0];
     const v = staticAnswer(t);
-    if (v !== undefined) return v ? `1` : `0`;
-    return `(${argsJs[0]}.shape.reduce((a,b)=>a*b, 1) === 1 ? 1 : 0)`;
+    if (v !== undefined) return v ? `true` : `false`;
+    return `(${argsJs[0]}.shape.reduce((a,b)=>a*b, 1) === 1)`;
   },
   call({ args }) {
     const v = args[0];
-    if (typeof v === "number" || typeof v === "boolean") return [1];
-    if (isComplexValue(v)) return [1];
-    if (typeof v === "string") return [1];
-    if (isRuntimeChar(v)) return [0];
-    if (isTensor(v)) return [v.data.length === 1 ? 1 : 0];
-    if (isHandleValue(v)) return [0];
+    if (typeof v === "number" || typeof v === "boolean") return [true];
+    if (isComplexValue(v)) return [true];
+    if (typeof v === "string") return [true];
+    if (isRuntimeChar(v)) return [false];
+    if (isTensor(v)) return [v.data.length === 1];
+    if (isHandleValue(v)) return [false];
     // Plain JS object → struct or class instance. Numbl returns false
     // for both. (Class instances carry a non-enumerable `mtoc2Class`
     // tag; we don't need to distinguish them here.)
-    return [0];
+    return [false];
   },
 };

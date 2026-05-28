@@ -139,12 +139,10 @@ export const notBuiltin: Builtin = {
     if (a.isComplex) {
       useRuntime("mtoc2_cscalar");
       // Complex scalar is "false" iff both parts are exactly 0.
-      return `(mtoc2_cnonzero(${argsC[0]}) ? 0.0 : 1.0)`;
+      return `(!mtoc2_cnonzero(${argsC[0]}))`;
     }
-    // Scalar: emit `(x == 0.0 ? 1.0 : 0.0)`. Using `!` on a double is
-    // technically valid C, but the explicit comparison is clearer and
-    // is what numbl's logical layer reads as.
-    return `((${argsC[0]}) == 0.0 ? 1.0 : 0.0)`;
+    // Scalar logical: `!x` is a C int (0 or 1).
+    return `(!(${argsC[0]}))`;
   },
   emitJs({ argsJs, argTypes, useRuntime }) {
     const a = argTypes[0] as NumericType;
@@ -158,9 +156,9 @@ export const notBuiltin: Builtin = {
     }
     if (a.isComplex) {
       useRuntime("mtoc2_cscalar");
-      return `(mtoc2_cnonzero(${argsJs[0]}) ? 0 : 1)`;
+      return `(!mtoc2_cnonzero(${argsJs[0]}))`;
     }
-    return `((${argsJs[0]}) == 0 ? 1 : 0)`;
+    return `(!(${argsJs[0]}))`;
   },
   call({ args, argTypes }) {
     const a = argTypes[0] as NumericType;
@@ -179,9 +177,9 @@ export const notBuiltin: Builtin = {
     if (a.isComplex) {
       const v = args[0] as RuntimeValue;
       const cx = isComplexValue(v) ? v : { re: Number(v), im: 0 };
-      return [mtoc2_cnonzero(cx) ? 0 : 1];
+      return [!mtoc2_cnonzero(cx)];
     }
     const v = typeof args[0] === "number" ? args[0] : Number(args[0]);
-    return [v === 0 ? 1 : 0];
+    return [!v];
   },
 };
