@@ -1,8 +1,22 @@
-// JS sibling of `plot_dispatch.h`. Emits the same RS-prefixed JSON
-// wire format the C side does, so a viewer / launcher tee'ing
-// stdout can parse plot records uniformly regardless of backend.
+// JS sibling of `plot_dispatch.h`. Two delivery modes:
 //
-// Wire shape per call:
+// 1. Host hook mode (numbl JIT bridge): when the host binds a
+//    `$plotDispatch(name, args)` callback into the emit's `$h`
+//    helpers, the helper forwards the raw mtoc2-shaped args to the
+//    host. The host is expected to translate the args into its own
+//    runtime value shape and route them into its plot pipeline
+//    (numbl: `dispatchPlotBuiltin` into `rt.plotInstructions`).
+//
+//    Wire-format encoding is skipped entirely in this mode — the
+//    host operates in-process and consumes the same value graph the
+//    emitted code already holds.
+//
+// 2. Wire-format mode (standalone AOT / viewer tee): when no host
+//    hook is present, fall back to the RS-prefixed JSON record on
+//    stdout that the launcher splits and forwards. Same shape the C
+//    sibling emits, so a single viewer parses both backends.
+//
+// Wire shape per call (mode 2):
 //   \x1e mtoc2:plot \t {"call":"<name>","args":[<arg>, ...]} \n
 //
 // Arg encoding (per source-level arg):
@@ -41,6 +55,10 @@ function encodeArg(v) {
 }
 
 export function mtoc2_plot_dispatch(name, ...args) {
+  if (typeof globalThis.$plotDispatch === "function") {
+    globalThis.$plotDispatch(name, args);
+    return;
+  }
   const record = { call: name, args: args.map(encodeArg) };
   $write("\x1emtoc2:plot\t" + JSON.stringify(record) + "\n");
 }

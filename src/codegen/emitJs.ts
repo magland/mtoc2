@@ -118,14 +118,20 @@ export function emitJsProgram(
   // Outer wrapper. Script mode (default) emits `function run($h) { ... top-level ... }`
   // and `return run;`. JIT mode (`opts.exposeSpec` set) emits a factory that
   // binds `$h.write` and returns the named spec function directly.
+  //
+  // `$h.write` is the only required hook. Optional hooks (`$h.plotDispatch`)
+  // surface as globals so the runtime helper snippets can call them without
+  // threading `$h` through every emit site; helper-side `typeof === "function"`
+  // checks gate behavior when a host doesn't provide the hook.
   const wrapperLines: string[] = [];
   if (opts.exposeSpec !== undefined) {
     wrapperLines.push(
-      `return function ($h) { globalThis.$write = $h.write; return ${opts.exposeSpec}; };`
+      `return function ($h) { globalThis.$write = $h.write; globalThis.$plotDispatch = $h.plotDispatch; return ${opts.exposeSpec}; };`
     );
   } else {
     wrapperLines.push("function run($h) {");
     wrapperLines.push("  globalThis.$write = $h.write;");
+    wrapperLines.push("  globalThis.$plotDispatch = $h.plotDispatch;");
     const locals = collectAssignedLocals(prog.topLevelStmts);
     if (locals.length > 0) {
       wrapperLines.push(`  let ${locals.join(", ")};`);

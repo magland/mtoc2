@@ -159,6 +159,22 @@ export function specializeUserFunction(
   callSiteSpan?: Span
 ): IRFunc {
   const errSpan = callSiteSpan ?? decl.span;
+  // MATLAB allows `~` as a placeholder parameter name ("ignore this
+  // argument"). It isn't a valid identifier in the target language
+  // and would emit broken JS/C if we let it through to codegen. The
+  // value isn't readable inside the body either (any reference to
+  // `~` as an Ident is a parse error), so there's nothing to lower —
+  // bail out so the caller (numbl JIT bridge or another translation
+  // entry point) can route the call through its interpreter.
+  for (const p of decl.params) {
+    if (p === "~") {
+      throw new UnsupportedConstruct(
+        `function '${decl.name}' has a '~' placeholder parameter — ` +
+          `cannot specialize`,
+        errSpan
+      );
+    }
+  }
   // Allow calling with FEWER arguments than declared (the standard
   // MATLAB pattern: `function y = f(a, b); if nargin < 2; b = ...;`).
   // The unfilled trailing params are left unbound in env; the body
