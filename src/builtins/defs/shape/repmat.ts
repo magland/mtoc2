@@ -256,6 +256,65 @@ function padTo<T extends number | RepAxis>(arr: T[], pad: T, len: number): T[] {
   return out;
 }
 
+/** Trim trailing entries equal to `1` down to a 2-axis floor. Matches
+ *  numbl's `tensorDouble` / shape-constructor `normalizeAxes` rule, so
+ *  `repmat([1 2 3], 1, 1, 1)` lands as a 2-D `[1 3]` (not 3-D `[1 3 1]`). */
+function trimTrailingOnes(shape: number[]): number[] {
+  const out = shape.slice();
+  while (out.length > 2 && out[out.length - 1] === 1) out.pop();
+  while (out.length < 2) out.push(1);
+  return out;
+}
+
+/** Same trim on a per-axis `DimInfo` lattice: pop trailing axes that
+ *  are statically exact-1 down to a 2-axis floor. Dynamic-extent axes
+ *  are kept (we can't prove they'll be 1 at runtime). */
+function trimTrailingOneDims(dims: DimInfo[]): DimInfo[] {
+  const out = dims.slice();
+  const isOne = (d: DimInfo): boolean => d.kind === "exact" && d.value === 1;
+  while (out.length > 2 && isOne(out[out.length - 1])) out.pop();
+  while (out.length < 2) out.push(DIM_ONE);
+  return out;
+}
+
+/** Compute the reps list and ndim the codegen should pass to the
+ *  runtime helper so the produced tensor's shape matches what
+ *  `transfer` reported. Mirrors the trailing-1 trim: pop trailing
+ *  axes while both the input dim AND the rep are statically exact-1,
+ *  down to a 2-axis floor. Right-pads with synthetic exact-1 axes
+ *  when the rep list is shorter than the resulting ndim.
+ *
+ *  When `scalarInput` is true the input shape is `[1, 1, …]` —
+ *  any trailing rep of 1 can be trimmed (the input never contributes
+ *  a non-1 trailing axis). */
+function effectiveCodegenReps(
+  inDims: ReadonlyArray<DimInfo>,
+  reps: RepAxis[],
+  scalarInput: boolean
+): { reps: RepAxis[]; ndim: number } {
+  const full = Math.max(scalarInput ? 0 : inDims.length, reps.length);
+  let n = full < 2 ? 2 : full;
+  while (n > 2) {
+    const i = n - 1;
+    const inIsOne =
+      scalarInput ||
+      i >= inDims.length ||
+      (inDims[i].kind === "exact" && inDims[i].value === 1);
+    const rep =
+      i < reps.length
+        ? reps[i]
+        : ({ kind: "exact", value: 1, argIndex: 0 } as RepAxis);
+    const repIsOne = rep.kind === "exact" && rep.value === 1;
+    if (!(inIsOne && repIsOne)) break;
+    n--;
+  }
+  const out = reps.slice(0, n);
+  while (out.length < n) {
+    out.push({ kind: "exact", value: 1, argIndex: 0 });
+  }
+  return { reps: out, ndim: n };
+}
+
 /** Per-axis C expression for one rep axis. */
 function repC(axis: RepAxis, argsC: string[]): string {
   if (axis.kind === "exact") return `${axis.value}L`;
@@ -299,9 +358,10 @@ export const repmat: Builtin = {
     if (allExact) {
       const repVals = reps.map(r => (r as { value: number }).value);
       if (scalarInput) {
-        const outShape = repVals.slice();
-        // mtoc2 requires shape ≥ 2-D. Pad with 1 if needed.
-        while (outShape.length < 2) outShape.push(1);
+        // Trim trailing exact-1 axes down to a 2-axis floor so a call
+        // like `repmat(5, 1, 1, 1)` lands as a 1×1 scalar / 2-D tensor
+        // rather than 3-D — matching numbl's tensor normalization.
+        const outShape = trimTrailingOnes(repVals.slice());
         const total = shapeNumel(outShape);
         // Scalar input: every cell = the scalar's value.
         if (a.isComplex) {
@@ -342,7 +402,17 @@ export const repmat: Builtin = {
         const outNdim = Math.max(inShape.length, repVals.length);
         const padShape = padTo(inShape, 1, outNdim);
         const padReps = padTo(repVals, 1, outNdim);
-        const outShape = padShape.map((s, i) => s * padReps[i]);
+        // Trim trailing exact-1 axes; the same trim applies to padShape
+        // and padReps so they keep aligned for the per-axis tile in
+        // `tileExact` below.
+        const outShape = trimTrailingOnes(
+          padShape.map((s, i) => s * padReps[i])
+        );
+        const newNdim = outShape.length;
+        while (padShape.length > newNdim) padShape.pop();
+        while (padReps.length > newNdim) padReps.pop();
+        while (padShape.length < newNdim) padShape.push(1);
+        while (padReps.length < newNdim) padReps.push(1);
         if (a.isComplex) {
           if (outShape.every(s => s === 1)) {
             const cx = exactComplexArray(a);
@@ -405,8 +475,11 @@ export const repmat: Builtin = {
         dims.push({ kind: "unknown" });
       }
     }
-    if (a.isComplex) return [tensorComplexFromDims(dims)];
-    const t = tensorDoubleFromDims(dims);
+    // Same trailing-1 trim on the lattice form — only pops axes we
+    // can statically prove are 1.
+    const trimmed = trimTrailingOneDims(dims);
+    if (a.isComplex) return [tensorComplexFromDims(trimmed)];
+    const t = tensorDoubleFromDims(trimmed);
     t.sign = a.sign;
     return [t];
   },
@@ -418,27 +491,34 @@ export const repmat: Builtin = {
     const reps = scalarInput
       ? effectiveRepsForScalarInput(resolved)
       : resolved.reps;
+    const { reps: cgReps, ndim } = effectiveCodegenReps(
+      a.dims,
+      reps,
+      scalarInput
+    );
 
+    // After the trailing-1 trim, every effective rep may still be 1.
+    // For scalar input that means the output is just the scalar (no
+    // tile happens) — match the transfer's scalarDouble result by
+    // returning the arg directly instead of invoking `fill_nd`.
+    const allRepsOne = cgReps.every(r => r.kind === "exact" && r.value === 1);
     if (scalarInput) {
+      if (allRepsOne) return argsC[0];
       useRuntime("mtoc2_tensor_fill_nd");
-      const padReps = reps.slice();
-      while (padReps.length < 2) {
-        padReps.push({ kind: "exact", value: 1, argIndex: 0 });
-      }
-      const dimList = padReps.map(r => repC(r, argsC)).join(", ");
+      const dimList = cgReps.map(r => repC(r, argsC)).join(", ");
       if (a.isComplex) {
         useRuntime("mtoc2_cscalar");
-        return `mtoc2_tensor_fill_nd_complex(creal(${argsC[0]}), cimag(${argsC[0]}), ${padReps.length}, (long[]){${dimList}})`;
+        return `mtoc2_tensor_fill_nd_complex(creal(${argsC[0]}), cimag(${argsC[0]}), ${ndim}, (long[]){${dimList}})`;
       }
-      return `mtoc2_tensor_fill_nd((double)(${argsC[0]}), ${padReps.length}, (long[]){${dimList}})`;
+      return `mtoc2_tensor_fill_nd((double)(${argsC[0]}), ${ndim}, (long[]){${dimList}})`;
     }
 
     useRuntime("mtoc2_tensor_repmat");
-    const dimList = reps.map(r => repC(r, argsC)).join(", ");
+    const dimList = cgReps.map(r => repC(r, argsC)).join(", ");
     if (a.isComplex) {
-      return `mtoc2_tensor_repmat_complex(${argsC[0]}, ${reps.length}, (long[]){${dimList}})`;
+      return `mtoc2_tensor_repmat_complex(${argsC[0]}, ${ndim}, (long[]){${dimList}})`;
     }
-    return `mtoc2_tensor_repmat(${argsC[0]}, ${reps.length}, (long[]){${dimList}})`;
+    return `mtoc2_tensor_repmat(${argsC[0]}, ${ndim}, (long[]){${dimList}})`;
   },
 
   emitJs({ argsJs, argTypes, useRuntime }) {
@@ -448,26 +528,29 @@ export const repmat: Builtin = {
     const reps = scalarInput
       ? effectiveRepsForScalarInput(resolved)
       : resolved.reps;
+    const { reps: cgReps, ndim } = effectiveCodegenReps(
+      a.dims,
+      reps,
+      scalarInput
+    );
 
+    const allRepsOne = cgReps.every(r => r.kind === "exact" && r.value === 1);
     if (scalarInput) {
+      if (allRepsOne) return argsJs[0];
       useRuntime("mtoc2_tensor_fill_nd");
-      const padReps = reps.slice();
-      while (padReps.length < 2) {
-        padReps.push({ kind: "exact", value: 1, argIndex: 0 });
-      }
-      const dimList = padReps.map(r => repJs(r, argsJs)).join(", ");
+      const dimList = cgReps.map(r => repJs(r, argsJs)).join(", ");
       if (a.isComplex) {
-        return `mtoc2_tensor_fill_nd_complex(${argsJs[0]}.re, ${argsJs[0]}.im, ${padReps.length}, [${dimList}])`;
+        return `mtoc2_tensor_fill_nd_complex(${argsJs[0]}.re, ${argsJs[0]}.im, ${ndim}, [${dimList}])`;
       }
-      return `mtoc2_tensor_fill_nd(${argsJs[0]}, ${padReps.length}, [${dimList}])`;
+      return `mtoc2_tensor_fill_nd(${argsJs[0]}, ${ndim}, [${dimList}])`;
     }
 
     useRuntime("mtoc2_tensor_repmat");
-    const dimList = reps.map(r => repJs(r, argsJs)).join(", ");
+    const dimList = cgReps.map(r => repJs(r, argsJs)).join(", ");
     if (a.isComplex) {
-      return `mtoc2_tensor_repmat_complex(${argsJs[0]}, ${reps.length}, [${dimList}])`;
+      return `mtoc2_tensor_repmat_complex(${argsJs[0]}, ${ndim}, [${dimList}])`;
     }
-    return `mtoc2_tensor_repmat(${argsJs[0]}, ${reps.length}, [${dimList}])`;
+    return `mtoc2_tensor_repmat(${argsJs[0]}, ${ndim}, [${dimList}])`;
   },
 
   call({ args, argTypes }) {
@@ -477,8 +560,9 @@ export const repmat: Builtin = {
     const reps = scalarInput
       ? effectiveRepsForScalarInput(resolved)
       : resolved.reps;
+    const { reps: cgReps } = effectiveCodegenReps(a.dims, reps, scalarInput);
 
-    const repVals: number[] = reps.map(r => {
+    const repVals: number[] = cgReps.map(r => {
       if (r.kind === "exact") return r.value;
       const v = args[r.argIndex] as RuntimeValue;
       const n = typeof v === "number" ? v : Number(v as unknown);

@@ -14,6 +14,7 @@ function repmat_basics()
   test_all_ones();
   test_opaque_dim();
   test_opaque_rect_dim();
+  test_repmat_trailing_singleton();
   disp('SUCCESS');
 end
 
@@ -65,4 +66,20 @@ function test_opaque_rect_dim()
   %!numbl:opaque m
   %!numbl:opaque n
   disp(repmat([1; 2], m, n));
+end
+
+function test_repmat_trailing_singleton()
+  % Per numbl/MATLAB: repmat trims trailing singleton dims back to
+  % the 2-axis floor. `repmat([1 2 3], 1, 1, 1)` is 2-D [1×3], NOT
+  % 3-D [1×3×1]. Same applies to scalar inputs.
+  a = [1 2 3];
+  b = repmat(a, 1, 1, 1);
+  disp(ndims(b));
+  disp(size(b));
+  c = repmat(5, 1, 1, 1);
+  disp(ndims(c));
+  disp(size(c));
+  d = repmat([1 2; 3 4], 2, 1, 1);
+  disp(ndims(d));
+  disp(size(d));
 end
