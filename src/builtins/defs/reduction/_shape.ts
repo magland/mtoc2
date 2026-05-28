@@ -741,7 +741,7 @@ function elementwiseMinMaxSign(name: "min" | "max", sa: Sign, sb: Sign): Sign {
 // so the emitJs path and `call` path stay structurally aligned.
 import * as TENSOR_REDUCE from "../../runtime/tensor_ops/tensor_reduce_real.js";
 import * as TENSOR_REDUCE_C from "../../runtime/tensor_ops/tensor_reduce_complex.js";
-import type { RuntimeTensor } from "../../../runtime/value.js";
+import type { RuntimeTensor, RuntimeValue } from "../../../runtime/value.js";
 
 type ReduceAll = (t: RuntimeTensor) => number;
 type ReduceDim = (t: RuntimeTensor, d: number) => RuntimeTensor;
@@ -874,9 +874,9 @@ export function reductionEmitJs(spec: {
       if (spec.outputElem === "logical") {
         if (isComplex) {
           useRuntime("mtoc2_cscalar");
-          return `(mtoc2_cnonzero(${argsJs[0]}) ? 1 : 0)`;
+          return `mtoc2_cnonzero(${argsJs[0]})`;
         }
-        return `((${argsJs[0]}) !== 0 ? 1 : 0)`;
+        return `((${argsJs[0]}) !== 0)`;
       }
       return argsJs[0];
     }
@@ -914,18 +914,28 @@ export function reductionEmitJs(spec: {
           `'${dimType.kind}'`
       );
     }
+    // Scalar-output (axis=all OR axis collapses to scalar) returns
+    // a number 0/1 from the runtime helper; wrap to a JS bool when
+    // the static output type is logical so the spec result round-
+    // trips through `mtoc2ToNumbl` as a `boolean`. Tensor-output
+    // (axis dim returning a 1×N etc.) keeps Float64Array storage
+    // with an isLogical flag.
+    const wrapLogical = (callExpr: string): string =>
+      spec.outputElem === "logical" ? `(${callExpr} !== 0)` : callExpr;
     if (axis.kind === "all") {
-      return `mtoc2_${spec.name}${suffixAll}(${argsJs[0]})`;
+      return wrapLogical(`mtoc2_${spec.name}${suffixAll}(${argsJs[0]})`);
     }
     // Mirror the C path's scalar-collapse check: if reducing on this
     // axis squeezes the shape down to a scalar, route to `_all`
     // (returning a number) instead of `_dim` (returning a 1×1 tensor).
     if (inputT.shape !== undefined) {
       const r = reduceConcreteShape(inputT.shape, axis.dim);
-      if (r.scalar) return `mtoc2_${spec.name}${suffixAll}(${argsJs[0]})`;
+      if (r.scalar)
+        return wrapLogical(`mtoc2_${spec.name}${suffixAll}(${argsJs[0]})`);
     } else {
       const r = reduceLatticeDims(inputT.dims, axis.dim);
-      if (r.scalar) return `mtoc2_${spec.name}${suffixAll}(${argsJs[0]})`;
+      if (r.scalar)
+        return wrapLogical(`mtoc2_${spec.name}${suffixAll}(${argsJs[0]})`);
     }
     return `mtoc2_${spec.name}${suffixDim}(${argsJs[0]}, ${axis.dim})`;
   };
@@ -959,7 +969,7 @@ export function reductionCall(spec: {
             ? (v as { re: number; im: number })
             : { re: typeof v === "number" ? v : Number(v), im: 0 };
         if (spec.outputElem === "logical") {
-          return [cx.re !== 0 || cx.im !== 0 ? 1 : 0];
+          return [cx.re !== 0 || cx.im !== 0];
         }
         return [cx];
       }
@@ -982,7 +992,7 @@ export function reductionCall(spec: {
       } else {
         v = Number(raw);
       }
-      if (spec.outputElem === "logical") return [v !== 0 ? 1 : 0];
+      if (spec.outputElem === "logical") return [v !== 0];
       return [v];
     }
     // Tensor input — dispatch through the JS reduce table.
@@ -996,18 +1006,23 @@ export function reductionCall(spec: {
     }
     const t = args[0] as RuntimeTensor;
     const axis = resolveCallAxis(spec, args, argTypes, inputT);
+    // Tensor reducers return 0/1 from the helper; coerce to a JS
+    // bool when the output type is logical so the interpreter path
+    // stays consistent with the emitJs / mtoc2-to-numbl shape.
+    const wrap = (v: RuntimeValue): RuntimeValue =>
+      spec.outputElem === "logical" && typeof v === "number" ? v !== 0 : v;
     if (axis.kind === "all") {
-      return [reducer.all(t)];
+      return [wrap(reducer.all(t) as RuntimeValue)];
     }
     // Mirror the codegen scalar-collapse check (see reductionEmitJs).
     if (inputT.shape !== undefined) {
       const r = reduceConcreteShape(inputT.shape, axis.dim);
-      if (r.scalar) return [reducer.all(t)];
+      if (r.scalar) return [wrap(reducer.all(t) as RuntimeValue)];
     } else {
       const r = reduceLatticeDims(inputT.dims, axis.dim);
-      if (r.scalar) return [reducer.all(t)];
+      if (r.scalar) return [wrap(reducer.all(t) as RuntimeValue)];
     }
-    return [reducer.dim(t, axis.dim)];
+    return [reducer.dim(t, axis.dim) as RuntimeValue];
   };
 }
 

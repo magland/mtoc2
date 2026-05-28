@@ -90,10 +90,12 @@ export const isa: Builtin = {
     if ((isChar(nameTy) || isString(nameTy)) && nameTy.exact !== undefined) {
       const valueClass = staticClassNameOf(argTypes[0]);
       if (valueClass !== null) {
-        return matches(nameTy.exact, valueClass, argTypes[0]) ? `1` : `0`;
+        return matches(nameTy.exact, valueClass, argTypes[0])
+          ? `true`
+          : `false`;
       }
     }
-    return `0`;
+    return `false`;
   },
   call({ args }) {
     const v = args[0];
@@ -126,11 +128,11 @@ export const isa: Builtin = {
         valueClass = (v as { mtoc2Class: string }).mtoc2Class;
       else valueClass = "struct";
     }
-    if (valueClass === name) return [1];
+    if (valueClass === name) return [true];
     if (name === "numeric") {
-      if (valueClass === "double") return [1];
-      return [0];
+      if (valueClass === "double") return [true];
+      return [false];
     }
-    return [0];
+    return [false];
   },
 };

@@ -39,16 +39,16 @@ export const isnumeric: Builtin = {
   },
   emitJs({ argTypes }) {
     const t = argTypes[0];
-    return isNumeric(t) && t.elem !== "logical" ? `1` : `0`;
+    return isNumeric(t) && t.elem !== "logical" ? `true` : `false`;
   },
   call({ args }) {
     const v = args[0] as RuntimeValue;
-    if (typeof v === "number") return [1];
-    if (typeof v === "boolean") return [0];
-    if (isComplexValue(v)) return [1];
+    if (typeof v === "number") return [true];
+    if (typeof v === "boolean") return [false];
+    if (isComplexValue(v)) return [true];
     if (isTensor(v)) {
-      return [(v as { isLogical?: boolean }).isLogical ? 0 : 1];
+      return [!(v as { isLogical?: boolean }).isLogical];
     }
-    return [0];
+    return [false];
   },
 };

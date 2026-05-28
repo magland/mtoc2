@@ -32,7 +32,7 @@ export const isstruct: Builtin = {
     return isStruct(argTypes[0]) ? `1.0` : `0.0`;
   },
   emitJs({ argTypes }) {
-    return isStruct(argTypes[0]) ? `1` : `0`;
+    return isStruct(argTypes[0]) ? `true` : `false`;
   },
   call({ args }) {
     const v = args[0];
@@ -47,8 +47,8 @@ export const isstruct: Builtin = {
       (v as { mtoc2Class?: string }).mtoc2Class === undefined &&
       (v as { mtoc2Handle?: boolean }).mtoc2Handle !== true
     ) {
-      return [1];
+      return [true];
     }
-    return [0];
+    return [false];
   },
 };

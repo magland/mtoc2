@@ -26,7 +26,7 @@ export const iscell: Builtin = {
     return isCell(argTypes[0]) ? `1.0` : `0.0`;
   },
   emitJs({ argTypes }) {
-    return isCell(argTypes[0]) ? `1` : `0`;
+    return isCell(argTypes[0]) ? `true` : `false`;
   },
   call({ args }) {
     const v = args[0];
@@ -35,8 +35,8 @@ export const iscell: Builtin = {
       v !== null &&
       (v as { mtoc2Tag?: string }).mtoc2Tag === "cell"
     ) {
-      return [1];
+      return [true];
     }
-    return [0];
+    return [false];
   },
 };
