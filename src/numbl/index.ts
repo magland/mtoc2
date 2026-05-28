@@ -54,6 +54,6 @@ export type { PlotInstruction } from "../../../numbl/src/graphics/types.js";
 
 // ── Runtime value model (used by the plot adapter) ──────────────────────
 
-export { allocFloat64Array } from "../../../numbl/src/numbl-core/executors/jsJit/helpers/alloc.js";
+export { allocFloat64Array } from "../../../numbl/src/numbl-core/runtime/alloc.js";
 export { RTV } from "../../../numbl/src/numbl-core/runtime/constructors.js";
 export type { RuntimeValue } from "../../../numbl/src/numbl-core/runtime/types.js";
