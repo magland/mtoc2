@@ -876,7 +876,13 @@ export function reductionEmitJs(spec: {
           useRuntime("mtoc2_cscalar");
           return `mtoc2_cnonzero(${argsJs[0]})`;
         }
-        return `((${argsJs[0]}) !== 0)`;
+        // Coerce booleans through `Number` before the `!== 0` check.
+        // A bare `${x} !== 0` would mis-classify a JS boolean argument:
+        // `false !== 0` is `true` in JS strict-equality (boolean !==
+        // number) — incorrect for `all(false)`. `Number(NaN) !== 0`
+        // is `true`, matching MATLAB's `all(NaN) == 1` semantics
+        // (anything non-zero counts as truthy).
+        return `(Number(${argsJs[0]}) !== 0)`;
       }
       return argsJs[0];
     }

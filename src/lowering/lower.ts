@@ -1233,7 +1233,9 @@ export class Lowerer {
     stripExactFromEnv(this.env, collectAssignedNames(s.body));
     const cond = this.lowerExpr(s.cond);
     this.requireScalarCondType(cond.ty, "while condition", s.span);
+    const envBodyInput = new Map(this.env);
     const body = this.withControlDepth(() => this.lowerStmts(s.body));
+    assertLoopBodyShapeStable(envBodyInput, this.env, s.body, s.span);
     this.env = this.mergeBranchEnvs([envBefore, this.env]);
     return { kind: "While", cond, body, span: s.span };
   }
@@ -1295,7 +1297,9 @@ export class Lowerer {
 
     stripExactFromEnv(this.env, collectAssignedNames(s.body));
 
+    const envBodyInput = new Map(this.env);
     const body = this.withControlDepth(() => this.lowerStmts(s.body));
+    assertLoopBodyShapeStable(envBodyInput, this.env, s.body, s.span);
     this.env = this.mergeBranchEnvs([envBefore, this.env]);
     return {
       kind: "For",
@@ -2045,6 +2049,68 @@ function rhsSignFromStoreResult(result: IRStmt | IRStmt[]): Sign {
     return "unknown";
   }
   return isNumeric(last.rhs.ty) ? last.rhs.ty.sign : "unknown";
+}
+
+/** Reject loops whose body changes the shape of a self-referenced
+ *  variable. mtoc2 lowers the body once with the entry-iteration type,
+ *  so if iteration 1 produces a different shape than iteration 0
+ *  carried in (e.g. `w = [w, i]` growing `w` each pass), the emitted
+ *  code uses stale shape constants and produces wrong runtime output.
+ *  Detect this by comparing the env entry the body actually lowered
+ *  with (`envBodyInput[n]`) against the post-body env entry
+ *  (`envAfter[n]`) for every variable assigned inside the body. */
+function assertLoopBodyShapeStable(
+  envBodyInput: Map<string, EnvEntry>,
+  envAfter: Map<string, EnvEntry>,
+  bodyStmts: Stmt[],
+  loopSpan: Span
+): void {
+  for (const name of collectAssignedNames(bodyStmts)) {
+    const before = envBodyInput.get(name);
+    const after = envAfter.get(name);
+    if (before === undefined || after === undefined) continue;
+    if (numericShapeChanged(before.ty, after.ty)) {
+      throw new UnsupportedConstruct(
+        `loop body changes the shape of '${name}' across iterations ` +
+          `(entry shape differs from end-of-iter shape); ` +
+          `mtoc2 lowers the body once per spec and cannot specialize ` +
+          `per-iteration growing tensors`,
+        loopSpan
+      );
+    }
+  }
+}
+
+/** True iff `a` and `b` are both Numeric types whose shape information
+ *  is observably different. Compares both the lattice `dims` (exact
+ *  values only — `unknown` matches anything) and the concrete `shape`
+ *  array when present. Non-numeric types and same-shape types return
+ *  false. */
+function numericShapeChanged(a: Type, b: Type): boolean {
+  if (!isNumeric(a) || !isNumeric(b)) return false;
+  if (a.dims.length !== b.dims.length) return true;
+  for (let i = 0; i < a.dims.length; i++) {
+    const da = a.dims[i];
+    const db = b.dims[i];
+    if (da.kind === "exact" && db.kind === "exact" && da.value !== db.value) {
+      return true;
+    }
+    // Pre-body had an exact dim but post-body widened to unknown:
+    // iteration 2 would feed in a value whose actual shape doesn't
+    // match the body's emitted shape constants.
+    if (da.kind === "exact" && db.kind === "unknown") return true;
+  }
+  const sa = a.shape;
+  const sb = b.shape;
+  if (sa !== undefined && sb !== undefined) {
+    if (sa.length !== sb.length) return true;
+    for (let i = 0; i < sa.length; i++) {
+      if (sa[i] !== sb[i]) return true;
+    }
+  } else if (sa !== undefined && sb === undefined) {
+    return true;
+  }
+  return false;
 }
 
 function collectAssignedNames(stmts: Stmt[]): Set<string> {

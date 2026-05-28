@@ -71,6 +71,29 @@ export function lowerIndexSliceStore(
       }
     }
   }
+  // Auto-grow check: a Scalar slot with a statically-known value that
+  // exceeds the base's static dim would auto-extend the tensor in
+  // numbl. mtoc2 emits code against the pre-write static shape and
+  // can't reallocate the buffer mid-spec, so decline and let the
+  // interpreter handle the resize.
+  if (!isSingleSlot && r.baseTy.kind === "Numeric") {
+    for (let i = 0; i < slots.length; i++) {
+      const slot = slots[i];
+      if (slot.kind !== "Scalar") continue;
+      const t = slot.expr.ty;
+      if (t.kind !== "Numeric" || typeof t.exact !== "number") continue;
+      const dim = r.baseTy.dims[i];
+      if (dim === undefined || dim.kind !== "exact") continue;
+      if (Math.round(t.exact) > dim.value) {
+        throw new UnsupportedConstruct(
+          `indexed write to '${displayName}' at position ${Math.round(t.exact)} ` +
+            `in axis ${i + 1} would auto-grow the tensor ` +
+            `(static size ${dim.value}); auto-grow is not modeled in the JIT`,
+          slot.span
+        );
+      }
+    }
+  }
 
   const rawRhs = this.lowerExpr(exprAst);
   if (!isNumeric(rawRhs.ty)) {

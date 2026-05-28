@@ -43,7 +43,8 @@ import type { Workspace } from "../workspace/workspace.js";
 import { specializeUserFunction } from "../lowering/specialize.js";
 import { withoutExact, type Type } from "../lowering/types.js";
 import { emitJsProgram } from "../codegen/emitJs.js";
-import type { IRProgram } from "../lowering/ir.js";
+import type { IRFunc, IRProgram, IRStmt } from "../lowering/ir.js";
+import { UnsupportedConstruct } from "../lowering/errors.js";
 
 type FuncStmt = Extract<Stmt, { type: "Function" }>;
 
@@ -100,6 +101,7 @@ export function compileSpec(args: CompileSpecArgs): CompileSpecResult {
     nargout,
     undefined
   );
+  assertNoNonVoidBareExprStmts(spec);
   const prog: IRProgram = {
     topLevelStmts: [],
     functions: new Map(lowerer.specializations),
@@ -113,4 +115,33 @@ export function compileSpec(args: CompileSpecArgs): CompileSpecResult {
     source,
     activatedSnippets,
   };
+}
+
+/** Bare expression statements with a non-Void value (e.g. `sin(i);`)
+ *  are dialect-bound: numbl assigns each such value to the host-level
+ *  `ans` variable. mtoc2 has no `ans` protocol with its hosts, so any
+ *  emitted spec that contains such a statement would silently fail to
+ *  update `ans` and produce wrong output for callers that read it
+ *  later. Decline the spec instead — numbl's executor will catch the
+ *  `UnsupportedConstruct` and route the call through its interpreter,
+ *  which handles `ans` natively. */
+function assertNoNonVoidBareExprStmts(spec: IRFunc): void {
+  const walk = (stmts: IRStmt[]): void => {
+    for (const s of stmts) {
+      if (s.kind === "ExprStmt" && s.expr.ty.kind !== "Void") {
+        throw new UnsupportedConstruct(
+          `bare expression with a non-void value is not supported at the ` +
+            `JIT boundary (numbl's 'ans' binding can't be modeled here)`,
+          s.span
+        );
+      }
+      if (s.kind === "If") {
+        walk(s.thenBody);
+        walk(s.elseBody);
+      } else if (s.kind === "While" || s.kind === "For") {
+        walk(s.body);
+      }
+    }
+  };
+  walk(spec.body);
 }

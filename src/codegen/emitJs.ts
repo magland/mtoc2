@@ -512,11 +512,18 @@ function emitIndexSliceStoreJs(
       const sE = emitExpr(slot.start, state);
       const stE = emitExpr(slot.step, state);
       const eE = emitExpr(slot.end, state);
+      // Tensor RHS: enforce numbl's `numel(src) == range_len`
+      // runtime check so a mismatched-length assignment throws
+      // instead of silently truncating.
+      const lenCheck = rhsIsScalar
+        ? ``
+        : `if (_mtoc2_rhs.data.length !== _mtoc2_n) throw new Error("Unable to perform assignment because the size of the left side is " + _mtoc2_n + " and the size of the right side is " + _mtoc2_rhs.data.length + "."); `;
       return (
         `${indent}{ ` +
         `const _mtoc2_rhs = ${rhsExpr}; ` +
         `const _mtoc2_s = ${sE}, _mtoc2_e = ${eE}, _mtoc2_st = ${stE}; ` +
         `const _mtoc2_n = mtoc2_loop_count(_mtoc2_s, _mtoc2_e, _mtoc2_st); ` +
+        lenCheck +
         `for (let _mtoc2_k = 0; _mtoc2_k < _mtoc2_n; _mtoc2_k++) { ` +
         `const _mtoc2_v = mtoc2_range_value(_mtoc2_s, _mtoc2_st, _mtoc2_e, _mtoc2_n, _mtoc2_k); ` +
         `${writeAt("Math.round(_mtoc2_v) - 1", "_mtoc2_k")} ` +
@@ -635,6 +642,15 @@ function emitIndexSliceStoreJs(
   }
   const lines: string[] = [`${indent}{`];
   for (const ln of setup) lines.push(`${indent}  ${ln}`);
+  // Tensor RHS: enforce that the source has exactly slot-product
+  // elements so a size-mismatched assignment throws instead of
+  // silently truncating or padding.
+  if (!rhsIsScalar) {
+    const slotProduct = dims.join(" * ");
+    lines.push(
+      `${indent}  { const _mtoc2_total = ${slotProduct}; if (_mtoc2_rhs.data.length !== _mtoc2_total) throw new Error("Unable to perform assignment because the size of the left side is " + _mtoc2_total + " and the size of the right side is " + _mtoc2_rhs.data.length + "."); }`
+    );
+  }
   for (let i = ndim - 1; i >= 0; i--) {
     lines.push(
       `${indent}  for (let _mtoc2_k_${i} = 0; _mtoc2_k_${i} < _mtoc2_n_${i}; _mtoc2_k_${i}++) {`
@@ -1022,14 +1038,21 @@ function emitIndexSliceJs(
       const en = emitExpr(slot.end, state);
       const rows = isColVec ? "_mtoc2_n" : "1";
       const cols = isColVec ? "1" : "_mtoc2_n";
+      // Per-element 1-based bounds check against the source's linear
+      // length. Mirrors numbl's RuntimeError on out-of-range slice
+      // indices (e.g. `oob(0:3)` → index 0 fails the lower-bound
+      // guard).
       return (
         `(() => { ` +
         `const _mtoc2_s = ${s}; const _mtoc2_e = ${en}; const _mtoc2_st = ${st}; ` +
         `const _mtoc2_n = mtoc2_loop_count(_mtoc2_s, _mtoc2_e, _mtoc2_st); ` +
         `const _mtoc2_t = ${allocFn}(2, [${rows}, ${cols}]); ` +
+        `const _mtoc2_len = ${baseName}.data.length; ` +
         `for (let _mtoc2_k = 0; _mtoc2_k < _mtoc2_n; _mtoc2_k++) { ` +
         `const _mtoc2_v = mtoc2_range_value(_mtoc2_s, _mtoc2_st, _mtoc2_e, _mtoc2_n, _mtoc2_k); ` +
-        `${copy("_mtoc2_k", "Math.round(_mtoc2_v) - 1")} ` +
+        `const _mtoc2_idx = Math.round(_mtoc2_v); ` +
+        `if (_mtoc2_idx < 1 || _mtoc2_idx > _mtoc2_len) throw new Error("Index in position 1 exceeds array bounds. Index must not exceed " + _mtoc2_len + "."); ` +
+        `${copy("_mtoc2_k", "_mtoc2_idx - 1")} ` +
         `} ` +
         `return _mtoc2_t; ` +
         `})()`
