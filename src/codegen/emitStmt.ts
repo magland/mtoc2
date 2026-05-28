@@ -149,14 +149,24 @@ export function collectLocals(stmts: IRStmt[]): {
  *  small and the C compiler dedupes-by-tail-merge anyway. */
 export type EmitReturnTail = (indent: string) => string;
 
-export function emitFunction(fn: IRFunc, state: RuntimeState): string {
+export function emitFunction(
+  fn: IRFunc,
+  state: RuntimeState,
+  /** Storage-class qualifier on the function definition. Default is
+   *  `static` (file-scope, the C-AOT whole-program convention). Pass
+   *  `""` to omit the qualifier — the function then gets external
+   *  linkage so a JIT host can resolve it via `dlsym` / koffi after
+   *  `dlopen`'ing the compiled `.so`. */
+  storageClass: "static" | "" = "static"
+): string {
   const lines: string[] = [];
   const retType = fnRetType(fn);
   const nOutputs = fn.outputs.length;
   const isVoidFn = nOutputs === 0;
   const isMulti = nOutputs >= 2;
   lines.push(irFuncDocComment(fn));
-  lines.push(`static ${retType} ${fn.cName}(${fnParamList(fn)}) {`);
+  const sc = storageClass === "" ? "" : `${storageClass} `;
+  lines.push(`${sc}${retType} ${fn.cName}(${fnParamList(fn)}) {`);
   const paramNames = new Set(fn.cParams);
   // Pre-declare each declared output slot (skip any that share a
   // C-name with a param — a vacuous shadowing case kept for symmetry

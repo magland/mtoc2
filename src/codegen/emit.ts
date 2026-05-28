@@ -74,6 +74,15 @@ export interface EmitOptions {
    *  `getUserBuiltin`. Optional — vitest unit tests that don't drive
    *  through a workspace can omit it. */
   workspace?: import("./runtime.js").WorkspaceLike;
+  /** JIT-mode emit. When set, the cName of a single user-function spec
+   *  to expose at module scope (no `static` qualifier so `dlsym` /
+   *  koffi can resolve it after `dlopen`). Disables the `int main()`
+   *  emission — the module becomes a `.so` consumers load and call
+   *  into directly. Requires `prog.topLevelStmts` to be empty and
+   *  `prog.functions` to contain the named spec; every spec
+   *  transitively called by the entry must also be in
+   *  `prog.functions` so internal calls resolve. */
+  exposeSpec?: string;
 }
 
 export function emitProgram(prog: IRProgram, opts: EmitOptions = {}): string {
@@ -81,6 +90,19 @@ export function emitProgram(prog: IRProgram, opts: EmitOptions = {}): string {
   const threads = opts.threads;
   const state = newRuntimeState(opts.workspace);
   const userParts: string[] = [];
+
+  if (opts.exposeSpec !== undefined) {
+    if (prog.topLevelStmts.length > 0) {
+      throw new Error(
+        "emitProgram: 'exposeSpec' is incompatible with non-empty 'topLevelStmts'"
+      );
+    }
+    if (!prog.functions.has(opts.exposeSpec)) {
+      throw new Error(
+        `emitProgram: 'exposeSpec' references unknown spec '${opts.exposeSpec}'`
+      );
+    }
+  }
 
   // Struct / class / handle typedefs — one per distinct shape.
   // Emitted ahead of forward decls so user code can refer to them,
@@ -105,16 +127,68 @@ export function emitProgram(prog: IRProgram, opts: EmitOptions = {}): string {
   }
   if (namedTypedefs.length > 0) userParts.push("");
 
-  // Forward declarations.
+  // Forward declarations. The exposed spec (when `exposeSpec` is set)
+  // gets `extern` linkage so `dlsym` / koffi can resolve it; everything
+  // else stays `static`.
   for (const fn of prog.functions.values()) {
-    userParts.push(`static ${fnRetType(fn)} ${fn.cName}(${fnParamList(fn)});`);
+    const sc = fn.cName === opts.exposeSpec ? "" : "static ";
+    userParts.push(`${sc}${fnRetType(fn)} ${fn.cName}(${fnParamList(fn)});`);
   }
   if (prog.functions.size > 0) userParts.push("");
 
   // Function bodies.
   for (const fn of prog.functions.values()) {
-    userParts.push(emitFunction(fn, state));
+    const sc = fn.cName === opts.exposeSpec ? "" : "static";
+    userParts.push(emitFunction(fn, state, sc));
     userParts.push("");
+  }
+
+  // JIT mode (`exposeSpec` set): skip the `int main()` emission. The
+  // module is a `.so` the host loads + calls into directly.
+  if (opts.exposeSpec !== undefined) {
+    // Headers: BASE_HEADERS ∪ activated-snippet headers, deduped.
+    const headers = new Set<string>(BASE_HEADERS);
+    for (const h of collectRuntimeHeaders(state)) headers.add(h);
+
+    const out: string[] = [];
+    for (const h of headers) out.push(`#include ${h}`);
+    out.push("");
+
+    if (state.active.size > 0) {
+      out.push(
+        includeRuntime ? renderRuntimeBodies(state) : runtimePlaceholder(state)
+      );
+    }
+
+    out.push("#ifdef I");
+    out.push("#undef I");
+    out.push("#endif");
+    out.push("#ifdef complex");
+    out.push("#undef complex");
+    out.push("#endif");
+    out.push("#ifdef imaginary");
+    out.push("#undef imaginary");
+    out.push("#endif");
+    out.push("");
+
+    out.push(...userParts);
+
+    // Allocator helpers exported as part of the .so so a JIT host
+    // (koffi) can resolve them by name without separately loading
+    // libc. `mtoc2_alloc` is used by the runtime helpers internally;
+    // `mtoc2_jit_free` is the host-side counterpart for releasing
+    // tensor buffers returned across the FFI. Both go through the
+    // same malloc/free in libc that mtoc2's emitted code already
+    // depends on transitively, so there's no allocator-mismatch
+    // risk.
+    out.push("/* JIT-host allocator wrapper. The .so already pulls in");
+    out.push(" * libc's free transitively via <stdlib.h>; this wrapper");
+    out.push(" * exposes it through the .so's own symbol table so the");
+    out.push(" * host's koffi binding doesn't need to dlopen libc");
+    out.push(" * separately. */");
+    out.push("void mtoc2_jit_free(void *p) { free(p); }");
+    out.push("");
+    return out.join("\n");
   }
 
   // Main.
