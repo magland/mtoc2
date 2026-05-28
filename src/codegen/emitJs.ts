@@ -64,12 +64,20 @@ export interface EmitJsOptions {
    *  the emitted module. Default true. When false the placeholder
    *  comment lands instead — useful for the IDE preview. */
   includeRuntime?: boolean;
+  /** JIT-mode emit. When set, the cName of a single user-function spec
+   *  to expose: the outer module returns a `($h) => specFn` factory
+   *  instead of the script-style `function run($h)` wrapper. Requires
+   *  `prog.topLevelStmts` to be empty and `prog.functions` to contain
+   *  the named spec (which must be reachable along with any specs it
+   *  transitively calls). Used by the numbl JIT bridge. */
+  exposeSpec?: string;
 }
 
 export interface EmitJsResult {
-  /** Full module source — runtime snippets, user-function defs,
-   *  `function run($h)`, trailing `return run;`. Ready for
-   *  `new Function(...)`. */
+  /** Full module source — runtime snippets, user-function defs, and
+   *  either `function run($h)` + `return run;` (script mode) or
+   *  `return ($h) => specFn;` (when `opts.exposeSpec` is set). Ready
+   *  for `new Function(...)`. */
   source: string;
   /** Names of every runtime snippet activated during emit (debug aid;
    *  also useful to gate dependency wiring in tests). */
@@ -85,6 +93,19 @@ export function emitJsProgram(
   const state = newRuntimeState(opts.workspace);
   const includeRuntime = opts.includeRuntime ?? true;
 
+  if (opts.exposeSpec !== undefined) {
+    if (prog.topLevelStmts.length > 0) {
+      throw new Error(
+        "emitJsProgram: 'exposeSpec' is incompatible with non-empty 'topLevelStmts'"
+      );
+    }
+    if (!prog.functions.has(opts.exposeSpec)) {
+      throw new Error(
+        `emitJsProgram: 'exposeSpec' references unknown spec '${opts.exposeSpec}'`
+      );
+    }
+  }
+
   // Function bodies are emitted first so call sites in `main`
   // reference already-defined functions. (JS hoisting would make this
   // unnecessary, but the resulting source stays human-readable.)
@@ -94,17 +115,26 @@ export function emitJsProgram(
     userParts.push("");
   }
 
-  // Top-level wrapped in `function run($h)`.
-  const topLines: string[] = [];
-  topLines.push("function run($h) {");
-  topLines.push("  globalThis.$write = $h.write;");
-  const locals = collectAssignedLocals(prog.topLevelStmts);
-  if (locals.length > 0) {
-    topLines.push(`  let ${locals.join(", ")};`);
+  // Outer wrapper. Script mode (default) emits `function run($h) { ... top-level ... }`
+  // and `return run;`. JIT mode (`opts.exposeSpec` set) emits a factory that
+  // binds `$h.write` and returns the named spec function directly.
+  const wrapperLines: string[] = [];
+  if (opts.exposeSpec !== undefined) {
+    wrapperLines.push(
+      `return function ($h) { globalThis.$write = $h.write; return ${opts.exposeSpec}; };`
+    );
+  } else {
+    wrapperLines.push("function run($h) {");
+    wrapperLines.push("  globalThis.$write = $h.write;");
+    const locals = collectAssignedLocals(prog.topLevelStmts);
+    if (locals.length > 0) {
+      wrapperLines.push(`  let ${locals.join(", ")};`);
+    }
+    const bodyLines = emitBody(prog.topLevelStmts, "  ", state);
+    if (bodyLines.length > 0) wrapperLines.push(bodyLines);
+    wrapperLines.push("}");
+    wrapperLines.push("return run;");
   }
-  const bodyLines = emitBody(prog.topLevelStmts, "  ", state);
-  if (bodyLines.length > 0) topLines.push(bodyLines);
-  topLines.push("}");
 
   const out: string[] = [];
   if (state.active.size > 0) {
@@ -114,8 +144,7 @@ export function emitJsProgram(
     out.push("");
   }
   out.push(...userParts);
-  out.push(...topLines);
-  out.push("return run;");
+  out.push(...wrapperLines);
 
   return {
     source: out.join("\n"),
