@@ -17,6 +17,7 @@ import { Workspace } from "../src/workspace/workspace.js";
 import { Lowerer } from "../src/lowering/lower.js";
 import { compileSpec } from "../src/jit/compileSpec.js";
 import { scalarDouble } from "../src/lowering/types.js";
+import { LoweringContext } from "../src/numbl/index.js";
 
 type FuncStmt = Extract<Stmt, { type: "Function" }>;
 
@@ -113,6 +114,44 @@ describe("compileSpec", () => {
     });
     expect(r1.cName).toBe(r2.cName);
     expect(lowerer.specializations.size).toBe(1);
+  });
+
+  test("fromExistingContext: shared LoweringContext compiles + runs", () => {
+    // Simulate numbl's interpreter having pre-populated a
+    // LoweringContext: parse, cache AST, register local function,
+    // register (empty) workspace, build function index. Then hand the
+    // ctx to mtoc2 via fromExistingContext and verify compileSpec
+    // works without mtoc2 trying to re-register anything.
+    const source = "function y = dbl(x)\n  y = x + x;\nend\n";
+    const ast = parseMFile(source, "dbl.m");
+    const ctx = new LoweringContext("", "dbl.m");
+    ctx.fileASTCache.set("dbl.m", ast);
+    for (const s of ast.body) {
+      if (s.type === "Function") ctx.registerLocalFunctionAST(s);
+    }
+    ctx.registerWorkspaceFiles([]);
+    ctx.buildFunctionIndex();
+
+    const ws = Workspace.fromExistingContext(ctx, "dbl.m", [
+      { name: "dbl.m", source, ast },
+    ]);
+    const lowerer = new Lowerer(ws);
+    const decl = ast.body.find(
+      (s): s is FuncStmt => s.type === "Function"
+    )!;
+    const { source: jsSource } = compileSpec({
+      workspace: ws,
+      lowerer,
+      funcDecl: decl,
+      argTypes: [scalarDouble("unknown")],
+      nargout: 1,
+    });
+    const fn = instantiate(jsSource) as (x: number) => number;
+    expect(fn(4)).toBe(8);
+    expect(fn(-7)).toBe(-14);
+    // The ctx passed in is the same one the workspace holds — no
+    // duplicate ctx was constructed.
+    expect(ws.ctx).toBe(ctx);
   });
 
   test("transitively-called helper specs are included in the emitted module", () => {

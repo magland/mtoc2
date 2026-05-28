@@ -135,8 +135,10 @@ export class Workspace {
 
   /** Numbl resolution context. Holds the workspace registry
    *  (`filesByFuncName`, `classesByName`, `localClassesByName`) and
-   *  the `FunctionIndex` used by `resolveFunction`. */
-  readonly ctx: LoweringContext;
+   *  the `FunctionIndex` used by `resolveFunction`. Settable so the
+   *  `fromExistingContext` JIT factory can replace the constructor-
+   *  built default with a caller-owned context. */
+  ctx: LoweringContext;
 
   /** Resolved class registry — populated by `finalize()` by walking
    *  every classdef numbl knows about (workspace + local) and
@@ -163,11 +165,44 @@ export class Workspace {
 
   private finalized = false;
 
+  /** Set by `fromExistingContext` to indicate that `this.ctx` was
+   *  populated by the caller (numbl's interpreter, in the JIT case)
+   *  and re-registering its local functions / classes / workspace
+   *  files in `finalize()` would duplicate work and possibly error.
+   *  The mtoc2-side phases (class registry, `.mtoc2.js` loader) still
+   *  run regardless — those are mtoc2-only bookkeeping. */
+  private skipCtxRegistration = false;
+
   constructor(mainFile: string, searchPaths: ReadonlyArray<string> = []) {
     this.mainFile = mainFile;
     this.searchPaths = searchPaths;
     this.ctx = new LoweringContext("", mainFile);
     this.ctx.registry.searchPaths = [...searchPaths];
+  }
+
+  /** Build a Workspace that wraps an existing `LoweringContext`. The
+   *  caller's `ctx` must already have file ASTs cached, local
+   *  functions and classes for the main file registered, workspace
+   *  files registered, and the function index built — typically
+   *  because a host runtime (e.g. numbl's interpreter) has been
+   *  driving the same context. Mtoc2 still runs its own class-registry
+   *  + `.mtoc2.js` loader bookkeeping on top.
+   *
+   *  Used by the numbl JIT bridge so a single `LoweringContext` is
+   *  shared between numbl's interpreter and mtoc2's JIT compile path
+   *  per session. */
+  static fromExistingContext(
+    ctx: LoweringContext,
+    mainFile: string,
+    files: Iterable<WorkspaceFile>
+  ): Workspace {
+    const ws = new Workspace(mainFile, []);
+    ws.ctx = ctx;
+    ws.skipCtxRegistration = true;
+    for (const f of files) {
+      ws.files.set(f.name, f);
+    }
+    return ws;
   }
 
   /** Register a file by name.
@@ -206,32 +241,34 @@ export class Workspace {
   finalize(): void {
     if (this.finalized) return;
 
-    // Register top-level functions and classdefs from the MAIN file.
-    // These have a different visibility rule (local-to-main, not
-    // callable from siblings) than workspace files. Workspace files
-    // are registered en masse below — `registerWorkspaceFiles`
-    // detects classdef-headed files via a source-text sniff.
-    const mainEntry = this.files.get(this.mainFile);
-    if (mainEntry?.ast) {
-      for (const s of mainEntry.ast.body) {
-        if (s.type === "Function") {
-          this.ctx.registerLocalFunctionAST(s);
-        } else if (s.type === "ClassDef") {
-          this.ctx.registerLocalClass(s);
+    if (!this.skipCtxRegistration) {
+      // Register top-level functions and classdefs from the MAIN file.
+      // These have a different visibility rule (local-to-main, not
+      // callable from siblings) than workspace files. Workspace files
+      // are registered en masse below — `registerWorkspaceFiles`
+      // detects classdef-headed files via a source-text sniff.
+      const mainEntry = this.files.get(this.mainFile);
+      if (mainEntry?.ast) {
+        for (const s of mainEntry.ast.body) {
+          if (s.type === "Function") {
+            this.ctx.registerLocalFunctionAST(s);
+          } else if (s.type === "ClassDef") {
+            this.ctx.registerLocalClass(s);
+          }
         }
       }
-    }
 
-    // Workspace files = everything except the main file. `.c`/`.h`
-    // sibling files are kept on `this.files` for the user-function
-    // loader to read, but they're not workspace functions and never
-    // reach numbl's resolver.
-    const wsFiles = [...this.files.values()]
-      .filter(f => f.name !== this.mainFile)
-      .filter(f => !f.name.endsWith(".c") && !f.name.endsWith(".h"))
-      .map(f => ({ name: f.name, source: f.source }));
-    this.ctx.registerWorkspaceFiles(wsFiles);
-    this.ctx.buildFunctionIndex();
+      // Workspace files = everything except the main file. `.c`/`.h`
+      // sibling files are kept on `this.files` for the user-function
+      // loader to read, but they're not workspace functions and never
+      // reach numbl's resolver.
+      const wsFiles = [...this.files.values()]
+        .filter(f => f.name !== this.mainFile)
+        .filter(f => !f.name.endsWith(".c") && !f.name.endsWith(".h"))
+        .map(f => ({ name: f.name, source: f.source }));
+      this.ctx.registerWorkspaceFiles(wsFiles);
+      this.ctx.buildFunctionIndex();
+    }
 
     // Build the mtoc2-shaped class registry from every classdef
     // numbl knows about. We re-walk the parsed AST (numbl's ClassInfo
