@@ -145,6 +145,19 @@ export class Workspace {
    *  applying mtoc2's validation/property-type inference. */
   classes: Map<string, ClassRegistration> = new Map();
 
+  /** Classes that numbl knows about but mtoc2's `registerClassDef`
+   *  rejected (e.g. inheritance, unsupported attributes). Only
+   *  populated in `fromExistingContext` (JIT bridge) mode — the
+   *  standalone path still fails finalize() on the first bad class.
+   *
+   *  `isClass(name)` returns `true` for these so call-site dispatch
+   *  doesn't get steered into a wrong code path (treating a class
+   *  reference as a function call). `requireClass(name)` re-throws
+   *  the saved `UnsupportedConstruct` at the actual use site, which
+   *  the JIT bridge catches as a decline and falls back to the
+   *  interpreter for that call. */
+  failedClassValidations: Map<string, UnsupportedConstruct> = new Map();
+
   /** Workspace-scoped `Builtin` objects loaded from `.mtoc2.js` files.
    *  Keyed by source-level function name (matches numbl's
    *  `mtoc2UserFunctionsByName` keys). Populated lazily by `finalize`. */
@@ -282,9 +295,35 @@ export class Workspace {
     // `ctx.fileASTCache`). We pluck out each file's primary Function
     // statement and feed them into `registerClassDef` so they join
     // the same validation pipeline as in-body methods.
+    //
+    // When `skipCtxRegistration` is set (JIT bridge mode), a class
+    // mtoc2 can't validate is recorded in `failedClassValidations`
+    // instead of `classes`. The saved error re-throws at use time
+    // via `requireClass(name)` — `isClass(name)` still returns true
+    // for these names so name-resolution sites don't take a wrong
+    // branch (e.g. treating a class constructor call as a function
+    // lookup). The standalone path still aborts here on the first
+    // bad class; that's the explicit "fail fast on unsupported
+    // construct" contract for a program mtoc2 is being asked to
+    // translate end-to-end.
+    const registerOrDefer = (
+      name: string,
+      register: () => ClassRegistration
+    ): void => {
+      if (this.skipCtxRegistration) {
+        try {
+          this.classes.set(name, register());
+        } catch (e) {
+          if (!(e instanceof UnsupportedConstruct)) throw e;
+          this.failedClassValidations.set(name, e);
+        }
+      } else {
+        this.classes.set(name, register());
+      }
+    };
+
     for (const [name, info] of this.ctx.registry.classesByName) {
-      this.classes.set(
-        name,
+      registerOrDefer(name, () =>
         registerClassDef(
           info.ast,
           info.fileName,
@@ -293,7 +332,7 @@ export class Workspace {
       );
     }
     for (const [name, info] of this.ctx.registry.localClassesByName) {
-      if (this.classes.has(name)) {
+      if (this.classes.has(name) || this.failedClassValidations.has(name)) {
         // A workspace file already registered this name as a class;
         // a local class with the same name is a conflict.
         throw new UnsupportedConstruct(
@@ -301,7 +340,7 @@ export class Workspace {
           info.ast.span
         );
       }
-      this.classes.set(name, registerClassDef(info.ast, info.fileName));
+      registerOrDefer(name, () => registerClassDef(info.ast, info.fileName));
     }
 
     // Reject classes that shadow a registered workspace function or
@@ -466,7 +505,18 @@ export class Workspace {
    *  lowerer to route `Foo(args)` to the constructor path and to
    *  detect `ClassName.staticMethod(args)` against an Ident base. */
   isClass(name: string): boolean {
-    return this.classes.has(name);
+    return this.classes.has(name) || this.failedClassValidations.has(name);
+  }
+
+  /** Like `classes.get(name)`, but re-throws the saved
+   *  `UnsupportedConstruct` if the class was registered in
+   *  `failedClassValidations` (JIT bridge mode). Use this at sites
+   *  that would otherwise do `classes.get(name)!` and dereference
+   *  `undefined`. */
+  requireClass(name: string): ClassRegistration | undefined {
+    const failed = this.failedClassValidations.get(name);
+    if (failed) throw failed;
+    return this.classes.get(name);
   }
 
   /** Resolve a call site to a single target. Wraps numbl's

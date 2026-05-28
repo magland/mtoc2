@@ -76,12 +76,14 @@ export function lowerFuncCall(
     return dispatchHandleCall.call(this, e.name, envEntry, e.args, e.span);
   }
   if (envEntry === undefined && this.workspace.isClass(e.name)) {
-    return lowerClassConstructorCall.call(
-      this,
-      this.workspace.classes.get(e.name)!,
-      e.args,
-      e.span
-    );
+    const reg = this.workspace.requireClass(e.name);
+    if (reg === undefined) {
+      throw new UnsupportedConstruct(
+        `internal: class '${e.name}' missing from workspace registry`,
+        e.span
+      );
+    }
+    return lowerClassConstructorCall.call(this, reg, e.args, e.span);
   }
   if (envEntry !== undefined) {
     // MATLAB's "workspace shadows functions" rule: `v(i)` reads as an

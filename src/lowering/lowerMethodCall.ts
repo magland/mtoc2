@@ -47,7 +47,13 @@ export function lowerMethodCall(
     const qname = `${dottedBase}.${e.name}`;
     // `pkg.Foo(args)` — packaged class constructor.
     if (this.workspace.isClass(qname)) {
-      const reg = this.workspace.classes.get(qname)!;
+      const reg = this.workspace.requireClass(qname);
+      if (reg === undefined) {
+        throw new UnsupportedConstruct(
+          `internal: class '${qname}' missing from workspace registry`,
+          e.span
+        );
+      }
       return lowerClassConstructorCall.call(this, reg, e.args, e.span);
     }
     // `ClassName.staticMethod(args)` where `ClassName` is either a
