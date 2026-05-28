@@ -71,24 +71,38 @@ export function lowerIndexSliceStore(
       }
     }
   }
-  // Auto-grow check: a Scalar slot with a statically-known value that
-  // exceeds the base's static dim would auto-extend the tensor in
-  // numbl. mtoc2 emits code against the pre-write static shape and
-  // can't reallocate the buffer mid-spec, so decline and let the
-  // interpreter handle the resize.
+  // Auto-grow guard: a Scalar slot that writes past the base's current
+  // dim would auto-extend the tensor in numbl. mtoc2 emits code against
+  // the pre-write static shape and can't reallocate the buffer
+  // mid-spec, so any Scalar slot whose value cannot be statically
+  // proven to lie in [1, dim] must decline — otherwise the codegen
+  // would silently write past the buffer without updating the tensor's
+  // shape (see lege.pols's `pols(:, k+2) = ...` pattern in chunkie).
+  //
+  // "Provable safety" requires both endpoints to be statically known:
+  // the slot value via `t.exact`, and the dim via `dim.kind === "exact"`.
+  // Anything else (runtime slot value, unknown dim) declines so the
+  // interpreter handles the loop with full MATLAB grow semantics.
   if (!isSingleSlot && r.baseTy.kind === "Numeric") {
     for (let i = 0; i < slots.length; i++) {
       const slot = slots[i];
       if (slot.kind !== "Scalar") continue;
-      const t = slot.expr.ty;
-      if (t.kind !== "Numeric" || typeof t.exact !== "number") continue;
       const dim = r.baseTy.dims[i];
-      if (dim === undefined || dim.kind !== "exact") continue;
-      if (Math.round(t.exact) > dim.value) {
+      const t = slot.expr.ty;
+      const dimKnown = dim !== undefined && dim.kind === "exact";
+      const valKnown = t.kind === "Numeric" && typeof t.exact === "number";
+      const provablyInBounds =
+        dimKnown &&
+        valKnown &&
+        Math.round((t as { exact: number }).exact) >= 1 &&
+        Math.round((t as { exact: number }).exact) <=
+          (dim as { value: number }).value;
+      if (!provablyInBounds) {
         throw new UnsupportedConstruct(
-          `indexed write to '${displayName}' at position ${Math.round(t.exact)} ` +
-            `in axis ${i + 1} would auto-grow the tensor ` +
-            `(static size ${dim.value}); auto-grow is not modeled in the JIT`,
+          `indexed write to '${displayName}' at axis ${i + 1}: cannot ` +
+            `statically prove the index stays within the tensor's bounds; ` +
+            `would auto-grow / OOB in MATLAB, but auto-grow is not modeled ` +
+            `in the JIT`,
           slot.span
         );
       }
