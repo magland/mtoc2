@@ -391,6 +391,61 @@ export function specializeUserFunction(
       }
     }
 
+    // Reject any function-output whose final C storage can't be
+    // expressed as a single C variable. Two distinct shapes trigger
+    // this:
+    //
+    //  (a) `recordAssignment` split the output's binding mid-body
+    //      because two assignments had storage-incompatible types
+    //      (`s = 0; ... s = a_tensor;` at top level). The split moves
+    //      the post-split writes to `_mtoc2_<o>__v<N>` but the
+    //      function's `cOutputs[i]` is locked at the canonical name,
+    //      so the return path reads the un-split slot — which was
+    //      declared with the post-split type but written with the
+    //      pre-split (incompatible) type, yielding a C compile error.
+    //
+    //  (b) The output's final lattice type unifies to Unknown — most
+    //      commonly when an If or For-merge unifies storage-distinct
+    //      types (real-tensor vs complex-tensor, scalar vs tensor in
+    //      a branch the For-merge folds with envBefore, ...). The C
+    //      ABI has no slot for Unknown, so the emitted signature
+    //      would declare `double *_mtoc2_o<i>` and the body would
+    //      write a tensor through it.
+    //
+    // Both shapes are correctness bugs in the C emit. Declining at the
+    // specialization boundary as `UnsupportedConstruct` routes the
+    // caller back to its interpreter; the JS-emit JIT also declines
+    // (its dynamic-typed output happens to work in some shapes, but
+    // the split case has return-value-undefined in the non-base path
+    // of a recursive function, so declining is correct there too).
+    for (let i = 0; i < effectiveOutputs.length; i++) {
+      const o = effectiveOutputs[i];
+      const entry = this.env.get(o);
+      // Missing entries (output declared but never assigned) are
+      // already rejected inside `lowerBodyOnce` with a TypeError, so
+      // `entry` is defined here. Defensive guard:
+      if (entry === undefined) continue;
+      const canonicalCName = cIdentForUserName(o);
+      if (entry.cName !== canonicalCName) {
+        throw new UnsupportedConstruct(
+          `function '${decl.name}': output '${o}' was reassigned with an ` +
+            `incompatible C storage type partway through the body — the ` +
+            `function output cannot be represented as a single C variable.`,
+          errSpan
+        );
+      }
+      if (outputTypes[i].kind === "Unknown") {
+        throw new UnsupportedConstruct(
+          `function '${decl.name}': output '${o}' resolves to an unknown ` +
+            `type at function exit — usually because the body unifies two ` +
+            `storage-distinct values for it (e.g. a real and a complex ` +
+            `tensor, or a scalar and a tensor). Cannot represent this in ` +
+            `the C/JS ABI as a single output slot.`,
+          errSpan
+        );
+      }
+    }
+
     const out: IRFunc = {
       ...placeholder,
       body,

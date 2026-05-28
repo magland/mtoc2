@@ -151,6 +151,13 @@ export function emitProgram(prog: IRProgram, opts: EmitOptions = {}): string {
     for (const h of collectRuntimeHeaders(state)) headers.add(h);
 
     const out: string[] = [];
+    // Feature-test macro: must precede every <...> include so glibc
+    // exposes POSIX.1b extensions (clock_gettime / CLOCK_MONOTONIC,
+    // used by tictoc.h). Hosts that compile mtoc2-emitted C under a
+    // strict dialect (`-std=c11`, not `-std=gnu11`) need this to see
+    // the POSIX prototypes inside <time.h>.
+    out.push("#define _POSIX_C_SOURCE 199309L");
+    out.push("");
     for (const h of headers) out.push(`#include ${h}`);
     out.push("");
 
@@ -258,6 +265,13 @@ export function emitProgram(prog: IRProgram, opts: EmitOptions = {}): string {
   if (typeof threads === "number" && threads > 1) headers.add("<omp.h>");
 
   const out: string[] = [];
+  // Feature-test macro: must precede every <...> include so glibc
+  // exposes POSIX.1b extensions (clock_gettime / CLOCK_MONOTONIC,
+  // used by tictoc.h). Hosts that compile mtoc2-emitted C under a
+  // strict dialect (`-std=c11`, not `-std=gnu11`) need this to see
+  // the POSIX prototypes inside <time.h>.
+  out.push("#define _POSIX_C_SOURCE 199309L");
+  out.push("");
   for (const h of headers) out.push(`#include ${h}`);
   out.push("");
 

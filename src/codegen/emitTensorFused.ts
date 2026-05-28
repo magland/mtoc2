@@ -8,11 +8,17 @@
  *     // c = a + b;     emits:
  *     {
  *       mtoc2_tensor_t _r = mtoc2_tensor_alloc_nd(a.ndim, a.dims);
- *       long n = 1; for (int i = 0; i < _r.ndim; i++) n *= _r.dims[i];
+ *       long _mtoc2_n = 1; for (int _mtoc2_i = 0; _mtoc2_i < _r.ndim; _mtoc2_i++) _mtoc2_n *= _r.dims[_mtoc2_i];
  *       MTOC2_OMP_PARFOR_N
- *       for (long i = 0; i < n; i++) _r.real[i] = (a.real[i] + b.real[i]);
+ *       for (long _mtoc2_i = 0; _mtoc2_i < _mtoc2_n; _mtoc2_i++) _r.real[_mtoc2_i] = (a.real[_mtoc2_i] + b.real[_mtoc2_i]);
  *       mtoc2_tensor_assign(&c, _r);
  *     }
+ *
+ * The local element-count + iter variables use the `_mtoc2_` reserved
+ * prefix so they can't collide with user-scope identifiers (`n`, `i`
+ * are common single-letter names in MATLAB and would shadow the
+ * function param / local on the enclosing block if we declared them
+ * with their natural names).
  *
  * For a single-Binary RHS this is equivalent (post-`-O3`) to the
  * existing `mtoc2_tensor_assign(&c, mtoc2_tensor_plus_tt(a, b))`
@@ -188,18 +194,19 @@ function walkExpr(e: IRExpr, visit: (sub: IRExpr) => void): void {
 }
 
 /** Render the per-slot C expression for `e`. Multi-element Vars
- *  become `<cName>.real[i]`; scalar Vars stay as their bare cName;
- *  NumLits render as their double form; Binary/Unary/Call routes
- *  through each builtin's `perSlotC`. The fixed iter variable name
- *  `i` matches the outer loop emitted by
- *  `emitTensorAssignFused`. */
+ *  become `<cName>.real[_mtoc2_i]`; scalar Vars stay as their bare
+ *  cName; NumLits render as their double form; Binary/Unary/Call
+ *  routes through each builtin's `perSlotC`. The fixed iter variable
+ *  name `_mtoc2_i` matches the outer loop emitted by
+ *  `emitTensorAssignFused`; the `_mtoc2_` reserved prefix is used so
+ *  the iter doesn't shadow a user-named loop variable like `i`. */
 function emitPerSlotExpr(e: IRExpr, state: RuntimeState): string {
   switch (e.kind) {
     case "NumLit":
       return formatDouble(e.value);
     case "Var":
       if (isNumeric(e.ty) && isMultiElement(e.ty)) {
-        return `${e.cName}.real[i]`;
+        return `${e.cName}.real[_mtoc2_i]`;
       }
       return e.cName;
     case "Binary": {
@@ -287,13 +294,21 @@ export function emitTensorAssignFused(
   useRuntimeByName(state, "mtoc2_tensor_assign");
 
   const slot = emitPerSlotExpr(s.expr, state);
+  // Use `_mtoc2_`-reserved local names so a user identifier called `n`
+  // or `i` (legitimate in MATLAB — `i` is also the imaginary unit
+  // fallback) doesn't get shadowed by the inlined loop's count /
+  // iter. The slot expression embeds raw operand reads (e.g.
+  // `_t1.real[_mtoc2_i] * n`); if `n` were a local here it would
+  // bind to the loop count rather than the user's function parameter,
+  // silently mis-computing every elementwise op against a user-named
+  // scalar.
   const lines = [
     `${indent}{`,
     `${indent}  mtoc2_tensor_t _r = mtoc2_tensor_alloc_nd(${shapeSrcCName}.ndim, ${shapeSrcCName}.dims);`,
-    `${indent}  long n = 1;`,
-    `${indent}  for (int i = 0; i < _r.ndim; i++) n *= _r.dims[i];`,
+    `${indent}  long _mtoc2_n = 1;`,
+    `${indent}  for (int _mtoc2_i = 0; _mtoc2_i < _r.ndim; _mtoc2_i++) _mtoc2_n *= _r.dims[_mtoc2_i];`,
     `${indent}  MTOC2_OMP_PARFOR_N`,
-    `${indent}  for (long i = 0; i < n; i++) _r.real[i] = ${slot};`,
+    `${indent}  for (long _mtoc2_i = 0; _mtoc2_i < _mtoc2_n; _mtoc2_i++) _r.real[_mtoc2_i] = ${slot};`,
     `${indent}  mtoc2_tensor_assign(&${s.cName}, _r);`,
     `${indent}}`,
   ];
