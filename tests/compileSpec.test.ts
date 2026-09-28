@@ -154,6 +154,34 @@ describe("compileSpec", () => {
     expect(ws.ctx).toBe(ctx);
   });
 
+  test("user identifier that's a JS reserved word survives JS emit", () => {
+    // `in` is a legal numbl/MATLAB identifier but a JS keyword. The
+    // emit path used to pass user names through unchanged (only C
+    // keywords were escaped), so a parameter named `in` produced
+    // `function fn(in) { ... }` and blew up at `new Function(source)()`
+    // with `SyntaxError: Unexpected token 'in'`. Chunkie's
+    // `chunkerinterior.m` (`function [in] = chunkerinterior(...)`) hit
+    // this in the wild. Repro the smallest shape: a function with `in`
+    // as both param and output.
+    const { ws, lowerer, decl } = setup(
+      "function in = pass(in)\n  in = in + 1;\nend\n",
+      "pass.m"
+    );
+    const { source } = compileSpec({
+      workspace: ws,
+      lowerer,
+      funcDecl: decl,
+      argTypes: [scalarDouble("unknown")],
+      nargout: 1,
+    });
+    // The bug surface was the `new Function(source)()` call inside
+    // `instantiate`, not the lowering itself — so the test only needs
+    // to confirm the emitted module evaluates and runs end-to-end.
+    const fn = instantiate(source) as (x: number) => number;
+    expect(fn(5)).toBe(6);
+    expect(fn(-1)).toBe(0);
+  });
+
   test("transitively-called helper specs are included in the emitted module", () => {
     // `outer` calls `inner` — lowering populates both specs. The emit
     // must include `inner` so the call site in `outer`'s body resolves.

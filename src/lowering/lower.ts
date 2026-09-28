@@ -1874,13 +1874,17 @@ export class Lowerer {
 
 // ── Helpers (free functions) ────────────────────────────────────────────
 
-/** C reserved words that are also legal numbl identifiers. mtoc2 maps
- *  every user variable / param name through `cIdentForUserName` at
- *  declaration time so a variable named `struct`, `for`, `int`, etc.
- *  doesn't collide with a C keyword on the emit side. The keyword
- *  list mirrors numbl's C-JIT codegen. `mtoc2_` is reserved for the
- *  translator's own synthetic names. */
+/** Reserved words that are legal numbl identifiers but would collide
+ *  with a C or JS keyword on the emit side. mtoc2 maps every user
+ *  variable / param name through `cIdentForUserName` at declaration
+ *  time so the same `cName` is safe in BOTH the C-AOT and JS-AOT emit
+ *  paths (which share the cName — see `emitJs.ts` vs `emit.ts`). A
+ *  variable named `struct` (C keyword) or `in` (JS keyword) becomes
+ *  `v_struct` / `v_in` and survives `new Function(source)()` plus the
+ *  C compiler. `mtoc2_` is reserved for the translator's own synthetic
+ *  names. */
 const C_RESERVED_NAMES: ReadonlySet<string> = new Set([
+  // ── C keywords ──────────────────────────────────────────────────────
   "auto",
   "break",
   "case",
@@ -1920,13 +1924,57 @@ const C_RESERVED_NAMES: ReadonlySet<string> = new Set([
   "_Bool",
   "_Complex",
   "_Imaginary",
+  // ── JS-only keywords / reserved words ───────────────────────────────
+  // The JS emit path uses the same cName, so any reserved word that
+  // could appear as a user identifier needs escaping too. `in` is the
+  // one that bit us in practice (chunkerinterior.m has `function [in]
+  // = chunkerinterior(...)`); the rest are listed for completeness so
+  // we don't regress one keyword at a time.
+  "async",
+  "await",
+  "catch",
+  "class",
+  "debugger",
+  "delete",
+  "export",
+  "extends",
+  "false",
+  "finally",
+  "function",
+  "implements",
+  "import",
+  "in",
+  "instanceof",
+  "interface",
+  "let",
+  "new",
+  "null",
+  "package",
+  "private",
+  "protected",
+  "public",
+  "super",
+  "this",
+  "throw",
+  "true",
+  "try",
+  "typeof",
+  "var",
+  "with",
+  "yield",
+  // Magic JS bindings: not reserved words per se, but using either as
+  // a `let`-declared local would shadow the function-scope `arguments`
+  // object / blow up `eval`-bound calls. Cheap to escape.
+  "arguments",
+  "eval",
 ]);
 
-/** Map a user-source variable name to a safe C identifier. C keywords
- *  get a `v_` prefix; other names pass through unchanged so emitted C
- *  remains readable for the common case. The numbl parser already
- *  rejects identifiers starting with `_`, so a user `for` only collides
- *  with the C keyword (not with `v_for` from any other source). */
+/** Map a user-source variable name to a safe C / JS identifier.
+ *  Reserved words get a `v_` prefix; other names pass through unchanged
+ *  so emitted code remains readable for the common case. The numbl
+ *  parser already rejects identifiers starting with `_`, so a user
+ *  `for` only collides with the keyword (not with `v_for` from any
+ *  other source). */
 export function cIdentForUserName(name: string): string {
   if (C_RESERVED_NAMES.has(name)) return `v_${name}`;
   return name;
